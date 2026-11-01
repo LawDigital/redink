@@ -137,6 +137,8 @@ Partial Public Class ThisAddIn
         Public Property FileObject As String
         Public Property ChatId As Integer = 1
         Public Property ScheduledTaskId As String = ""
+        Public Property TerminalResultText As System.String = System.String.Empty
+        Public Property TerminalResultHtml As System.String = System.String.Empty
 
         ''' <summary>Latest user-facing progress note for the running job (local chat only).</summary>
         Public Property StatusMessage As String = ""
@@ -1315,6 +1317,20 @@ Partial Public Class ThisAddIn
         Public PreAgentModelKey As System.String = ""
         Public PreAgentUseSecondApi As System.Boolean = False
         Public AgentModelActive As System.Boolean = False
+
+        ' Local Chat cross-run continuation. The session id is stable for the lifetime
+        ' of one chat and is rotated by Clear. Pending* describes only the one tooling
+        ' run that may currently be resumed; it is cleared by a new non-retry request.
+        Public ContinuationSessionId As System.String = ""
+        Public PendingContinuationWorkflowId As System.String = ""
+        Public PendingContinuationWasAgentMode As System.Boolean = False
+        Public PendingContinuationUseToolTrigger As System.Boolean = False
+        Public PendingContinuationUseSecondApi As System.Boolean = False
+        Public PendingContinuationSelectedModelKey As System.String = ""
+        Public PendingContinuationToolNames As System.Collections.Generic.List(Of System.String) = New System.Collections.Generic.List(Of System.String)()
+        Public PendingContinuationRequiresInputRestore As System.Boolean = False
+        Public PendingContinuationInputsPersisted As System.Boolean = False
+        Public PendingContinuationWorkspaceFingerprint As System.String = ""
     End Class
 
     ''' <summary>
@@ -1397,6 +1413,210 @@ Partial Public Class ThisAddIn
         Catch
             Return False
         End Try
+    End Function
+
+    Private Function ModelConfigSupportsFileUploads(config As ModelConfig) As System.Boolean
+        If config Is Nothing Then Return False
+        Try
+            Return Not System.String.IsNullOrWhiteSpace(config.APICall_Object)
+        Catch
+            Try
+                Dim propertyInfo As System.Reflection.PropertyInfo =
+                    GetType(ModelConfig).GetProperty("APICall_Object", System.Reflection.BindingFlags.Public Or System.Reflection.BindingFlags.Instance)
+                If propertyInfo Is Nothing Then Return False
+                Dim rawValue As System.Object = propertyInfo.GetValue(config, Nothing)
+                Return rawValue IsNot Nothing AndAlso
+                       Not System.String.IsNullOrWhiteSpace(System.Convert.ToString(rawValue, System.Globalization.CultureInfo.InvariantCulture))
+            Catch
+                Return False
+            End Try
+        End Try
+    End Function
+
+    Private Function EnsureLocalChatContinuationSessionId(st As InkyState, Optional rotate As System.Boolean = False) As System.Boolean
+        If st Is Nothing Then Return False
+
+        Dim current As System.String = If(st.ContinuationSessionId, System.String.Empty).Trim()
+        Dim parsed As System.Guid
+        If rotate OrElse Not System.Guid.TryParse(current, parsed) Then
+            st.ContinuationSessionId = System.Guid.NewGuid().ToString("N")
+            Return True
+        End If
+
+        st.ContinuationSessionId = parsed.ToString("N")
+        Return False
+    End Function
+
+    Private Function BuildLocalChatContinuationKey(st As InkyState, chatId As System.Int32) As System.String
+        If st Is Nothing Then Return System.String.Empty
+        EnsureLocalChatContinuationSessionId(st)
+        Return "localchat:v1:" & chatId.ToString(System.Globalization.CultureInfo.InvariantCulture) & ":" & st.ContinuationSessionId
+    End Function
+
+    Private Sub ClearLocalChatPendingContinuation(st As InkyState)
+        If st Is Nothing Then Return
+        st.PendingContinuationWorkflowId = System.String.Empty
+        st.PendingContinuationWasAgentMode = False
+        st.PendingContinuationUseToolTrigger = False
+        st.PendingContinuationUseSecondApi = False
+        st.PendingContinuationSelectedModelKey = System.String.Empty
+        st.PendingContinuationToolNames = New System.Collections.Generic.List(Of System.String)()
+        st.PendingContinuationRequiresInputRestore = False
+        st.PendingContinuationInputsPersisted = False
+        st.PendingContinuationWorkspaceFingerprint = System.String.Empty
+    End Sub
+
+    Private Function TryParseLocalChatRetryRequest(text As System.String, ByRef additionalInstructions As System.String) As System.Boolean
+        additionalInstructions = System.String.Empty
+        Dim value As System.String = If(text, System.String.Empty).Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
+        Dim lines() As System.String = value.Split(New System.Char() {Microsoft.VisualBasic.ChrW(10)})
+        Dim firstNonEmpty As System.Int32 = -1
+
+        For i As System.Int32 = 0 To lines.Length - 1
+            If Not System.String.IsNullOrWhiteSpace(lines(i)) Then
+                firstNonEmpty = i
+                Exit For
+            End If
+        Next
+
+        If firstNonEmpty < 0 Then Return False
+        Dim firstLine As System.String = lines(firstNonEmpty).Trim()
+        Dim normalized As System.String = firstLine
+        If normalized.StartsWith("#", System.StringComparison.Ordinal) Then normalized = normalized.Substring(1).TrimStart()
+
+        If Not (normalized.Equals("retry", System.StringComparison.OrdinalIgnoreCase) OrElse
+                normalized.StartsWith("retry ", System.StringComparison.OrdinalIgnoreCase) OrElse
+                normalized.StartsWith("retry:", System.StringComparison.OrdinalIgnoreCase)) Then
+            Return False
+        End If
+
+        Dim remainder As New System.Text.StringBuilder()
+        Dim sameLineRemainder As System.String = normalized.Substring(5).TrimStart(" "c, ":"c, "-"c, Microsoft.VisualBasic.ChrW(9))
+        If sameLineRemainder.Length > 0 Then remainder.AppendLine(sameLineRemainder)
+        For i As System.Int32 = firstNonEmpty + 1 To lines.Length - 1
+            remainder.AppendLine(lines(i))
+        Next
+        additionalInstructions = remainder.ToString().Trim()
+        Return True
+    End Function
+
+    Private Function NormalizeLocalChatLanguageKey(userLanguage As System.String) As System.String
+        Dim language As System.String = If(userLanguage, System.String.Empty).Trim().ToLowerInvariant()
+        Dim separator As System.Int32 = language.IndexOfAny(New System.Char() {"-"c, "_"c})
+        If separator > 0 Then language = language.Substring(0, separator)
+        Return language
+    End Function
+
+    ''' <summary>
+    ''' The UI language is only a fallback. Once tooling has identified the request
+    ''' language, continuation notices for that same run must use it as well.
+    ''' </summary>
+    Private Function ResolveLocalChatResultLanguage(uiLanguage As System.String,
+                                                    workflowId As System.String) As System.String
+        If Not System.String.IsNullOrWhiteSpace(workflowId) AndAlso
+           System.String.Equals(_lastCompletedToolingWorkflowId, workflowId, System.StringComparison.OrdinalIgnoreCase) AndAlso
+           _lastCompletedToolingRunState IsNot Nothing AndAlso
+           Not System.String.IsNullOrWhiteSpace(_lastCompletedToolingRunState.UserLanguage) Then
+            Return _lastCompletedToolingRunState.UserLanguage.Trim()
+        End If
+
+        Return If(uiLanguage, System.String.Empty).Trim()
+    End Function
+
+    Private Function BuildLocalChatRetryHint(userLanguage As System.String) As System.String
+        Select Case NormalizeLocalChatLanguageKey(userLanguage)
+            Case "de"
+                Return "Um diesen technisch blockierten Vorgang fortzusetzen, senden Sie `retry` als nächste Nachricht. Darunter können Sie weitere Anweisungen ergänzen. Bereits erfolgreich erledigte Arbeit wird nach Möglichkeit wiederverwendet."
+            Case "fr"
+                Return "Pour poursuivre cette exécution techniquement bloquée, envoyez `retry` comme prochain message. Vous pouvez ajouter des instructions supplémentaires en dessous. Le travail déjà effectué avec succès sera réutilisé dans la mesure du possible."
+            Case "it"
+                Return "Per continuare questa esecuzione tecnicamente bloccata, invia `retry` come prossimo messaggio. Puoi aggiungere ulteriori istruzioni nelle righe successive. Il lavoro già completato con successo verrà riutilizzato ove possibile."
+            Case "es"
+                Return "Para continuar esta ejecución bloqueada técnicamente, envíe `retry` como siguiente mensaje. Puede añadir instrucciones adicionales debajo. El trabajo ya completado correctamente se reutilizará cuando sea posible."
+            Case Else
+                Return "To continue this technically blocked run, send `retry` as your next message. You may add further instructions below it. Work that already succeeded will be reused where possible."
+        End Select
+    End Function
+
+    Private Function BuildLocalChatRetryUnavailableNotice(userLanguage As System.String) As System.String
+        Select Case NormalizeLocalChatLanguageKey(userLanguage)
+            Case "de"
+                Return "Für diesen Chat ist kein fortsetzbarer blockierter Vorgang mehr verfügbar. Ich habe keinen neuen Lauf gestartet, weil dadurch Dateien oder andere bereits erfolgreich ausgeführte Aktionen doppelt erzeugt werden könnten. Wenn Sie die Aufgabe neu starten möchten, formulieren Sie sie bitte erneut als normale Anfrage."
+            Case "fr"
+                Return "Aucune exécution bloquée pouvant être reprise n’est plus disponible pour ce chat. Je n’ai pas lancé une nouvelle exécution, car cela pourrait recréer des fichiers ou répéter des actions déjà effectuées avec succès. Si vous souhaitez recommencer, reformulez la tâche comme une nouvelle demande normale."
+            Case "it"
+                Return "Per questa chat non è più disponibile un'esecuzione bloccata che possa essere ripresa. Non ho avviato una nuova esecuzione, perché ciò potrebbe ricreare file o ripetere azioni già completate con successo. Se desideri ricominciare, formula nuovamente l'attività come una normale nuova richiesta."
+            Case "es"
+                Return "Ya no hay una ejecución bloqueada reanudable disponible para este chat. No he iniciado una nueva ejecución, porque podría volver a crear archivos o repetir acciones ya completadas correctamente. Si desea empezar de nuevo, formule la tarea otra vez como una solicitud nueva normal."
+            Case Else
+                Return "There is no longer a resumable blocked run available for this chat. I did not start a new run because that could recreate files or repeat actions that already succeeded. If you want to start again, please restate the task as a normal new request."
+        End Select
+    End Function
+
+    Private Function BuildLocalChatRetryEnvironmentUnavailableNotice(userLanguage As System.String) As System.String
+        Select Case NormalizeLocalChatLanguageKey(userLanguage)
+            Case "de"
+                Return "Der blockierte Vorgang kann mit der aktuell verfügbaren Modell-/Tool-Konfiguration nicht sicher fortgesetzt werden. Ich habe keinen neuen Lauf gestartet. Stellen Sie nach Möglichkeit die ursprünglich verwendete Modell- und Tool-Konfiguration wieder her und senden Sie danach erneut `retry`. Alternativ können Sie die Aufgabe als neue Anfrage formulieren."
+            Case "fr"
+                Return "L’exécution bloquée ne peut pas être reprise en toute sécurité avec la configuration de modèle et d’outils actuellement disponible. Je n’ai pas lancé une nouvelle exécution. Si possible, rétablissez la configuration de modèle et d’outils utilisée à l’origine, puis envoyez de nouveau `retry`. Vous pouvez aussi reformuler la tâche comme une nouvelle demande."
+            Case "it"
+                Return "L’esecuzione bloccata non può essere ripresa in sicurezza con la configurazione di modello e strumenti attualmente disponibile. Non ho avviato una nuova esecuzione. Se possibile, ripristina la configurazione di modello e strumenti usata originariamente e invia di nuovo `retry`. In alternativa, formula l’attività come una nuova richiesta."
+            Case "es"
+                Return "La ejecución bloqueada no puede reanudarse de forma segura con la configuración de modelo y herramientas disponible actualmente. No he iniciado una nueva ejecución. Si es posible, restaure la configuración de modelo y herramientas utilizada originalmente y envíe de nuevo `retry`. También puede formular la tarea como una solicitud nueva."
+            Case Else
+                Return "The blocked run cannot be resumed safely with the model/tool configuration currently available. I did not start a new run. If possible, restore the model and tool configuration used for the original run and send `retry` again. Alternatively, restate the task as a new request."
+        End Select
+    End Function
+
+    Private Function BuildLocalChatRetryInputsUnavailableNotice(userLanguage As System.String) As System.String
+        Select Case NormalizeLocalChatLanguageKey(userLanguage)
+            Case "de"
+                Return "Der Vorgang ist technisch blockiert. Ein automatischer `retry` ist für diesen Lauf nicht verfügbar, weil mindestens eine dafür benötigte Eingabedatei nicht dauerhaft gesichert werden konnte. Bereits erzeugte Ergebnisse können trotzdem brauchbar sein. Für einen neuen Versuch senden Sie die Aufgabe bitte erneut und hängen die benötigten Dateien nochmals an."
+            Case "fr"
+                Return "L’exécution est techniquement bloquée. Un `retry` automatique n’est pas disponible pour cette exécution, car au moins un fichier d’entrée nécessaire n’a pas pu être conservé durablement. Les résultats déjà produits peuvent néanmoins rester utilisables. Pour réessayer, envoyez la tâche comme une nouvelle demande et joignez à nouveau les fichiers nécessaires."
+            Case "it"
+                Return "L’esecuzione è tecnicamente bloccata. Un `retry` automatico non è disponibile per questa esecuzione perché almeno un file di input necessario non ha potuto essere conservato in modo persistente. I risultati già prodotti possono comunque essere utilizzabili. Per riprovare, invia nuovamente l’attività come nuova richiesta e allega di nuovo i file necessari."
+            Case "es"
+                Return "La ejecución está bloqueada técnicamente. No hay un `retry` automático disponible para esta ejecución porque no se pudo conservar de forma persistente al menos un archivo de entrada necesario. Los resultados ya generados pueden seguir siendo utilizables. Para volver a intentarlo, envíe la tarea como una solicitud nueva y adjunte de nuevo los archivos necesarios."
+            Case Else
+                Return "The run is technically blocked. Automatic `retry` is not available for this run because at least one required input file could not be retained persistently. Results already produced may still be usable. To try again, send the task as a new request and attach the required files again."
+        End Select
+    End Function
+
+    Private Function IsMatchingBlockedLocalChatContinuation(workflowId As System.String,
+                                                            continuationKey As System.String) As System.Boolean
+        Dim id As System.String = If(workflowId, System.String.Empty).Trim()
+        Dim key As System.String = If(continuationKey, System.String.Empty).Trim()
+        If id = System.String.Empty OrElse key = System.String.Empty Then Return False
+
+        Dim snapshot As SharedLibrary.Agents.ToolCallSequencing.ToolingRunContinuationSnapshot = Nothing
+        If Not SharedLibrary.Agents.WorkflowContinuity.TryGetContinuationSnapshot(id, snapshot) OrElse snapshot Is Nothing Then Return False
+        If Not System.String.Equals(If(snapshot.ContinuationKey, System.String.Empty).Trim(), key, System.StringComparison.Ordinal) Then Return False
+
+        Dim runtime As SharedLibrary.Agents.WorkflowRuntimeState = SharedLibrary.Agents.WorkflowContinuity.GetState(id)
+        If runtime Is Nothing OrElse Not SharedLibrary.Agents.WorkflowContinuity.CanOfferContinuationRetry(id) Then Return False
+        If Not System.String.Equals(If(runtime.HostPipeline, System.String.Empty), "Outlook", System.StringComparison.OrdinalIgnoreCase) Then Return False
+        Return System.String.Equals(If(runtime.CurrentPhase, System.String.Empty), "final_blocked", System.StringComparison.OrdinalIgnoreCase)
+    End Function
+
+    Private Function ResolveLocalChatContinuationTools(toolNames As System.Collections.Generic.IEnumerable(Of System.String),
+                                                       includeAdvanced As System.Boolean) As System.Collections.Generic.List(Of ModelConfig)
+        Dim requested As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+        If toolNames IsNot Nothing Then
+            For Each name As System.String In toolNames
+                If Not System.String.IsNullOrWhiteSpace(name) Then requested.Add(name.Trim())
+            Next
+        End If
+
+        Dim available As New System.Collections.Generic.List(Of ModelConfig)()
+        available.AddRange(GetLocalChatMainSelectableTools(includeInteractiveM365Tools:=True))
+        If includeAdvanced Then available.AddRange(GetLocalChatAdvancedSelectableTools(includeInteractiveM365Tools:=True))
+
+        Return available.
+            Where(Function(t) t IsNot Nothing AndAlso Not System.String.IsNullOrWhiteSpace(t.ToolName) AndAlso requested.Contains(t.ToolName)).
+            GroupBy(Function(t) t.ToolName, System.StringComparer.OrdinalIgnoreCase).
+            Select(Function(g) g.First()).
+            ToList()
     End Function
 
     ''' <summary>
@@ -1492,6 +1712,39 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
+    Private Function PersistCancellationTurnForJob(job As LlmJob) As System.Boolean
+        Const cancellationText As System.String = "Aborted by user."
+        Return PersistAssistantTurnForJob(job, cancellationText, MarkdownToHtml(cancellationText))
+    End Function
+
+    Private Function BuildLocalChatTerminalFailureText(existingAssistantText As System.String,
+                                                       failureMessage As System.String) As System.String
+        Dim preservedText As System.String = If(existingAssistantText, System.String.Empty)
+
+        Try
+            preservedText = SanitizeModelOutputForBrowser(preservedText).Trim()
+        Catch
+            preservedText = preservedText.Trim()
+        End Try
+
+        If preservedText.Length > 0 Then
+            Try
+                preservedText = RemoveGeneratedOutputFilesSections(preservedText).Trim()
+            Catch
+            End Try
+        End If
+
+        Dim detail As System.String = If(failureMessage, System.String.Empty).Trim()
+        If preservedText.Length > 0 Then
+            Dim suffix As System.String = "Error: The response was generated, but the job did not complete successfully."
+            If detail.Length > 0 Then suffix &= " " & detail
+            Return preservedText & vbCrLf & vbCrLf & suffix
+        End If
+
+        If detail.Length > 0 Then Return "Error: " & detail
+        Return "Error: The job failed."
+    End Function
+
     ''' <summary>
     ''' Converts markdown to HTML using Markdig advanced pipeline; falls back to HTML-encoded text on error.
     ''' </summary>
@@ -1548,21 +1801,25 @@ Partial Public Class ThisAddIn
     Private Function SyncToolingState(ByVal st As InkyState, ByRef supportsTooling As Boolean) As Boolean
         _selectedToolsForChat = GetLocalChatEffectiveSelection(st, includeInteractiveM365Tools:=True)
 
-        supportsTooling = CurrentModelSupportsTooling(st)
+        Dim modelSupportsTooling As System.Boolean = CurrentModelSupportsTooling(st)
+        supportsTooling = modelSupportsTooling
 
-        If _apActive Then
-            supportsTooling = False
-        End If
-
-        Dim hasTools As Boolean =
+        Dim hasTools As System.Boolean =
             (_selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0) OrElse
             IsChatAgentWorkspaceConnected()
 
-        Dim enabled As Boolean = st.ToolingEnabled AndAlso hasTools AndAlso supportsTooling
-
-        If st.ToolingEnabled <> enabled Then
-            st.ToolingEnabled = enabled
+        ' Persist only durable validity changes. AutoPilot is a temporary runtime
+        ' condition and must not destroy the user's Local Chat tooling preference.
+        Dim preferenceEnabled As System.Boolean = st.ToolingEnabled AndAlso hasTools AndAlso modelSupportsTooling
+        If st.ToolingEnabled <> preferenceEnabled Then
+            st.ToolingEnabled = preferenceEnabled
             SaveInkyState(st)
+        End If
+
+        Dim enabled As System.Boolean = preferenceEnabled
+        If _apActive Then
+            supportsTooling = False
+            enabled = False
         End If
 
         _chatToolingEnabled = enabled
@@ -1624,93 +1881,14 @@ Partial Public Class ThisAddIn
         Try
             If String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then Return Nothing
 
-            Dim alts As List(Of ModelConfig) = Nothing
-            Try
-                alts = LoadAlternativeModels(INI_AlternateModelPath, _context, includeToolOnly:=False, toolsOnly:=False)
-            Catch
+            Dim modelConfig As ModelConfig = Nothing
+            If Not TryGetSpecialTaskModelConfig(_context, INI_AlternateModelPath, "AgentDefaultModel", modelConfig) Then
                 Return Nothing
-            End Try
-            If alts Is Nothing OrElse alts.Count = 0 Then Return Nothing
-
-            ' GetSpecialTaskModel searches for a key with a truthy value.
-            ' We replicate the search here WITHOUT applying to context.
-            Dim iniPath As String = ExpandEnvironmentVariables(INI_AlternateModelPath)
-            If Not IO.File.Exists(iniPath) Then Return Nothing
-
-            Dim truthy As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
-                "true", "yes", "wahr", "ja", "on", "1"
-            }
-
-            Dim currentDict As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
-            Dim sectionName As String = ""
-
-            Dim checkSection As Func(Of String) =
-                Function()
-                    If currentDict.Count = 0 Then Return Nothing
-                    If Not currentDict.ContainsKey("AgentDefaultModel") Then Return Nothing
-                    Dim raw As String = currentDict("AgentDefaultModel")
-                    If raw Is Nothing Then Return Nothing
-
-                    ' Strip inline comments, quotes
-                    Dim scIdx = raw.IndexOf(";"c) : If scIdx >= 0 Then raw = raw.Substring(0, scIdx)
-                    Dim hashIdx = raw.IndexOf("#"c) : If hashIdx >= 0 Then raw = raw.Substring(0, hashIdx)
-                    raw = raw.Trim()
-                    If raw.Length >= 2 AndAlso ((raw.StartsWith("""") AndAlso raw.EndsWith("""")) OrElse
-                                                (raw.StartsWith("'") AndAlso raw.EndsWith("'"))) Then
-                        raw = raw.Substring(1, raw.Length - 2).Trim()
-                    End If
-                    If truthy.Contains(raw.ToLowerInvariant()) Then Return sectionName
-                    Return Nothing
-                End Function
-
-            ' Helper: match a raw INI section name to a loaded ModelConfig.
-            ' ModelDescription may be decorated with ModelNote and/or ToolingSuffix,
-            ' so we use StartsWith for ModelDescription and Equals for Model.
-            Dim matchToConfig As Func(Of String, ModelConfig) =
-                Function(section As String)
-                    Return alts.FirstOrDefault(Function(m)
-                                                   If m Is Nothing Then Return False
-                                                   If Not String.IsNullOrWhiteSpace(m.ModelDescription) AndAlso
-                                                      m.ModelDescription.StartsWith(section, StringComparison.OrdinalIgnoreCase) Then Return True
-                                                   If Not String.IsNullOrWhiteSpace(m.Model) AndAlso
-                                                      String.Equals(m.Model, section, StringComparison.OrdinalIgnoreCase) Then Return True
-                                                   Return False
-                                               End Function)
-                End Function
-
-            For Each rawLine In IO.File.ReadAllLines(iniPath)
-                Dim line = rawLine.Trim()
-                If line.Length = 0 OrElse line.StartsWith(";") OrElse line.StartsWith("#") Then Continue For
-
-                If line.StartsWith("[") AndAlso line.EndsWith("]") Then
-                    Dim matchedSection = checkSection()
-                    If matchedSection IsNot Nothing Then
-                        Dim mc = matchToConfig(matchedSection)
-                        If mc IsNot Nothing Then
-                            displayKey = If(Not String.IsNullOrWhiteSpace(mc.ModelDescription), mc.ModelDescription, mc.Model)
-                            Return mc
-                        End If
-                    End If
-                    currentDict.Clear()
-                    sectionName = line.Substring(1, line.Length - 2).Trim()
-                    Continue For
-                End If
-
-                Dim tokens = line.Split(New Char() {"="c}, 2)
-                If tokens.Length = 2 Then currentDict(tokens(0).Trim()) = tokens(1).Trim()
-            Next
-
-            ' Check final section
-            Dim finalMatch = checkSection()
-            If finalMatch IsNot Nothing Then
-                Dim mc = matchToConfig(finalMatch)
-                If mc IsNot Nothing Then
-                    displayKey = If(Not String.IsNullOrWhiteSpace(mc.ModelDescription), mc.ModelDescription, mc.Model)
-                    Return mc
-                End If
             End If
 
-            Return Nothing
+            If modelConfig Is Nothing Then Return Nothing
+            displayKey = If(Not String.IsNullOrWhiteSpace(modelConfig.ModelDescription), modelConfig.ModelDescription, modelConfig.Model)
+            Return modelConfig
         Catch
             Return Nothing
         End Try
@@ -1938,6 +2116,7 @@ Partial Public Class ThisAddIn
         html.AppendLine(".inky-message-box{padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--elev);font-size:.82rem;line-height:1.45;white-space:pre-wrap;word-break:break-word;} ")
         html.AppendLine(".inky-message-box.error{border-color:#8f3d3d;background:rgba(170,56,56,.12);color:#ffd7d7;} ")
         html.AppendLine(":root.light .inky-message-box.error{border-color:#d7a2a2;background:#fff1f1;color:#7a1f1f;} ")
+        html.AppendLine(".runtimeStatus{display:none;padding:6px 12px;border-bottom:1px solid var(--border);font-size:.76rem;color:var(--muted);background:var(--elev);line-height:1.35;} ")
         html.AppendLine("</style>")
         html.AppendLine("</head><body>")
         html.AppendLine("<div class=""wrap"">")
@@ -1981,6 +2160,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("    <button id=""playBtn"" title=""Open mini games"" style=""line-height:1;display:flex;align-items:center;justify-content:center;""><svg viewBox=""0 0 24 24"" width=""18"" height=""18"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><rect x=""3"" y=""8"" width=""18"" height=""8"" rx=""4"" ry=""4""/><circle cx=""8"" cy=""12"" r=""1""/><circle cx=""12"" cy=""12"" r=""1""/><circle cx=""16"" cy=""12"" r=""1""/></svg></button>")
         html.AppendLine("    <button id=""themeBtn"" title=""Toggle theme"" style=""line-height:1;display:flex;align-items:center;justify-content:center;""><svg id=""themeIcon"" viewBox=""0 0 24 24"" width=""18"" height=""18"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><circle cx=""12"" cy=""12"" r=""5""/><line x1=""12"" y1=""1"" x2=""12"" y2=""3""/><line x1=""12"" y1=""21"" x2=""12"" y2=""23""/><line x1=""4.22"" y1=""4.22"" x2=""5.64"" y2=""5.64""/><line x1=""18.36"" y1=""18.36"" x2=""19.78"" y2=""19.78""/><line x1=""1"" y1=""12"" x2=""3"" y2=""12""/><line x1=""21"" y1=""12"" x2=""23"" y2=""12""/><line x1=""4.22"" y1=""19.78"" x2=""5.64"" y2=""18.36""/><line x1=""18.36"" y1=""5.64"" x2=""19.78"" y2=""4.22""/></svg></button>")
         html.AppendLine("  </div>")
+        html.AppendLine("  <div id=""runtimeStatus"" class=""runtimeStatus"" role=""status"" aria-live=""polite""></div>")
 
         html.AppendLine("  <div id=""chat"" class=""chat""></div>")
 
@@ -2065,7 +2245,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("function copyText(t){if(navigator.clipboard){return navigator.clipboard.writeText(t);}return new Promise((res,rej)=>{try{const ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.left='-9999px';document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();res();}catch(e){rej(e);}});}")
         html.AppendLine("function enhanceCodeBlocks(scope){(scope||document).querySelectorAll('pre').forEach(pre=>{if(pre.dataset.enhanced==='1')return;const btn=document.createElement('button');btn.type='button';btn.className='code-copy-btn';btn.innerHTML='<svg viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><rect x=""9"" y=""9"" width=""13"" height=""13"" rx=""2"" ry=""2""/><path d=""M5 15H4a2 2 0 0 1-2-2V4c0-1.1.9-2 2-2h9a2 2 0 0 1 2 2v1""/></svg>';btn.addEventListener('click',()=>{const code=pre.querySelector('code');const txt=code?code.innerText:pre.innerText;copyText(txt).then(()=>{btn.classList.add('copied');setTimeout(()=>btn.classList.remove('copied'),1500);});});pre.appendChild(btn);pre.dataset.enhanced='1';});}")
         html.AppendLine("const api=async(cmd,data={})=>{try{const r=await fetch('/inky/api',{method:'POST',headers:{'Content-Type':'application/json','X-RedInk-CSRF':__redInkCsrf},body:JSON.stringify(Object.assign({Command:cmd},data))});const txt=await r.text();try{return JSON.parse(txt);}catch{return{ok:false,error:txt}}}catch(e){return{ok:false,error:e.message||'Network error'}}};")
-        html.AppendLine("function isPromptLibrarySlashTrigger(){const pos=msgEl.selectionStart||0;if(pos<=0)return true;const prev=msgEl.value.charAt(pos-1);return /\s/.test(prev);} ")
+        html.AppendLine("function isPromptLibrarySlashTrigger(){return msgEl.value.length===0;} ")
         html.AppendLine("function insertPromptIntoMessage(text){const start=msgEl.selectionStart||0;const end=msgEl.selectionEnd||start;msgEl.setRangeText(String(text||''),start,end,'end');msgEl.focus();} ")
         html.AppendLine("async function openPromptLibrary(){const r=await api('inky_promptlibpick');if(!r||!r.ok){if(r&&r.error)alert(r.error||'Prompt library failed');return;}if(r.prompt){insertPromptIntoMessage(r.prompt);}};")
 
@@ -2087,6 +2267,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("const toolingSlot=document.getElementById('toolingSlot');")
         html.AppendLine("const toolingChk=document.getElementById('toolingChk');")
         html.AppendLine("const toolingLbl=document.getElementById('toolingLbl');")
+        html.AppendLine("const runtimeStatusEl=document.getElementById('runtimeStatus');")
         html.AppendLine("const advancedToolsChk=document.getElementById('advancedToolsChk');")
         html.AppendLine("const agentLbl=document.getElementById('agentLbl');")
         html.AppendLine("const toolLogBtn=document.getElementById('toolLogBtn');")
@@ -2105,7 +2286,12 @@ Partial Public Class ThisAddIn
         html.AppendLine("let __toolLogEnabled=true;")
         html.AppendLine("let __toolingEnabled=false;")
         html.AppendLine("let __modelSupportsTooling=false;")
+        html.AppendLine("let __modelCanTool=false;")
+        html.AppendLine("let __autoPilotActive=false;")
+        html.AppendLine("let __agentRuntimeBusy=false;")
         html.AppendLine("let __workspaceDialogMode='';")
+        html.AppendLine("function syncRuntimeStatus(state){state=state||{};if(typeof state.autoPilotActive==='boolean'){__autoPilotActive=!!state.autoPilotActive;}if(typeof state.agentRuntimeBusy==='boolean'){__agentRuntimeBusy=!!state.agentRuntimeBusy;}if(typeof state.modelSupportsTooling==='boolean'){__modelCanTool=!!state.modelSupportsTooling;}else if(typeof state.supportsTooling==='boolean'&&!__autoPilotActive){__modelCanTool=!!state.supportsTooling;}if(typeof state.supportsTooling==='boolean'){__modelSupportsTooling=!!state.supportsTooling;}else{__modelSupportsTooling=__modelCanTool&&!__autoPilotActive;}if(typeof state.toolingEnabled==='boolean'){__toolingEnabled=!!state.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof state.advancedToolsEnabled==='boolean'){__advancedToolsEnabled=!!state.advancedToolsEnabled;advancedToolsChk.checked=__advancedToolsEnabled;}updateToolingVisibility();let text='';if(__agentRuntimeBusy){text=__autoPilotActive&&__modelCanTool?'AutoPilot is active and another Red Ink run is using the shared run slot. Local Chat tools are temporarily unavailable; this request may wait.':'Another Red Ink run is using the shared run slot; this request may wait.';}else if(__autoPilotActive){text=__modelCanTool?'AutoPilot is active. Local Chat tools are temporarily unavailable; requests may wait for the shared run slot.':'AutoPilot is active. Local Chat requests may wait for the shared run slot.';}else if(__modelCanTool&&!__toolingEnabled){text='Tool calling is supported by this model; Local Chat tools are currently off.';}runtimeStatusEl.textContent=text;runtimeStatusEl.style.display=text?'block':'none';}")
+        html.AppendLine("async function refreshRuntimeState(){try{const r=await api('inky_getruntimestate');if(r&&r.ok){syncRuntimeStatus(r);return r;}}catch{}return null;}")
         html.AppendLine("function syncAdvancedToolsUi(state){state=state||{};if(typeof state.advancedToolsEnabled==='boolean'){__advancedToolsEnabled=!!state.advancedToolsEnabled;advancedToolsChk.checked=__advancedToolsEnabled;}if(typeof state.agentModelAvailable==='boolean'){__agentModelAvailable=!!state.agentModelAvailable;}if(typeof state.agentModelActive==='boolean'){__agentModelActive=!!state.agentModelActive;}updateToolingVisibility();updateAgentModelBtn();const hasWorkspace=Object.prototype.hasOwnProperty.call(state,'agentWorkspace');updateAgentWorkspaceDisplay(hasWorkspace?state.agentWorkspace:null);updateAgentFilesDisplay(Array.isArray(state.agentFiles)?state.agentFiles:[]);applyCoupling();}")
 
         html.AppendLine("function setTheme(isDark){dark=!!isDark;document.documentElement.classList.toggle('light',!dark);var icon=document.getElementById('themeIcon');if(icon){if(dark){icon.innerHTML='<path d=""M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z""/>';}else{icon.innerHTML='<circle cx=""12"" cy=""12"" r=""5""/><line x1=""12"" y1=""1"" x2=""12"" y2=""3""/><line x1=""12"" y1=""21"" x2=""12"" y2=""23""/><line x1=""4.22"" y1=""4.22"" x2=""5.64"" y2=""5.64""/><line x1=""18.36"" y1=""18.36"" x2=""19.78"" y2=""19.78""/><line x1=""1"" y1=""12"" x2=""3"" y2=""12""/><line x1=""21"" y1=""12"" x2=""23"" y2=""12""/><line x1=""4.22"" y1=""19.78"" x2=""5.64"" y2=""18.36""/><line x1=""18.36"" y1=""5.64"" x2=""19.78"" y2=""4.22""/>';}}} ")
@@ -2133,18 +2319,18 @@ Partial Public Class ThisAddIn
 
         ' Boot        
         html.AppendLine("async function claimScheduledTask(){const r=await api('inky_claimscheduledtask');if(!r||!r.ok)return null;return r.task||null;}")
-        html.AppendLine("async function boot(){const st=await api('inky_getstate');if(!st.ok){alert(st.error||'Init failed');return;}__supportsFiles=(st.supportsFiles===true);setTheme(st.darkMode!==false);render(st.history||[]);modelSel.innerHTML='';for(const m of (st.models||[])){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}updateModelTooltip();if(st.greeting&&(!Array.isArray(st.history)||st.history.length===0)){msgEl.placeholder=st.greeting;}setActiveChatBtn(st.activeChat||1);__modelSupportsTooling=(st.supportsTooling===true);__toolingEnabled=(st.toolingEnabled===true);toolingChk.checked=__toolingEnabled;__toolLogEnabled=(st.toolingLogEnabled!==false);toolLogBtn.classList.toggle('active',__toolLogEnabled);__memoryEnabled=(st.inkyMemoryEnabled===true);memoryChk.checked=__memoryEnabled;memoryEditLnk.style.display=__memoryEnabled?'inline':'none';syncAdvancedToolsUi({advancedToolsEnabled:st.advancedToolsEnabled===true,agentWorkspace:st.agentWorkspace,agentFiles:st.agentFiles||[],agentModelAvailable:st.agentModelAvailable===true,agentModelActive:st.agentModelActive===true});adjustModelSel();const scheduledTask=await claimScheduledTask();if(scheduledTask&&scheduledTask.prompt&&!__currentJobId){__pendingScheduledTaskId=scheduledTask.taskId||'';msgEl.value=scheduledTask.prompt;await send();}}")
+        html.AppendLine("async function boot(){const st=await api('inky_getstate');if(!st.ok){alert(st.error||'Init failed');return;}__supportsFiles=(st.supportsFiles===true);setTheme(st.darkMode!==false);render(st.history||[]);modelSel.innerHTML='';for(const m of (st.models||[])){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}updateModelTooltip();if(st.greeting&&(!Array.isArray(st.history)||st.history.length===0)){msgEl.placeholder=st.greeting;}setActiveChatBtn(st.activeChat||1);__modelSupportsTooling=(st.supportsTooling===true);__modelCanTool=(typeof st.modelSupportsTooling==='boolean'?!!st.modelSupportsTooling:__modelSupportsTooling);__autoPilotActive=(st.autoPilotActive===true);__toolingEnabled=(st.toolingEnabled===true);toolingChk.checked=__toolingEnabled;__toolLogEnabled=(st.toolingLogEnabled!==false);toolLogBtn.classList.toggle('active',__toolLogEnabled);__memoryEnabled=(st.inkyMemoryEnabled===true);memoryChk.checked=__memoryEnabled;memoryEditLnk.style.display=__memoryEnabled?'inline':'none';syncAdvancedToolsUi({advancedToolsEnabled:st.advancedToolsEnabled===true,agentWorkspace:st.agentWorkspace,agentFiles:st.agentFiles||[],agentModelAvailable:st.agentModelAvailable===true,agentModelActive:st.agentModelActive===true});syncRuntimeStatus(st);adjustModelSel();const scheduledTask=await claimScheduledTask();if(scheduledTask&&scheduledTask.prompt&&!__currentJobId){__pendingScheduledTaskId=scheduledTask.taskId||'';msgEl.value=scheduledTask.prompt;await send();}}")
 
         ' Poll job
         html.AppendLine("function buildAssistantTurnFromJobResult(r){const md=String((r&&r.result)||'').trim();if(!md)return null;const html=String((r&&r.resultHtml)||'').trim()||md.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>');return {role:'assistant',markdown:md,html:html,utc:new Date().toISOString()};}")
         html.AppendLine("function ensureJobResultVisible(st,r){const hist=(st&&Array.isArray(st.history))?st.history.slice():[];const turn=buildAssistantTurnFromJobResult(r);if(!turn)return hist;const activeChat=Number((st&&st.activeChat)||1);const resultChat=Number((r&&r.chat)||activeChat);if(activeChat!==resultChat)return hist;const last=hist.length?hist[hist.length-1]:null;const lastMd=String((last&&last.markdown)||'').trim();if(last&&last.role==='assistant'&&lastMd===turn.markdown)return hist;hist.push(turn);return hist;}")
-        html.AppendLine("async function pollJob(jobId){if(!jobId)return;__currentJobId=jobId;__jobCanceled=false;cancelBtn.disabled=false;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);let pollFailures=0;try{for(;;){await new Promise(r=>setTimeout(r,2000));let s=null;try{s=await api('inky_jobstatus',{Job:jobId});}catch(e){pollFailures++;console.warn('job status exception',e);if(pollFailures<5){setTypingStatus('Reconnecting…');continue;}const stErr=await api('inky_getstate').catch(()=>null);if(stErr&&stErr.ok){render(stErr.history||[]);}else{render(ensureJobResultVisible({history:[],activeChat:1},{result:'The job finished, but the final response could not be retrieved from the host.',chat:1}));}break;}if(!s||!s.ok){pollFailures++;console.warn('job status error',s&&s.error);if(pollFailures<5){setTypingStatus('Reconnecting…');continue;}const stErr=await api('inky_getstate').catch(()=>null);if(stErr&&stErr.ok){render(stErr.history||[]);}else{const chatId=Number((s&&s.chat)||1);render(ensureJobResultVisible({history:[],activeChat:chatId},{result:String((s&&s.error)||'The final response could not be retrieved from the host.'),chat:chatId}));}break;}pollFailures=0;if(s.status==='running'){if(s.statusText){setTypingStatus(s.statusText);}else if(__jobCanceled){setTypingStatus('Cancelling…');}continue;}if(s.status==='done'){const stDone={history:Array.isArray(s.history)?s.history:[],activeChat:s.chat};render(ensureJobResultVisible(stDone,s));const stSync=await api('inky_getstate').catch(()=>null);if(stSync&&stSync.ok){const synced=ensureJobResultVisible({history:stSync.history||[],activeChat:s.chat},s);render(synced);if(stSync.agentFiles)updateAgentFilesDisplay(stSync.agentFiles);syncAdvancedToolsUi({advancedToolsEnabled:stSync.advancedToolsEnabled===true,agentWorkspace:stSync.agentWorkspace,agentFiles:stSync.agentFiles||[],agentModelAvailable:stSync.agentModelAvailable===true,agentModelActive:stSync.agentModelActive===true});}break;}if(s.status==='canceled'){const st=await api('inky_getstate').catch(()=>null);if(st&&st.ok){render(st.history||[]);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;}if(s.status==='error'){const st=await api('inky_getstate').catch(()=>null);if(st&&st.ok){render(st.history||[]);}else{const chatId=Number(s.chat||1);render(ensureJobResultVisible({history:[],activeChat:chatId},{result:String(s.error||'The job failed.'),chat:chatId}));}console.warn('job failed',s.error);break;}const st=await api('inky_getstate').catch(()=>null);if(st&&st.ok){const hist=ensureJobResultVisible({history:st.history||[],activeChat:s.chat},s);render(hist);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;}}finally{cancelBtn.disabled=false;cancelBtn.style.display='none';removeTypingBubble();sendBtn.disabled=false;pureBtn.disabled=false;disableChatSwitch(false);__currentJobId=null;adjustModelSel();}}")
+        html.AppendLine("async function pollJob(jobId){if(!jobId)return;__currentJobId=jobId;__jobCanceled=false;cancelBtn.disabled=false;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);let pollFailures=0;try{for(;;){await new Promise(r=>setTimeout(r,2000));let s=null;try{s=await api('inky_jobstatus',{Job:jobId});}catch(e){pollFailures++;console.warn('job status exception',e);if(pollFailures<5){setTypingStatus('Reconnecting…');continue;}const stErr=await api('inky_getstate').catch(()=>null);if(stErr&&stErr.ok){render(stErr.history||[]);}else{render(ensureJobResultVisible({history:[],activeChat:1},{result:'The job finished, but the final response could not be retrieved from the host.',chat:1}));}break;}if(!s||!s.ok){pollFailures++;console.warn('job status error',s&&s.error);if(pollFailures<5){setTypingStatus('Reconnecting…');continue;}const stErr=await api('inky_getstate').catch(()=>null);if(stErr&&stErr.ok){render(stErr.history||[]);}else{const chatId=Number((s&&s.chat)||1);render(ensureJobResultVisible({history:[],activeChat:chatId},{result:String((s&&s.error)||'The final response could not be retrieved from the host.'),chat:chatId}));}break;}pollFailures=0;if(s.status==='running'){if(s.statusText){setTypingStatus(s.statusText);}else if(__jobCanceled){setTypingStatus('Cancelling…');}continue;}if(s.status==='done'){const stDone={history:Array.isArray(s.history)?s.history:[],activeChat:s.chat};render(ensureJobResultVisible(stDone,s));const stSync=await api('inky_getstate').catch(()=>null);if(stSync&&stSync.ok){const synced=ensureJobResultVisible({history:stSync.history||[],activeChat:s.chat},s);render(synced);if(stSync.agentFiles)updateAgentFilesDisplay(stSync.agentFiles);syncAdvancedToolsUi({advancedToolsEnabled:stSync.advancedToolsEnabled===true,agentWorkspace:stSync.agentWorkspace,agentFiles:stSync.agentFiles||[],agentModelAvailable:stSync.agentModelAvailable===true,agentModelActive:stSync.agentModelActive===true});syncRuntimeStatus(stSync);}break;}if(s.status==='canceled'){const st=await api('inky_getstate').catch(()=>null);if(st&&st.ok){render(st.history||[]);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);syncRuntimeStatus(st);}break;}if(s.status==='error'){const chatId=Number(s.chat||1);const st=await api('inky_getstate').catch(()=>null);const baseHist=Array.isArray(s.history)?s.history:((st&&st.ok&&Array.isArray(st.history))?st.history:[]);const terminalResult={result:String(s.result||s.error||'The job failed.'),resultHtml:String(s.resultHtml||''),chat:chatId};render(ensureJobResultVisible({history:baseHist,activeChat:chatId},terminalResult));if(st&&st.ok){if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);syncRuntimeStatus(st);}console.warn('job failed',s.error);break;}const st=await api('inky_getstate').catch(()=>null);if(st&&st.ok){const hist=ensureJobResultVisible({history:st.history||[],activeChat:s.chat},s);render(hist);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;}}finally{cancelBtn.disabled=false;cancelBtn.style.display='none';removeTypingBubble();sendBtn.disabled=false;pureBtn.disabled=false;disableChatSwitch(false);__currentJobId=null;adjustModelSel();}}")
 
         ' Send (normal)
-        html.AppendLine("async function send(){if(__currentJobId){return;}const t=msgEl.value.trim();if(!t)return;const scheduledTaskId=__pendingScheduledTaskId||'';__pendingScheduledTaskId='';__lastPrompt=t;msgEl.value='';sendBtn.disabled=true;pureBtn.disabled=true;chatEl.insertAdjacentHTML('beforeend',`<div class=""row user""><div class=""bubble""><div class=""role"">You</div><div>${t.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>')}</div></div></div>`);let typingId=addTempAssistantBubble('<span class=""typing-dots""><span></span><span></span><span></span></span>');const payload={Text:t};if(scheduledTaskId)payload.ScheduledTaskId=scheduledTaskId;if(__pendingFilePath)payload.FileObject=__pendingFilePath;let r;try{r=await api('inky_send',payload);}catch(e){r={ok:false,error:e.message||'Network error'};}if(!r||!r.ok){removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;alert(r&&r.error||'Error');__pendingFilePath='';adjustModelSel();return;}__pendingFilePath='';if(r.job){if(r.history){render(r.history||[]);}removeTempBubble(typingId);__typingBubbleId=null;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);pollJob(r.job);}else{removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;if(r.history){render(r.history||[]);}adjustModelSel();}}")
+        html.AppendLine("async function send(){if(__currentJobId){return;}const t=msgEl.value.trim();if(!t)return;await refreshRuntimeState();const scheduledTaskId=__pendingScheduledTaskId||'';__pendingScheduledTaskId='';__lastPrompt=t;msgEl.value='';sendBtn.disabled=true;pureBtn.disabled=true;chatEl.insertAdjacentHTML('beforeend',`<div class=""row user""><div class=""bubble""><div class=""role"">You</div><div>${t.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>')}</div></div></div>`);let typingId=addTempAssistantBubble('<span class=""typing-dots""><span></span><span></span><span></span></span>');const payload={Text:t};if(scheduledTaskId)payload.ScheduledTaskId=scheduledTaskId;if(__pendingFilePath)payload.FileObject=__pendingFilePath;let r;try{r=await api('inky_send',payload);}catch(e){r={ok:false,error:e.message||'Network error'};}if(!r||!r.ok){removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;alert(r&&r.error||'Error');__pendingFilePath='';adjustModelSel();return;}__pendingFilePath='';if(r.job){if(r.history){render(r.history||[]);}removeTempBubble(typingId);__typingBubbleId=null;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);pollJob(r.job);}else{removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;if(r.history){render(r.history||[]);}adjustModelSel();}}")
 
         ' PureSend
-        html.AppendLine("async function pureSend(){if(__currentJobId){return;}const t=msgEl.value.trim();if(!t)return;__lastPrompt=t;msgEl.value='';sendBtn.disabled=true;pureBtn.disabled=true;chatEl.insertAdjacentHTML('beforeend',`<div class=""row user""><div class=""bubble""><div class=""role"">You</div><div>${('Pure: '+t).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>')}</div></div></div>`);let typingId=addTempAssistantBubble('<span class=""typing-dots""><span></span><span></span><span></span></span>');const payload={Text:t};if(__pendingFilePath)payload.FileObject=__pendingFilePath;let r;try{r=await api('inky_pure',payload);}catch(e){r={ok:false,error:e.message||'Network error'};}if(!r||!r.ok){removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;alert(r&&r.error||'Error');__pendingFilePath='';adjustModelSel();return;}__pendingFilePath='';if(r.job){if(r.history){render(r.history||[]);}removeTempBubble(typingId);__typingBubbleId=null;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);pollJob(r.job);}else{removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;if(r.history){render(r.history||[]);}adjustModelSel();}}")
+        html.AppendLine("async function pureSend(){if(__currentJobId){return;}const t=msgEl.value.trim();if(!t)return;await refreshRuntimeState();__lastPrompt=t;msgEl.value='';sendBtn.disabled=true;pureBtn.disabled=true;chatEl.insertAdjacentHTML('beforeend',`<div class=""row user""><div class=""bubble""><div class=""role"">You</div><div>${('Pure: '+t).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>')}</div></div></div>`);let typingId=addTempAssistantBubble('<span class=""typing-dots""><span></span><span></span><span></span></span>');const payload={Text:t};if(__pendingFilePath)payload.FileObject=__pendingFilePath;let r;try{r=await api('inky_pure',payload);}catch(e){r={ok:false,error:e.message||'Network error'};}if(!r||!r.ok){removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;alert(r&&r.error||'Error');__pendingFilePath='';adjustModelSel();return;}__pendingFilePath='';if(r.job){if(r.history){render(r.history||[]);}removeTempBubble(typingId);__typingBubbleId=null;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);pollJob(r.job);}else{removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;if(r.history){render(r.history||[]);}adjustModelSel();}}")
 
         ' drag/drop
         html.AppendLine("(function(){const stop=e=>{e.preventDefault();e.stopPropagation();};['dragenter','dragover','dragleave','drop'].forEach(ev=>document.addEventListener(ev,stop,false));document.addEventListener('drop',async e=>{const files=[...(e.dataTransfer&&e.dataTransfer.files)||[]];if(!files.length)return;")
@@ -2154,8 +2340,8 @@ Partial Public Class ThisAddIn
         html.AppendLine("const f=files[0];if(!__supportsFiles){addTempAssistantBubble('File uploads are not supported for the current model.');return;}const tempId=addTempAssistantBubble(`Uploading <b>${f.name.replaceAll('&','&amp;')}</b> (${(f.size/1024).toFixed(1)} KB)…`);try{const fr=new FileReader();const dataUrl=await new Promise((res,rej)=>{fr.onerror=()=>rej(new Error('read error'));fr.onload=()=>res(fr.result);fr.readAsDataURL(f);});const r=await api('inky_upload',{Name:f.name,DataUrl:String(dataUrl||'')});if(!r.ok){replaceAssistantBubble(tempId,'Upload failed: '+(r.error||'unknown'));return;}if(r.supported===false){replaceAssistantBubble(tempId,'File uploads are not supported for this model.');return;}__pendingFilePath=r.path||'';replaceAssistantBubble(tempId,`Added file: <b>${(r.name||f.name).replaceAll('&','&amp;')}</b>`);}catch(err){replaceAssistantBubble(tempId,'Upload failed: '+(err&&err.message?err.message:'unknown'));}} ,false);})();")
 
         ' events
-        html.AppendLine("modelSel.addEventListener('change',async()=>{if(__currentJobId)return;const opt=modelSel.options[modelSel.selectedIndex];if(!opt||opt.disabled||!opt.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}const r=await api('inky_setmodel',{Key:opt.value});updateModelTooltip();adjustModelSel();if(!r.ok){alert(r.error||'Failed to set model');return;}if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;}toolingChk.checked=__toolingEnabled;syncAdvancedToolsUi({advancedToolsEnabled:typeof r.advancedToolsEnabled==='boolean'?r.advancedToolsEnabled:false,agentWorkspace:Object.prototype.hasOwnProperty.call(r,'agentWorkspace')?r.agentWorkspace:null,agentFiles:Array.isArray(r.agentFiles)?r.agentFiles:[],agentModelAvailable:typeof r.agentModelAvailable==='boolean'?r.agentModelAvailable:__agentModelAvailable,agentModelActive:typeof r.agentModelActive==='boolean'?r.agentModelActive:false});});")
-        html.AppendLine("clearBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_clear');if(r.ok){render([]);__pendingFilePath='';if(r.greeting)msgEl.placeholder=r.greeting;if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;updateToolingVisibility();}const st=await api('inky_getstate');if(st&&st.ok){syncAdvancedToolsUi({advancedToolsEnabled:st.advancedToolsEnabled===true,agentWorkspace:st.agentWorkspace,agentFiles:st.agentFiles||[],agentModelAvailable:st.agentModelAvailable===true,agentModelActive:st.agentModelActive===true});if(st.greeting)msgEl.placeholder=st.greeting;}else{updateAgentFilesDisplay([]);}applyCoupling();}else{alert(r.error||'Failed to clear');}adjustModelSel();});")
+        html.AppendLine("modelSel.addEventListener('change',async()=>{if(__currentJobId)return;const opt=modelSel.options[modelSel.selectedIndex];if(!opt||opt.disabled||!opt.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}const r=await api('inky_setmodel',{Key:opt.value});updateModelTooltip();adjustModelSel();if(!r.ok){alert(r.error||'Failed to set model');return;}if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;}toolingChk.checked=__toolingEnabled;syncAdvancedToolsUi({advancedToolsEnabled:typeof r.advancedToolsEnabled==='boolean'?r.advancedToolsEnabled:false,agentWorkspace:Object.prototype.hasOwnProperty.call(r,'agentWorkspace')?r.agentWorkspace:null,agentFiles:Array.isArray(r.agentFiles)?r.agentFiles:[],agentModelAvailable:typeof r.agentModelAvailable==='boolean'?r.agentModelAvailable:__agentModelAvailable,agentModelActive:typeof r.agentModelActive==='boolean'?r.agentModelActive:false});syncRuntimeStatus(r);});")
+        html.AppendLine("clearBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_clear');if(r.ok){render([]);__pendingFilePath='';if(r.greeting)msgEl.placeholder=r.greeting;if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;updateToolingVisibility();}const st=await api('inky_getstate');if(st&&st.ok){syncAdvancedToolsUi({advancedToolsEnabled:st.advancedToolsEnabled===true,agentWorkspace:st.agentWorkspace,agentFiles:st.agentFiles||[],agentModelAvailable:st.agentModelAvailable===true,agentModelActive:st.agentModelActive===true});syncRuntimeStatus(st);if(st.greeting)msgEl.placeholder=st.greeting;}else{updateAgentFilesDisplay([]);}applyCoupling();}else{alert(r.error||'Failed to clear');}adjustModelSel();});")
         html.AppendLine("copyBtn.addEventListener('click',async()=>{const r=await api('inky_copylast');if(!r.ok){alert(r.error||'Nothing to copy')}});")
         html.AppendLine("toWordBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_toword');if(!r.ok){alert(r.error||'Failed to create Word document')}});")
         html.AppendLine("playBtn.addEventListener('click',()=>{if(__currentJobId)return;const w=window.open('/inky/play','_blank');if(w){w.opener=null;}});")
@@ -2164,16 +2350,16 @@ Partial Public Class ThisAddIn
         html.AppendLine("sendBtn.addEventListener('click',send);")
         html.AppendLine("pureBtn.addEventListener('click',pureSend);")
         html.AppendLine("cancelBtn.addEventListener('click',async()=>{if(!__currentJobId||__jobCanceled)return;__jobCanceled=true;cancelBtn.disabled=true;setTypingStatus('Cancelling…');await api('inky_cancel',{Job:__currentJobId});});")
-        html.AppendLine("chatEl.addEventListener('click',async e=>{const a=e.target&&e.target.closest&&e.target.closest('a[href]');if(!a)return;const href=String(a.getAttribute('href')||'').trim();if(!href)return;if(/^file:\/\//i.test(href)||/^[A-Za-z]:[\\/]/.test(href)){e.preventDefault();const r=await api('inky_openpath',{Path:href});if(!r||!r.ok)alert((r&&r.error)||'Could not open file link');return;}if(a.target!=='_blank'){a.target='_blank';a.rel='noopener noreferrer';}});")
-        html.AppendLine("async function switchChat(n){if(__currentJobId)return;const r=await api('inky_switch',{Chat:String(n)});if(!r.ok){alert(r.error||'Switch failed');return;}setActiveChatBtn(r.activeChat||n);render(r.history||[]);if(r.greeting){msgEl.placeholder=r.greeting;}if(r.models&&r.models.length){modelSel.innerHTML='';for(const m of r.models){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}}if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}syncAdvancedToolsUi({advancedToolsEnabled:r.advancedToolsEnabled===true,agentWorkspace:r.agentWorkspace,agentFiles:r.agentFiles||[],agentModelAvailable:r.agentModelAvailable===true,agentModelActive:r.agentModelActive===true});updateModelTooltip();adjustModelSel();}")
+        html.AppendLine("chatEl.addEventListener('click',async e=>{const a=e.target&&e.target.closest&&e.target.closest('a[href]');if(!a)return;const href=String(a.getAttribute('href')||'').trim();if(!href)return;if(/^file:\/\//i.test(href)||/^[A-Za-z]:[\\/]/.test(href)){e.preventDefault();e.stopPropagation();if(e.stopImmediatePropagation)e.stopImmediatePropagation();const r=await api('inky_openpath',{Path:href});if(!r||!r.ok)alert((r&&r.error)||'Could not open file link');return;}if(a.target!=='_blank'){a.target='_blank';a.rel='noopener noreferrer';}},true);")
+        html.AppendLine("async function switchChat(n){if(__currentJobId)return;const r=await api('inky_switch',{Chat:String(n)});if(!r.ok){alert(r.error||'Switch failed');return;}setActiveChatBtn(r.activeChat||n);render(r.history||[]);if(r.greeting){msgEl.placeholder=r.greeting;}if(r.models&&r.models.length){modelSel.innerHTML='';for(const m of r.models){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}}if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}syncAdvancedToolsUi({advancedToolsEnabled:r.advancedToolsEnabled===true,agentWorkspace:r.agentWorkspace,agentFiles:r.agentFiles||[],agentModelAvailable:r.agentModelAvailable===true,agentModelActive:r.agentModelActive===true});syncRuntimeStatus(r);updateModelTooltip();adjustModelSel();}")
         html.AppendLine("chat1Btn.addEventListener('click',()=>switchChat(1));")
         html.AppendLine("chat2Btn.addEventListener('click',()=>switchChat(2));")
 
         ' Tooling UI visibility + coupling logic
         html.AppendLine("function updateToolingVisibility(){const show=__modelSupportsTooling===true;toolsBtn.style.display=show?'inline-block':'none';toolingSlot.style.display=show?'flex':'none';toolLogBtn.style.display=show?'flex':'none';if(!show){__toolingEnabled=false;toolingChk.checked=false;__advancedToolsEnabled=false;advancedToolsChk.checked=false;__agentModelActive=false;updateAgentWorkspaceDisplay(null);updateAgentFilesDisplay([]);}updateAgentModelBtn();applyCoupling();}")
         html.AppendLine("function applyCoupling(){advancedToolsChk.disabled=!__toolingEnabled;}")
-        html.AppendLine("toolsBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_selecttools',{IncludeInteractiveM365Tools:true});if(!r.ok){alert(r.error||'Failed to select tools');return;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.advancedToolsEnabled==='boolean'){__advancedToolsEnabled=!!r.advancedToolsEnabled;advancedToolsChk.checked=__advancedToolsEnabled;}applyCoupling();});")
-        html.AppendLine("toolingChk.addEventListener('change',async()=>{if(toolingChk.checked){const r=await api('inky_settooling',{Enabled:true});if(!r.ok){toolingChk.checked=false;if(r.openSources){await api('inky_selecttools',{IncludeInteractiveM365Tools:true});}else{alert(r.error||'Failed to toggle tooling');}applyCoupling();return;}__toolingEnabled=!!r.enabled;if(typeof r.advancedToolsEnabled==='boolean'){__advancedToolsEnabled=!!r.advancedToolsEnabled;advancedToolsChk.checked=__advancedToolsEnabled;}syncAdvancedToolsUi({advancedToolsEnabled:__advancedToolsEnabled,agentWorkspace:r.agentWorkspace,agentFiles:r.agentFiles||[],agentModelAvailable:__agentModelAvailable,agentModelActive:__agentModelActive});}else{const r=await api('inky_settooling',{Enabled:false});if(!r.ok){toolingChk.checked=true;alert(r.error||'Failed to toggle tooling');applyCoupling();return;}__toolingEnabled=!!r.enabled;syncAdvancedToolsUi({advancedToolsEnabled:__advancedToolsEnabled,agentWorkspace:r.agentWorkspace,agentFiles:r.agentFiles||[],agentModelAvailable:__agentModelAvailable,agentModelActive:__agentModelActive});}});")
+        html.AppendLine("toolsBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_selecttools',{IncludeInteractiveM365Tools:true});if(!r.ok){alert(r.error||'Failed to select tools');return;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.advancedToolsEnabled==='boolean'){__advancedToolsEnabled=!!r.advancedToolsEnabled;advancedToolsChk.checked=__advancedToolsEnabled;}applyCoupling();syncRuntimeStatus(r);});")
+        html.AppendLine("toolingChk.addEventListener('change',async()=>{if(toolingChk.checked){const r=await api('inky_settooling',{Enabled:true});if(!r.ok){toolingChk.checked=false;if(r.openSources){await api('inky_selecttools',{IncludeInteractiveM365Tools:true});}else{alert(r.error||'Failed to toggle tooling');}applyCoupling();return;}__toolingEnabled=!!r.enabled;if(typeof r.advancedToolsEnabled==='boolean'){__advancedToolsEnabled=!!r.advancedToolsEnabled;advancedToolsChk.checked=__advancedToolsEnabled;}syncAdvancedToolsUi({advancedToolsEnabled:__advancedToolsEnabled,agentWorkspace:r.agentWorkspace,agentFiles:r.agentFiles||[],agentModelAvailable:__agentModelAvailable,agentModelActive:__agentModelActive});syncRuntimeStatus(r);}else{const r=await api('inky_settooling',{Enabled:false});if(!r.ok){toolingChk.checked=true;alert(r.error||'Failed to toggle tooling');applyCoupling();return;}__toolingEnabled=!!r.enabled;syncAdvancedToolsUi({advancedToolsEnabled:__advancedToolsEnabled,agentWorkspace:r.agentWorkspace,agentFiles:r.agentFiles||[],agentModelAvailable:__agentModelAvailable,agentModelActive:__agentModelActive});syncRuntimeStatus(r);}});")
         html.AppendLine("advancedToolsChk.addEventListener('change',async()=>{const desired=advancedToolsChk.checked;const r=await api('inky_setagent',{Enabled:desired});if(!r||!r.ok){advancedToolsChk.checked=!desired;alert(r&&r.error||'Failed to toggle advanced tools');applyCoupling();return;}syncAdvancedToolsUi({advancedToolsEnabled:r.advancedToolsEnabled===true,agentWorkspace:r.agentWorkspace,agentFiles:r.files||[],agentModelAvailable:__agentModelAvailable,agentModelActive:__agentModelActive});});")
 
         ' Tooling log button (toggle)
@@ -2187,7 +2373,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("function updateAgentFilesDisplay(files){if(!agentFilesEl)return;if(!files||files.length===0||!__advancedToolsEnabled){agentFilesEl.style.display='none';agentFilesEl.innerHTML='';return;}agentFilesEl.style.display='block';let h='📎 Agent files: ';for(const f of files){const size=Number(f&&f.size||0);const kb=(size/1024).toFixed(1);const name=String(f&&f.name||'');h+=`<span class=""file-tag""><span class=""file-tag-name"" data-open-file=""${esc(name)}"" title=""Open this file"" style=""cursor:pointer"">${esc(name)} (${kb} KB)</span><button type=""button"" class=""file-tag-download"" data-download-file=""${esc(name)}"" title=""Save a copy to the Desktop Inky folder"">⤓</button><button type=""button"" class=""file-tag-remove"" data-remove-file=""${esc(name)}"" title=""Remove this file"">×</button></span> `;}agentFilesEl.innerHTML=h;}")
         html.AppendLine("agentFilesEl.addEventListener('click',async e=>{const openEl=e.target&&e.target.closest&&e.target.closest('[data-open-file]');if(openEl){e.preventDefault();const fileName=openEl.getAttribute('data-open-file')||'';if(!fileName)return;const r=await api('inky_agentopenfile',{Name:fileName});if(!r||!r.ok)alert(r&&r.error||'Failed to open file');return;}const dl=e.target&&e.target.closest&&e.target.closest('[data-download-file]');if(dl){e.preventDefault();const fileName=dl.getAttribute('data-download-file')||'';if(!fileName)return;dl.disabled=true;try{const r=await api('inky_agentdownloadfile',{Name:fileName});if(!r||!r.ok){alert(r&&r.error||'Failed to download file');return;}addTempAssistantBubble('Saved a copy to: '+esc(r.savedPath||''));}finally{dl.disabled=false;}return;}const btn=e.target&&e.target.closest&&e.target.closest('[data-remove-file]');if(!btn)return;e.preventDefault();if(__currentJobId)return;const fileName=btn.getAttribute('data-remove-file')||'';if(!fileName)return;btn.disabled=true;const r=await api('inky_agentremovefile',{Name:fileName});if(!r||!r.ok){btn.disabled=false;alert(r&&r.error||'Failed to remove file');return;}updateAgentFilesDisplay(r.files||[]);});")
         html.AppendLine("function updateAgentModelBtn(){if(!agentModelBtn)return;agentModelBtn.style.display=__agentModelAvailable?'flex':'none';agentModelBtn.classList.toggle('active',__agentModelActive);}")
-        html.AppendLine("agentModelBtn.addEventListener('click',async()=>{if(__currentJobId)return;agentModelBtn.disabled=true;try{const r=await api('inky_toggleagentmodel');if(!r.ok){alert(r.error||'Failed to toggle agent model');return;}if(r.models&&r.models.length){modelSel.innerHTML='';for(const m of r.models){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}}updateModelTooltip();if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}syncAdvancedToolsUi({advancedToolsEnabled:r.advancedToolsEnabled===true,agentWorkspace:Object.prototype.hasOwnProperty.call(r,'agentWorkspace')?r.agentWorkspace:null,agentFiles:r.agentFiles||[],agentModelAvailable:__agentModelAvailable,agentModelActive:r.active===true});adjustModelSel();}finally{agentModelBtn.disabled=false;}});")
+        html.AppendLine("agentModelBtn.addEventListener('click',async()=>{if(__currentJobId)return;agentModelBtn.disabled=true;try{const r=await api('inky_toggleagentmodel');if(!r.ok){alert(r.error||'Failed to toggle agent model');return;}if(r.models&&r.models.length){modelSel.innerHTML='';for(const m of r.models){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}}updateModelTooltip();if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}syncAdvancedToolsUi({advancedToolsEnabled:r.advancedToolsEnabled===true,agentWorkspace:Object.prototype.hasOwnProperty.call(r,'agentWorkspace')?r.agentWorkspace:null,agentFiles:r.agentFiles||[],agentModelAvailable:__agentModelAvailable,agentModelActive:r.active===true});syncRuntimeStatus(r);adjustModelSel();}finally{agentModelBtn.disabled=false;}});")
         html.AppendLine("function esc(s){return String(s||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('""','&quot;');}")
         html.AppendLine("function buildWorkspacePresetChipsHtml(ws){const presets=Array.isArray(ws&&ws.presets)?ws.presets:[];const bySlot=new Map();for(const p of presets){const slot=Number(p&&p.slot||0);if(slot>=1&&slot<=5)bySlot.set(slot,p);}let h='<div class=""ws-presets""><span class=""ws-presets-label"">Memories:</span>';for(let slot=1;slot<=5;slot++){const p=bySlot.get(slot)||{slot:slot,assigned:false,exists:false,label:'',path:''};const assigned=!!p.assigned;const exists=(p.exists!==false);const active=!!p.active;const label=assigned?String(p.label||'').trim():'';const text=(assigned&&label)?`${slot} ${esc(label)}`:String(slot);const cls=['ws-chip'];if(active)cls.push('active');if(!assigned)cls.push('empty');if(assigned&&!exists)cls.push('missing');const title=assigned?(exists?String(p.path||''):('Missing: '+String(p.path||''))):('Empty memory '+slot);h+='<span class=""ws-preset-group"">';h+=`<button type=""button"" class=""${cls.join(' ')}"" data-ws-preset-slot=""${slot}"" ${!assigned||!exists?'disabled':''} title=""${esc(title)}"">${text}</button>`;if(assigned){h+=`<button type=""button"" class=""ws-chip-clear"" data-ws-preset-clear=""${slot}"" title=""Clear memory ${slot}"" aria-label=""Clear memory ${slot}"">×</button>`;}h+='</span>';}h+='</div>';return h;}")
         html.AppendLine("function updateAgentWorkspaceDisplay(ws){if(!agentWorkspaceEl)return;if(!__advancedToolsEnabled){agentWorkspaceEl.style.display='none';agentWorkspaceEl.innerHTML='';return;}agentWorkspaceEl.style.display='block';const presetHtml=buildWorkspacePresetChipsHtml(ws||{});if(!ws||!ws.connected){agentWorkspaceEl.innerHTML='<div class=""ws-main""><span class=""ws-title"">📁 Workspace:</span> Not connected <button id=""wsConnectBtn"">Connect folder</button></div>'+presetHtml;bindWorkspaceButtons();return;}agentWorkspaceEl.innerHTML='<div class=""ws-main""><span class=""ws-title"">📁 Workspace:</span> '+esc(ws.name||'Workspace')+' <span class=""ws-path"">'+esc(ws.rootPath||'')+'</span> <button id=""wsOpenBtn"">Open</button><button id=""wsChangeBtn"">Change</button><button id=""wsPermBtn"">Permissions</button><button id=""wsRevokeBtn"">Revoke</button></div>'+presetHtml;bindWorkspaceButtons();}")
@@ -3059,6 +3245,34 @@ Partial Public Class ThisAddIn
                             Return JsonErr("Failed to get tooling state: " & ex.Message)
                         End Try
 
+                    Case "inky_getruntimestate"
+                        Try
+                            Dim stRuntime As InkyState = LoadInkyState()
+                            Dim modelSupportsToolingRuntime As System.Boolean = CurrentModelSupportsTooling(stRuntime)
+                            Dim hasToolsRuntime As System.Boolean =
+                                HasLocalChatAnyCallableTools(stRuntime, includeInteractiveM365Tools:=True)
+                            Dim preferenceEnabledRuntime As System.Boolean =
+                                stRuntime.ToolingEnabled AndAlso hasToolsRuntime AndAlso modelSupportsToolingRuntime
+                            Dim supportsToolingRuntime As System.Boolean =
+                                modelSupportsToolingRuntime AndAlso Not _apActive
+                            Dim toolingEnabledRuntime As System.Boolean =
+                                preferenceEnabledRuntime AndAlso Not _apActive
+                            Dim advancedToolsEnabledRuntime As System.Boolean =
+                                stRuntime.AgentModeEnabled AndAlso toolingEnabledRuntime
+
+                            Return JsonOk(New With {
+                                .ok = True,
+                                .toolingEnabled = toolingEnabledRuntime,
+                                .supportsTooling = supportsToolingRuntime,
+                                .modelSupportsTooling = modelSupportsToolingRuntime,
+                                .advancedToolsEnabled = advancedToolsEnabledRuntime,
+                                .autoPilotActive = _apActive,
+                                .agentRuntimeBusy = SharedLibrary.Agents.AgentGate.IsBusy
+                            })
+                        Catch ex As System.Exception
+                            Return JsonErr("Failed to get Local Chat runtime state: " & ex.Message)
+                        End Try
+
                     Case "inky_getstate"
                         Try
                             Dim debugEnabled As System.Boolean = INI_APIDebug
@@ -3139,6 +3353,9 @@ Partial Public Class ThisAddIn
                                     .activeChat = activeChatId,
                                     .toolingEnabled = toolingEnabled,
                                     .supportsTooling = supportsTooling,
+                                    .modelSupportsTooling = CurrentModelSupportsTooling(st),
+                                    .autoPilotActive = _apActive,
+                                    .agentRuntimeBusy = SharedLibrary.Agents.AgentGate.IsBusy,
                                     .toolingLogEnabled = GetEffectiveToolingLogWindowSetting(),
                                     .tools = GetToolListForBrowser(includeInteractiveM365Tools:=True),
                                     .advancedToolsEnabled = st.AgentModeEnabled,
@@ -3217,6 +3434,9 @@ Partial Public Class ThisAddIn
                                 .greeting = greetingSwitch,
                                 .toolingEnabled = effectiveToolingEnabled,
                                 .supportsTooling = supportsTooling,
+                                .modelSupportsTooling = CurrentModelSupportsTooling(stSw),
+                                .autoPilotActive = _apActive,
+                                .agentRuntimeBusy = SharedLibrary.Agents.AgentGate.IsBusy,
                                 .toolingLogEnabled = INI_ToolingLogWindow,
                                 .models = models,
                                 .advancedToolsEnabled = stSw.AgentModeEnabled,
@@ -3386,13 +3606,82 @@ Partial Public Class ThisAddIn
                         Catch
                         End Try
                         Dim st As InkyState = LoadInkyState()
-                        ' Recompute upload capability (client may be stale)
+                        Dim continuationStateChanged As System.Boolean = EnsureLocalChatContinuationSessionId(st)
+                        Dim retryAdditionalInstructions As System.String = System.String.Empty
+                        Dim isLocalChatRetry As System.Boolean = TryParseLocalChatRetryRequest(textBody, retryAdditionalInstructions)
+                        Dim continuationKeyForRequest As System.String = BuildLocalChatContinuationKey(st, activeChatId)
+                        Dim retryWorkflowId As System.String = System.String.Empty
+                        Dim continuationLanguage As System.String = GetUserLanguageTwoLetter()
+                        Dim restoredContinuationRequestFile As System.String = Nothing
+                        Dim continuationRequestFileSource As System.String = uploadedTempPath
+
+                        If isLocalChatRetry Then
+                            retryWorkflowId = If(st.PendingContinuationWorkflowId, System.String.Empty).Trim()
+                            If Not IsMatchingBlockedLocalChatContinuation(retryWorkflowId, continuationKeyForRequest) Then
+                                retryWorkflowId = SharedLibrary.Agents.WorkflowContinuity.FindBlockedContinuationWorkflowId(continuationKeyForRequest, "Outlook")
+                            End If
+
+                            Dim storedLanguage As System.String = SharedLibrary.Agents.WorkflowContinuity.GetLatestBlockedContinuationUserLanguage(continuationKeyForRequest, "Outlook")
+                            If Not System.String.IsNullOrWhiteSpace(storedLanguage) Then continuationLanguage = storedLanguage
+
+                            If Not IsMatchingBlockedLocalChatContinuation(retryWorkflowId, continuationKeyForRequest) Then
+                                st.History.Add(New ChatTurn With {
+                                    .Role = "user",
+                                    .Markdown = textBody,
+                                    .Html = MarkdownToHtml(textBody),
+                                    .Utc = System.DateTime.UtcNow
+                                })
+                                Dim unavailable As System.String = BuildLocalChatRetryUnavailableNotice(continuationLanguage)
+                                st.History.Add(New ChatTurn With {
+                                    .Role = "assistant",
+                                    .Markdown = unavailable,
+                                    .Html = MarkdownToHtml(unavailable),
+                                    .Utc = System.DateTime.UtcNow
+                                })
+                                st.LastAssistantText = unavailable
+                                ClearLocalChatPendingContinuation(st)
+                                SaveInkyState(st)
+                                DeleteLocalChatContinuationInputs(st.ContinuationSessionId)
+                                Return JsonOk(New With {.ok = True, .history = ToBrowserTurns(st.History)})
+                            End If
+
+                            If st.PendingContinuationWasAgentMode Then
+                                Dim currentWorkspaceFingerprint As System.String = GetLocalChatWorkspaceContinuationFingerprint()
+                                If Not System.String.Equals(If(st.PendingContinuationWorkspaceFingerprint, System.String.Empty),
+                                                            If(currentWorkspaceFingerprint, System.String.Empty),
+                                                            System.StringComparison.Ordinal) Then
+                                    st.History.Add(New ChatTurn With {
+                                        .Role = "user",
+                                        .Markdown = textBody,
+                                        .Html = MarkdownToHtml(textBody),
+                                        .Utc = System.DateTime.UtcNow
+                                    })
+                                    Dim unavailable As System.String = BuildLocalChatRetryEnvironmentUnavailableNotice(continuationLanguage)
+                                    st.History.Add(New ChatTurn With {
+                                        .Role = "assistant",
+                                        .Markdown = unavailable,
+                                        .Html = MarkdownToHtml(unavailable),
+                                        .Utc = System.DateTime.UtcNow
+                                    })
+                                    st.LastAssistantText = unavailable
+                                    SaveInkyState(st)
+                                    Return JsonOk(New With {.ok = True, .history = ToBrowserTurns(st.History)})
+                                End If
+                            End If
+                        Else
+                            If Not System.String.IsNullOrWhiteSpace(st.PendingContinuationWorkflowId) Then
+                                Dim abandonedContinuationSessionId As System.String = st.ContinuationSessionId
+                                SharedLibrary.Agents.WorkflowContinuity.InvalidateContinuation(st.PendingContinuationWorkflowId, continuationKeyForRequest, "Outlook")
+                                DeleteLocalChatContinuationInputs(abandonedContinuationSessionId)
+                                ClearLocalChatPendingContinuation(st)
+                                EnsureLocalChatContinuationSessionId(st, rotate:=True)
+                                continuationKeyForRequest = BuildLocalChatContinuationKey(st, activeChatId)
+                                continuationStateChanged = True
+                            End If
+                        End If
+
+                        If continuationStateChanged Then SaveInkyState(st)
                         Dim supportsFilesNow As System.Boolean = False
-                        Try
-                            supportsFilesNow = ComputeSupportsFiles(st.UseSecondApi, st.SelectedModelKey)
-                        Catch
-                            supportsFilesNow = False
-                        End Try
 
                         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "LocalChat_Send invoked")
 
@@ -3473,6 +3762,78 @@ Partial Public Class ThisAddIn
                             End If
                         End If
 
+                        If isLocalChatRetry AndAlso st.PendingContinuationUseToolTrigger AndAlso Not toolTriggerDetected Then
+                            Try
+                                Dim retryToolConfig As ModelConfig = Nothing
+                                If TryGetSpecialTaskModelConfig(_context, INI_AlternateModelPath, "ToolDefaultModel", retryToolConfig) AndAlso
+                                   retryToolConfig IsNot Nothing AndAlso ModelSupportsTooling(retryToolConfig) Then
+                                    toolTriggerConfig = retryToolConfig
+                                    toolTriggerDetected = True
+                                End If
+                            Catch
+                            End Try
+
+                            If Not toolTriggerDetected Then
+                                st.History.Add(New ChatTurn With {
+                                    .Role = "user",
+                                    .Markdown = textBody,
+                                    .Html = MarkdownToHtml(textBody),
+                                    .Utc = System.DateTime.UtcNow
+                                })
+                                Dim unavailable As System.String = BuildLocalChatRetryEnvironmentUnavailableNotice(continuationLanguage)
+                                st.History.Add(New ChatTurn With {
+                                    .Role = "assistant",
+                                    .Markdown = unavailable,
+                                    .Html = MarkdownToHtml(unavailable),
+                                    .Utc = System.DateTime.UtcNow
+                                })
+                                st.LastAssistantText = unavailable
+                                SaveInkyState(st)
+                                Return JsonOk(New With {.ok = True, .history = ToBrowserTurns(st.History)})
+                            End If
+                        End If
+
+                        Try
+                            If toolTriggerDetected AndAlso toolTriggerConfig IsNot Nothing Then
+                                supportsFilesNow = ModelConfigSupportsFileUploads(toolTriggerConfig)
+                            Else
+                                supportsFilesNow = ComputeSupportsFiles(
+                                    If(isLocalChatRetry, st.PendingContinuationUseSecondApi, st.UseSecondApi),
+                                    If(isLocalChatRetry, If(st.PendingContinuationSelectedModelKey, System.String.Empty), st.SelectedModelKey))
+                            End If
+                        Catch
+                            supportsFilesNow = False
+                        End Try
+
+                        If isLocalChatRetry AndAlso st.PendingContinuationRequiresInputRestore Then
+                            If Not st.PendingContinuationInputsPersisted OrElse
+                               Not RestoreLocalChatContinuationInputs(st.ContinuationSessionId, restoredContinuationRequestFile) Then
+                                st.History.Add(New ChatTurn With {
+                                    .Role = "user",
+                                    .Markdown = textBody,
+                                    .Html = MarkdownToHtml(textBody),
+                                    .Utc = System.DateTime.UtcNow
+                                })
+                                SharedLibrary.Agents.WorkflowContinuity.InvalidateContinuation(retryWorkflowId, continuationKeyForRequest, "Outlook")
+                                ClearLocalChatPendingContinuation(st)
+                                DeleteLocalChatContinuationInputs(st.ContinuationSessionId)
+                                Dim unavailable As System.String = BuildLocalChatRetryInputsUnavailableNotice(continuationLanguage)
+                                st.History.Add(New ChatTurn With {
+                                    .Role = "assistant",
+                                    .Markdown = unavailable,
+                                    .Html = MarkdownToHtml(unavailable),
+                                    .Utc = System.DateTime.UtcNow
+                                })
+                                st.LastAssistantText = unavailable
+                                SaveInkyState(st)
+                                Return JsonOk(New With {.ok = True, .history = ToBrowserTurns(st.History)})
+                            End If
+                            If Not System.String.IsNullOrWhiteSpace(restoredContinuationRequestFile) Then
+                                fileObject = restoredContinuationRequestFile
+                                continuationRequestFileSource = restoredContinuationRequestFile
+                            End If
+                        End If
+
                         ' ------------------ (B) File / clipboard object extraction (unchanged logic) ------------
                         Dim extractedDoc As System.String = Nothing
                         Dim extractedLabel As System.String = Nothing
@@ -3481,7 +3842,10 @@ Partial Public Class ThisAddIn
                         If Not System.String.IsNullOrWhiteSpace(fileObject) Then
                             Dim okOffice As System.Boolean = False
                             Try
-                                okOffice = TryExtractOfficeText(fileObject, extractedDoc, extractedLabel)
+                                Dim officeRead = Await TryExtractOfficeTextAsync(fileObject).ConfigureAwait(False)
+                                okOffice = officeRead.Item1
+                                extractedDoc = officeRead.Item2
+                                extractedLabel = officeRead.Item3
                             Catch
                                 okOffice = False
                             End Try
@@ -3492,7 +3856,10 @@ Partial Public Class ThisAddIn
                             Else
                                 Dim okText As System.Boolean = False
                                 Try
-                                    okText = TryExtractTextLike(fileObject, extractedDoc, extractedLabel)
+                                    Dim textRead = Await TryExtractTextLikeAsync(fileObject).ConfigureAwait(False)
+                                    okText = textRead.Item1
+                                    extractedDoc = textRead.Item2
+                                    extractedLabel = textRead.Item3
                                 Catch
                                     okText = False
                                 End Try
@@ -3535,6 +3902,32 @@ Partial Public Class ThisAddIn
                             st = LoadInkyState()
                         End If
 
+                        ' Capture only the current user instruction as retrieval authority.
+                        ' A saved dialog, attachment, or workspace listing cannot select archives.
+                        Dim archiveRequestForJob As System.String = textBody
+                        Dim archiveScopeForJob As Global.SharedLibrary.SharedLibrary.SemanticArchiveRunScope
+                        If Not System.String.IsNullOrWhiteSpace(scheduledTaskId) Then
+                            archiveScopeForJob = Await CreateAutoPilotSemanticArchiveRunScopeAsync(
+                                Global.SharedLibrary.SharedLibrary.SemanticArchiveRequesterOrigin.ScheduledTask, scheduledTaskId, System.String.Empty, System.Threading.CancellationToken.None).ConfigureAwait(False)
+                        Else
+                            archiveScopeForJob = CreateSelectedSemanticArchiveRunScope()
+                        End If
+                        Dim hasArchiveRequestForJob As System.Boolean = Global.SharedLibrary.SharedLibrary.SemanticArchiveTriggerHelper.HasSemanticArchiveTrigger(archiveRequestForJob)
+                        If hasArchiveRequestForJob AndAlso archiveScopeForJob IsNot Nothing AndAlso
+                           archiveScopeForJob.AccessContext.DenialCode.Length = 0 AndAlso
+                           archiveScopeForJob.SelectedArchiveIds.Count = 0 AndAlso System.String.IsNullOrWhiteSpace(scheduledTaskId) Then
+                            Dim hasNamedArchive As System.Boolean = False
+                            For Each archiveRequest As Global.SharedLibrary.SharedLibrary.SemanticArchiveRequest In Global.SharedLibrary.SharedLibrary.SemanticArchiveTriggerHelper.Parse(archiveRequestForJob)
+                                If archiveRequest.ArchiveSelectors.Count > 0 Then hasNamedArchive = True
+                            Next
+                            If Not hasNamedArchive Then
+                                Await SwitchToUi(Sub()
+                                                     Dim selectedScope = Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.ShowArchiveScopePicker(_context, archiveScopeForJob)
+                                                     If selectedScope IsNot Nothing Then archiveScopeForJob = selectedScope
+                                                 End Sub).ConfigureAwait(False)
+                            End If
+                        End If
+
                         ' ------------------ (C) Append user turn immediately ------------------
                         Dim userTurn As New ChatTurn With {
                             .Role = "user",
@@ -3552,7 +3945,11 @@ Partial Public Class ThisAddIn
                         sbDialog.AppendLine("<DIALOG>")
                         For Each t In clipped
                             If t.Role = "user" Then
-                                sbDialog.AppendLine("[USER] " & t.Markdown)
+                                Dim turnText As System.String = t.Markdown
+                                If hasArchiveRequestForJob AndAlso System.Object.ReferenceEquals(t, clipped(clipped.Count - 1)) Then
+                                    turnText = Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.RemoveRequestControlSpans(archiveRequestForJob)
+                                End If
+                                sbDialog.AppendLine("[USER] " & turnText)
                             Else
                                 sbDialog.AppendLine("[ASSISTANT] " & t.Markdown)
                             End If
@@ -3568,8 +3965,10 @@ Partial Public Class ThisAddIn
                             sbDialog.AppendLine("</ATTACHED_DOCUMENT>")
                         End If
 
+                        Dim advancedToolsForRequest As System.Boolean = If(isLocalChatRetry, st.PendingContinuationWasAgentMode, _chatAdvancedToolsEnabled)
+
                         ' Add agent file listing so the model knows which files are already loaded/staged
-                        If _chatAdvancedToolsEnabled AndAlso _chatAgentFiles IsNot Nothing AndAlso _chatAgentFiles.Count > 0 Then
+                        If advancedToolsForRequest AndAlso _chatAgentFiles IsNot Nothing AndAlso _chatAgentFiles.Count > 0 Then
                             sbDialog.AppendLine()
                             sbDialog.AppendLine("[LOADED FILES]")
                             For i As Integer = 0 To _chatAgentFiles.Count - 1
@@ -3584,7 +3983,7 @@ Partial Public Class ThisAddIn
                         End If
 
                         ' Add workspace context independently of whether any files are already staged
-                        If _chatAdvancedToolsEnabled Then
+                        If advancedToolsForRequest Then
                             Dim workspacePromptBlock As String = BuildAgentWorkspacePromptBlock()
                             If Not String.IsNullOrWhiteSpace(workspacePromptBlock) Then
                                 sbDialog.AppendLine()
@@ -3592,7 +3991,7 @@ Partial Public Class ThisAddIn
                             End If
                         End If
 
-                        If _chatAdvancedToolsEnabled Then
+                        If advancedToolsForRequest Then
                             Dim sessionFilesPromptBlock As String = BuildAgentSessionFilesPromptBlock()
                             If Not String.IsNullOrWhiteSpace(sessionFilesPromptBlock) Then
                                 sbDialog.AppendLine()
@@ -3614,7 +4013,7 @@ Partial Public Class ThisAddIn
                         sysPromptBase &= Environment.NewLine & "Current local date/time: " & nowLocal
                         sysPromptBase &= Environment.NewLine & $"Your name is '{AN6}'. "
 
-                        If _chatAdvancedToolsEnabled Then
+                        If advancedToolsForRequest Then
                             sysPromptBase &= Environment.NewLine &
                                 "Local Chat Agent behavior: Tools are optional. If the user's latest request can be answered directly, especially for creative writing, drafting, rewriting, brainstorming, summarizing, explanation, or ordinary chat, answer directly without using tools. Do not claim that you are unable to perform a normal language-generation task merely because no tool, attachment, or workspace action is required. Use tools only when they are actually needed for files, workspace operations, document processing, or external/source-backed work."
                         End If
@@ -3628,16 +4027,95 @@ Partial Public Class ThisAddIn
                             End If
                         End If
 
-                        Dim useSecondApiLocal As Boolean = st.UseSecondApi
-                        Dim selectedModelKeyLocal As String = st.SelectedModelKey
-                        Dim supportsToolingForJob As Boolean = CurrentModelSupportsTooling(st)
-                        Dim toolingEnabledForJob As Boolean = st.ToolingEnabled AndAlso supportsToolingForJob
-                        Dim agentModeEnabledForJob As Boolean = st.AgentModeEnabled AndAlso toolingEnabledForJob
-                        Dim selectedToolsForJob As List(Of ModelConfig) =
-                            GetLocalChatEffectiveSelection(st, includeInteractiveM365Tools:=True)
-                        ' Capture file object (may be Nothing after extraction)
+                        Dim useSecondApiLocal As Boolean = If(isLocalChatRetry, st.PendingContinuationUseSecondApi, st.UseSecondApi)
+                        Dim selectedModelKeyLocal As String = If(isLocalChatRetry, If(st.PendingContinuationSelectedModelKey, System.String.Empty), st.SelectedModelKey)
+
+                        Dim capabilityState As InkyState = st
+                        If isLocalChatRetry Then
+                            capabilityState = New InkyState() With {
+                                .UseSecondApi = useSecondApiLocal,
+                                .SelectedModelKey = selectedModelKeyLocal
+                            }
+                        End If
+
+                        Dim supportsToolingForJob As Boolean = If(toolTriggerDetected AndAlso toolTriggerConfig IsNot Nothing, True, CurrentModelSupportsTooling(capabilityState))
+                        Dim toolingEnabledForJob As Boolean = (If(isLocalChatRetry, True, st.ToolingEnabled)) AndAlso supportsToolingForJob AndAlso Not _apActive
+                        Dim agentModeEnabledForJob As Boolean = If(isLocalChatRetry, st.PendingContinuationWasAgentMode, st.AgentModeEnabled) AndAlso toolingEnabledForJob
+                        Dim selectedToolsForJob As List(Of ModelConfig)
+                        If isLocalChatRetry AndAlso st.PendingContinuationToolNames IsNot Nothing AndAlso st.PendingContinuationToolNames.Count > 0 Then
+                            selectedToolsForJob = ResolveLocalChatContinuationTools(st.PendingContinuationToolNames, agentModeEnabledForJob)
+                        Else
+                            selectedToolsForJob = GetLocalChatEffectiveSelection(st, includeInteractiveM365Tools:=True)
+                        End If
+
+                        If isLocalChatRetry AndAlso Not supportsToolingForJob Then
+                            Dim unavailable As System.String = BuildLocalChatRetryEnvironmentUnavailableNotice(continuationLanguage)
+                            st.History.Add(New ChatTurn With {.Role = "assistant", .Markdown = unavailable, .Html = MarkdownToHtml(unavailable), .Utc = System.DateTime.UtcNow})
+                            st.LastAssistantText = unavailable
+                            SaveInkyState(st)
+                            Return JsonOk(New With {.ok = True, .history = ToBrowserTurns(st.History)})
+                        End If
+
+                        If isLocalChatRetry AndAlso st.PendingContinuationToolNames IsNot Nothing AndAlso
+                           st.PendingContinuationToolNames.Count > 0 AndAlso
+                           selectedToolsForJob.Count <> st.PendingContinuationToolNames.Distinct(System.StringComparer.OrdinalIgnoreCase).Count() Then
+                            Dim unavailable As System.String = BuildLocalChatRetryEnvironmentUnavailableNotice(continuationLanguage)
+                            st.History.Add(New ChatTurn With {.Role = "assistant", .Markdown = unavailable, .Html = MarkdownToHtml(unavailable), .Utc = System.DateTime.UtcNow})
+                            st.LastAssistantText = unavailable
+                            SaveInkyState(st)
+                            Return JsonOk(New With {.ok = True, .history = ToBrowserTurns(st.History)})
+                        End If
+
+                        ' Capture file object (may be Nothing after extraction or restored from continuation input cache).
                         Dim finalFileObject As String = fileObject
+
                         Dim tempUploadPathCopy As String = uploadedTempPath
+                        Dim localUserLanguage As System.String = If(System.String.IsNullOrWhiteSpace(continuationLanguage), GetUserLanguageTwoLetter(), continuationLanguage)
+                        Dim workflowIdForJob As System.String = If(isLocalChatRetry, retryWorkflowId, SharedLibrary.Agents.WorkflowContinuity.CreateWorkflowId())
+                        Dim continuationKeyForJob As System.String = continuationKeyForRequest
+                        Dim continuationSessionIdForJob As System.String = st.ContinuationSessionId
+                        Dim continuationRetentionDays As System.Int32 = SharedLibrary.Agents.WorkflowContinuity.DefaultContinuationRetentionDays
+                        Dim workspaceFingerprintForJob As System.String =
+                            If(agentModeEnabledForJob,
+                               If(isLocalChatRetry, If(st.PendingContinuationWorkspaceFingerprint, System.String.Empty), GetLocalChatWorkspaceContinuationFingerprint()),
+                               System.String.Empty)
+
+                        Dim plannedToolingRun As System.Boolean =
+                            isLocalChatRetry OrElse toolTriggerDetected OrElse
+                            (toolingEnabledForJob AndAlso (selectedToolsForJob.Count > 0 OrElse agentModeEnabledForJob OrElse IsChatAgentWorkspaceConnected()))
+                        Dim continuationEligibleForJob As System.Boolean = plannedToolingRun AndAlso System.String.IsNullOrWhiteSpace(scheduledTaskId)
+                        If Not continuationEligibleForJob Then continuationKeyForJob = System.String.Empty
+
+                        If continuationEligibleForJob Then
+                            Dim continuationRequestPath As System.String =
+                                If(Not System.String.IsNullOrWhiteSpace(continuationRequestFileSource) AndAlso System.IO.File.Exists(continuationRequestFileSource),
+                                   continuationRequestFileSource,
+                                   finalFileObject)
+                            Dim requiresInputRestore As System.Boolean =
+                                (Not System.String.IsNullOrWhiteSpace(continuationRequestPath) AndAlso System.IO.File.Exists(continuationRequestPath)) OrElse
+                                (_chatAgentFiles IsNot Nothing AndAlso _chatAgentFiles.Any(Function(a) a IsNot Nothing AndAlso Not a.IsToolOutput))
+                            Dim inputsPersisted As System.Boolean = PersistLocalChatContinuationInputs(continuationSessionIdForJob, continuationRequestPath)
+
+                            st.PendingContinuationWorkflowId = workflowIdForJob
+                            st.PendingContinuationWasAgentMode = agentModeEnabledForJob
+                            st.PendingContinuationUseToolTrigger = toolTriggerDetected
+                            st.PendingContinuationUseSecondApi = useSecondApiLocal
+                            st.PendingContinuationSelectedModelKey = If(selectedModelKeyLocal, System.String.Empty)
+                            st.PendingContinuationToolNames = selectedToolsForJob.Select(Function(t) t.ToolName).Distinct(System.StringComparer.OrdinalIgnoreCase).ToList()
+                            st.PendingContinuationRequiresInputRestore = requiresInputRestore
+                            st.PendingContinuationInputsPersisted = inputsPersisted
+                            st.PendingContinuationWorkspaceFingerprint = workspaceFingerprintForJob
+                            SaveInkyState(st)
+                        End If
+
+                        If isLocalChatRetry Then
+                            sysPromptBase &= Environment.NewLine &
+                                "This is a continuation of a previously blocked Local Chat tooling workflow. Continue the original task using the restored workflow state. Do not repeat successful side effects merely to recreate prior work."
+                            If Not System.String.IsNullOrWhiteSpace(retryAdditionalInstructions) Then
+                                sysPromptBase &= Environment.NewLine & "Additional continuation instruction from the user: " & retryAdditionalInstructions
+                            End If
+                        End If
+
                         ' ------------------ (E) Create background job ------------------
                         Dim jobId As String = Guid.NewGuid().ToString("N")
                         Dim jobCts As New CancellationTokenSource()
@@ -3688,16 +4166,25 @@ Partial Public Class ThisAddIn
                                 Dim snapshotTaken As Boolean = False
                                 Dim alternateApplied As Boolean = False
                                 Dim localOutput As String = ""
+                                Dim assistantTurnPersisted As System.Boolean = False
                                 Dim agentAbortDetected As Boolean = False
                                 Dim agentToolCallLogSnapshot As List(Of AutoPilotToolCallEntry) = Nothing
                                 Dim agentOutputFiles As List(Of String) = Nothing
                                 Dim scheduledTaskFinalized As Boolean = False
                                 Dim runIsolationOwned As Boolean = False
+                                Dim archivePrepared As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest = Nothing
                                 Try
                                     ' Serialize the complete Local Agent run because model configuration,
                                     ' current attachments, PathPolicy and delivery state are shared host state.
                                     SharedLibrary.Agents.AgentGate.BeginOwnedScopeAsync(jobCts.Token).GetAwaiter().GetResult()
                                     runIsolationOwned = True
+
+                                    If hasArchiveRequestForJob Then
+                                        archivePrepared = Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.PrepareAsync(
+                                            _context, archiveRequestForJob, archiveScopeForJob,
+                                            allowInteractiveSelection:=False, cancellationToken:=jobCts.Token).GetAwaiter().GetResult()
+                                        sysPromptBase &= System.Environment.NewLine & archivePrepared.ContextText
+                                    End If
 
                                     ' (1) Alternate model application (safer pattern)
                                     If useSecondApiLocal AndAlso Not String.IsNullOrWhiteSpace(selectedModelKeyLocal) Then
@@ -3771,7 +4258,14 @@ Partial Public Class ThisAddIn
                                                     Not INI_ToolingLogWindow,
                                                     False,
                                                     jobCts.Token,
-                                                    progressSink:=Sub(s) job.StatusMessage = s
+                                                    progressSink:=Sub(s) job.StatusMessage = s,
+                                                    userLanguage:=localUserLanguage,
+                                                    workflowId:=workflowIdForJob,
+                                                    resumeWorkflowFromCheckpoint:=isLocalChatRetry,
+                                                    workflowContinuationKey:=continuationKeyForJob,
+                                                    workflowContinuationRetentionDays:=continuationRetentionDays,
+                                                    semanticArchivePrepared:=archivePrepared,
+                                                    semanticArchiveScope:=archiveScopeForJob
                                                 ).GetAwaiter().GetResult()
 
                                             ' Restore config AFTER tooling completes
@@ -3798,7 +4292,14 @@ Partial Public Class ThisAddIn
                                                 False,
                                                 jobCts.Token,
                                                 _chatAgentTempDir,
-                                                progressSink:=Sub(s) job.StatusMessage = s
+                                                progressSink:=Sub(s) job.StatusMessage = s,
+                                                userLanguage:=localUserLanguage,
+                                                workflowId:=workflowIdForJob,
+                                                resumeWorkflowFromCheckpoint:=isLocalChatRetry,
+                                                workflowContinuationKey:=continuationKeyForJob,
+                                                workflowContinuationRetentionDays:=continuationRetentionDays,
+                                                    semanticArchivePrepared:=archivePrepared,
+                                                    semanticArchiveScope:=archiveScopeForJob
                                             ).GetAwaiter().GetResult()
 
                                             ' Restore config AFTER tooling completes
@@ -3866,7 +4367,14 @@ Partial Public Class ThisAddIn
                                                     Not INI_ToolingLogWindow,
                                                     False,
                                                     jobCts.Token,
-                                                    progressSink:=Sub(s) job.StatusMessage = s
+                                                    progressSink:=Sub(s) job.StatusMessage = s,
+                                                    userLanguage:=localUserLanguage,
+                                                    workflowId:=workflowIdForJob,
+                                                    resumeWorkflowFromCheckpoint:=isLocalChatRetry,
+                                                    workflowContinuationKey:=continuationKeyForJob,
+                                                    workflowContinuationRetentionDays:=continuationRetentionDays,
+                                                    semanticArchivePrepared:=archivePrepared,
+                                                    semanticArchiveScope:=archiveScopeForJob
                                                 ).GetAwaiter().GetResult()
 
                                             ' Restore config AFTER tooling completes
@@ -3892,6 +4400,71 @@ Partial Public Class ThisAddIn
                                             ChatAgentTeardownToolContext()
                                         End If
                                     End Try
+
+                                    ' The model footer is an internal workflow protocol. Strip it before
+                                    ' adding host retry notices; once a notice follows it, the footer
+                                    ' is no longer trailing and cannot be recognized by the strict parser.
+                                    localOutput = SharedLibrary.Agents.ToolCallSequencing.StripTaskStatusBlocksFromUserFacingText(localOutput)
+
+                                    If continuationEligibleForJob Then
+                                        Dim completedBlocked As System.Boolean =
+                                            _lastCompletedToolingWasBlocked AndAlso
+                                            System.String.Equals(_lastCompletedToolingWorkflowId, workflowIdForJob, System.StringComparison.OrdinalIgnoreCase) AndAlso
+                                            SharedLibrary.Agents.WorkflowContinuity.CanOfferContinuationRetry(workflowIdForJob)
+
+                                        Dim continuationState As InkyState = LoadInkyState(originatingChatId)
+                                        EnsureLocalChatContinuationSessionId(continuationState)
+                                        Dim currentContinuationKey As System.String = BuildLocalChatContinuationKey(continuationState, originatingChatId)
+                                        Dim sameContinuationSession As System.Boolean =
+                                            System.String.Equals(currentContinuationKey, continuationKeyForJob, System.StringComparison.Ordinal) AndAlso
+                                            System.String.Equals(continuationState.ContinuationSessionId, continuationSessionIdForJob, System.StringComparison.OrdinalIgnoreCase)
+
+                                        If completedBlocked AndAlso sameContinuationSession Then
+                                            continuationState.PendingContinuationWorkflowId = workflowIdForJob
+                                            continuationState.PendingContinuationWasAgentMode = agentModeEnabledForJob
+                                            continuationState.PendingContinuationUseToolTrigger = toolTriggerDetected
+                                            continuationState.PendingContinuationUseSecondApi = useSecondApiLocal
+                                            continuationState.PendingContinuationSelectedModelKey = If(selectedModelKeyLocal, System.String.Empty)
+                                            continuationState.PendingContinuationToolNames = selectedToolsForJob.Select(Function(t) t.ToolName).Distinct(System.StringComparer.OrdinalIgnoreCase).ToList()
+                                            Dim refreshedContinuationRequestPath As System.String =
+                                                If(Not System.String.IsNullOrWhiteSpace(continuationRequestFileSource) AndAlso System.IO.File.Exists(continuationRequestFileSource),
+                                                   continuationRequestFileSource,
+                                                   finalFileObject)
+                                            Dim refreshedInputsPersisted As System.Boolean = PersistLocalChatContinuationInputs(continuationSessionIdForJob, refreshedContinuationRequestPath)
+                                            continuationState.PendingContinuationInputsPersisted = refreshedInputsPersisted
+                                            continuationState.PendingContinuationWorkspaceFingerprint = workspaceFingerprintForJob
+
+                                            If continuationState.PendingContinuationRequiresInputRestore AndAlso Not refreshedInputsPersisted Then
+                                                SharedLibrary.Agents.WorkflowContinuity.InvalidateContinuation(workflowIdForJob, continuationKeyForJob, "Outlook")
+                                                ClearLocalChatPendingContinuation(continuationState)
+                                                DeleteLocalChatContinuationInputs(continuationSessionIdForJob)
+                                                SaveInkyState(continuationState, originatingChatId)
+
+                                                Dim inputRetryUnavailable As System.String = BuildLocalChatRetryInputsUnavailableNotice(ResolveLocalChatResultLanguage(localUserLanguage, workflowIdForJob))
+                                                If Not System.String.IsNullOrWhiteSpace(inputRetryUnavailable) Then
+                                                    localOutput = If(localOutput, System.String.Empty).TrimEnd() & vbCrLf & vbCrLf & inputRetryUnavailable
+                                                End If
+                                            Else
+                                                SaveInkyState(continuationState, originatingChatId)
+
+                                                Dim retryHint As System.String = BuildLocalChatRetryHint(ResolveLocalChatResultLanguage(localUserLanguage, workflowIdForJob))
+                                                If Not System.String.IsNullOrWhiteSpace(retryHint) AndAlso
+                                                   (localOutput Is Nothing OrElse localOutput.IndexOf("`retry`", System.StringComparison.OrdinalIgnoreCase) < 0) Then
+                                                    localOutput = SharedLibrary.Agents.WorkflowContinuity.PrependContinuationNotice(localOutput, retryHint)
+                                                End If
+                                            End If
+                                        Else
+                                            If completedBlocked AndAlso Not sameContinuationSession Then
+                                                SharedLibrary.Agents.WorkflowContinuity.InvalidateContinuation(workflowIdForJob, continuationKeyForJob, "Outlook")
+                                            End If
+                                            If System.String.Equals(continuationState.PendingContinuationWorkflowId, workflowIdForJob, System.StringComparison.OrdinalIgnoreCase) Then
+                                                ClearLocalChatPendingContinuation(continuationState)
+                                                SaveInkyState(continuationState, originatingChatId)
+                                            End If
+                                            DeleteLocalChatContinuationInputs(continuationSessionIdForJob)
+                                        End If
+                                    End If
+
                                     If localOutput Is Nothing Then localOutput = String.Empty
                                     localOutput = SanitizeModelOutputForBrowser(localOutput).Trim()
                                     ToolingFileLogger.LogStep(
@@ -3918,6 +4491,7 @@ Partial Public Class ThisAddIn
 
                                     Dim htmlOut As String = MarkdownToHtml(assistantText)
                                     Dim persisted As Boolean = PersistAssistantTurnForJob(job, assistantText, htmlOut)
+                                    assistantTurnPersisted = persisted
                                     ToolingFileLogger.LogStep(
                                         $"Local Chat assistant persistence completed: job={job.Id}; persisted={If(persisted, "true", "false")}; assistantLen={assistantText.Length}")
 
@@ -3941,12 +4515,88 @@ Partial Public Class ThisAddIn
                                             $"Local Chat job completion signaled: job={job.Id}; status=done; accepted={If(resultAccepted, "true", "false")}; assistantLen={assistantText.Length}")
                                     End If
                                 Catch exOp As OperationCanceledException
+                                    If continuationEligibleForJob Then
+                                        SharedLibrary.Agents.WorkflowContinuity.InvalidateContinuation(workflowIdForJob, continuationKeyForJob, "Outlook")
+                                        Dim canceledContinuationState As InkyState = LoadInkyState(originatingChatId)
+                                        If System.String.Equals(canceledContinuationState.PendingContinuationWorkflowId, workflowIdForJob, System.StringComparison.OrdinalIgnoreCase) Then
+                                            ClearLocalChatPendingContinuation(canceledContinuationState)
+                                            SaveInkyState(canceledContinuationState, originatingChatId)
+                                        End If
+                                        DeleteLocalChatContinuationInputs(continuationSessionIdForJob)
+                                    End If
+
+                                    If Not assistantTurnPersisted Then
+                                        Dim cancellationPersisted As System.Boolean = PersistCancellationTurnForJob(job)
+                                        assistantTurnPersisted = cancellationPersisted
+                                        ToolingFileLogger.LogStep(
+                                            $"Local Chat cancellation persistence completed: job={job.Id}; persisted={If(cancellationPersisted, "true", "false")}")
+                                    End If
                                     If Not String.IsNullOrWhiteSpace(job.ScheduledTaskId) AndAlso Not scheduledTaskFinalized Then
                                         SchedulerFailLocalBrowserTask(job.ScheduledTaskId, "Aborted by user.")
                                         scheduledTaskFinalized = True
                                     End If
                                     tcs.TrySetCanceled()
                                 Catch ex As System.Exception
+                                    Dim continuationFailureSuffix As System.String = System.String.Empty
+                                    If continuationEligibleForJob Then
+                                        Dim failureContinuationState As InkyState = LoadInkyState(originatingChatId)
+                                        Dim failureCurrentContinuationKey As System.String = BuildLocalChatContinuationKey(failureContinuationState, originatingChatId)
+                                        Dim resumableFailure As System.Boolean =
+                                            System.String.Equals(failureCurrentContinuationKey, continuationKeyForJob, System.StringComparison.Ordinal) AndAlso
+                                            IsMatchingBlockedLocalChatContinuation(workflowIdForJob, continuationKeyForJob)
+
+                                        If resumableFailure Then
+                                            Dim failureContinuationRequestPath As System.String =
+                                                If(Not System.String.IsNullOrWhiteSpace(continuationRequestFileSource) AndAlso System.IO.File.Exists(continuationRequestFileSource),
+                                                   continuationRequestFileSource,
+                                                   finalFileObject)
+                                            Dim failureInputsPersisted As System.Boolean =
+                                                PersistLocalChatContinuationInputs(continuationSessionIdForJob, failureContinuationRequestPath)
+
+                                            failureContinuationState.PendingContinuationWorkflowId = workflowIdForJob
+                                            failureContinuationState.PendingContinuationWasAgentMode = agentModeEnabledForJob
+                                            failureContinuationState.PendingContinuationUseToolTrigger = toolTriggerDetected
+                                            failureContinuationState.PendingContinuationUseSecondApi = useSecondApiLocal
+                                            failureContinuationState.PendingContinuationSelectedModelKey = If(selectedModelKeyLocal, System.String.Empty)
+                                            failureContinuationState.PendingContinuationToolNames = selectedToolsForJob.Select(Function(t) t.ToolName).Distinct(System.StringComparer.OrdinalIgnoreCase).ToList()
+                                            failureContinuationState.PendingContinuationInputsPersisted = failureInputsPersisted
+                                            failureContinuationState.PendingContinuationWorkspaceFingerprint = workspaceFingerprintForJob
+
+                                            If failureContinuationState.PendingContinuationRequiresInputRestore AndAlso Not failureInputsPersisted Then
+                                                SharedLibrary.Agents.WorkflowContinuity.InvalidateContinuation(workflowIdForJob, continuationKeyForJob, "Outlook")
+                                                ClearLocalChatPendingContinuation(failureContinuationState)
+                                                DeleteLocalChatContinuationInputs(continuationSessionIdForJob)
+                                                continuationFailureSuffix = BuildLocalChatRetryInputsUnavailableNotice(ResolveLocalChatResultLanguage(localUserLanguage, workflowIdForJob))
+                                            Else
+                                                continuationFailureSuffix = BuildLocalChatRetryHint(ResolveLocalChatResultLanguage(localUserLanguage, workflowIdForJob))
+                                            End If
+                                            SaveInkyState(failureContinuationState, originatingChatId)
+                                        Else
+                                            If System.String.Equals(failureContinuationState.PendingContinuationWorkflowId, workflowIdForJob, System.StringComparison.OrdinalIgnoreCase) Then
+                                                ClearLocalChatPendingContinuation(failureContinuationState)
+                                                SaveInkyState(failureContinuationState, originatingChatId)
+                                            End If
+                                            DeleteLocalChatContinuationInputs(continuationSessionIdForJob)
+                                        End If
+                                    End If
+
+                                    Dim terminalFailureText As System.String =
+                                        BuildLocalChatTerminalFailureText(
+                                            If(assistantTurnPersisted, System.String.Empty, localOutput),
+                                            ex.Message)
+                                    If Not System.String.IsNullOrWhiteSpace(continuationFailureSuffix) AndAlso
+                                       terminalFailureText.IndexOf("`retry`", System.StringComparison.OrdinalIgnoreCase) < 0 Then
+                                        terminalFailureText = SharedLibrary.Agents.WorkflowContinuity.PrependContinuationNotice(terminalFailureText, continuationFailureSuffix)
+                                    End If
+                                    Dim terminalFailureHtml As System.String = MarkdownToHtml(terminalFailureText)
+                                    job.TerminalResultText = terminalFailureText
+                                    job.TerminalResultHtml = terminalFailureHtml
+
+                                    Dim terminalFailurePersisted As System.Boolean =
+                                        PersistAssistantTurnForJob(job, terminalFailureText, terminalFailureHtml)
+                                    ToolingFileLogger.LogStep(
+                                        $"Local Chat terminal failure persistence completed: job={job.Id}; persisted={If(terminalFailurePersisted, "true", "false")}; priorAssistantPersisted={If(assistantTurnPersisted, "true", "false")}; preservedResponse={If(System.String.IsNullOrWhiteSpace(localOutput) OrElse assistantTurnPersisted, "false", "true")}")
+
                                     If Not String.IsNullOrWhiteSpace(job.ScheduledTaskId) AndAlso Not scheduledTaskFinalized Then
                                         SchedulerFailLocalBrowserTask(job.ScheduledTaskId, ex.Message)
                                         scheduledTaskFinalized = True
@@ -4064,6 +4714,7 @@ Partial Public Class ThisAddIn
                             Sub()
                                 Dim originalCfgLoadedP As Boolean = False
                                 Dim usedAlternate As Boolean = False
+                                Dim assistantTurnPersistedP As System.Boolean = False
                                 Try
                                     ' Apply alternate model if a specific alternate is selected
                                     If useSecondApiLocal AndAlso Not String.IsNullOrWhiteSpace(selectedModelKeyLocal) Then
@@ -4102,6 +4753,7 @@ Partial Public Class ThisAddIn
 
                                     Dim htmlOut As String = MarkdownToHtml(assistantText)
                                     Dim persisted As Boolean = PersistAssistantTurnForJob(jobP, assistantText, htmlOut)
+                                    assistantTurnPersistedP = persisted
 
                                     If Not persisted Then
                                         Debug.WriteLine(
@@ -4114,8 +4766,21 @@ Partial Public Class ThisAddIn
                                         tcsP.TrySetResult(assistantText)
                                     End If
                                 Catch exOp As OperationCanceledException
+                                    If Not assistantTurnPersistedP Then
+                                        Dim cancellationPersistedP As System.Boolean = PersistCancellationTurnForJob(jobP)
+                                        assistantTurnPersistedP = cancellationPersistedP
+                                        ToolingFileLogger.LogStep(
+                                            $"Local Chat pure cancellation persistence completed: job={jobP.Id}; persisted={If(cancellationPersistedP, "true", "false")}")
+                                    End If
                                     tcsP.TrySetCanceled()
                                 Catch ex As System.Exception
+                                    Dim terminalFailureTextP As System.String = BuildLocalChatTerminalFailureText(System.String.Empty, ex.Message)
+                                    Dim terminalFailureHtmlP As System.String = MarkdownToHtml(terminalFailureTextP)
+                                    jobP.TerminalResultText = terminalFailureTextP
+                                    jobP.TerminalResultHtml = terminalFailureHtmlP
+                                    Dim terminalPersistedP As System.Boolean = PersistAssistantTurnForJob(jobP, terminalFailureTextP, terminalFailureHtmlP)
+                                    ToolingFileLogger.LogStep(
+                                        $"Local Chat pure terminal failure persistence completed: job={jobP.Id}; persisted={If(terminalPersistedP, "true", "false")}")
                                     tcsP.TrySetException(ex)
                                 Finally
                                     ' Restore config if alternate used
@@ -4159,7 +4824,19 @@ Partial Public Class ThisAddIn
                         If t.IsCanceled Then
                             Return JsonOk(New With {.ok = True, .job = jobId, .status = "canceled"})
                         ElseIf t.IsFaulted Then
-                            Return JsonOk(New With {.ok = False, .job = jobId, .status = "error", .error = t.Exception.GetBaseException().Message})
+                            ' The status request succeeded even though the background job itself failed.
+                            ' Keep the terminal job state explicit so the browser does not treat it as a transport failure.
+                            Dim stJob As InkyState = LoadInkyState(job.ChatId)
+                            Return JsonOk(New With {
+                                .ok = True,
+                                .job = jobId,
+                                .status = "error",
+                                .error = t.Exception.GetBaseException().Message,
+                                .result = If(job.TerminalResultText, System.String.Empty),
+                                .resultHtml = If(job.TerminalResultHtml, System.String.Empty),
+                                .chat = job.ChatId,
+                                .history = ToBrowserTurns(If(stJob?.History, New System.Collections.Generic.List(Of ChatTurn)()))
+                            })
                         Else
                             Dim resultText As String = If(t.Result, "")
                             Dim stJob As InkyState = LoadInkyState(job.ChatId)
@@ -4267,6 +4944,15 @@ Partial Public Class ThisAddIn
                         stClear.History = New System.Collections.Generic.List(Of ChatTurn)()
                         stClear.LastAssistantText = ""
 
+                        Dim oldContinuationSessionId As System.String = If(stClear.ContinuationSessionId, System.String.Empty)
+                        Dim oldContinuationKey As System.String = BuildLocalChatContinuationKey(stClear, activeChatId)
+                        If Not System.String.IsNullOrWhiteSpace(stClear.PendingContinuationWorkflowId) Then
+                            SharedLibrary.Agents.WorkflowContinuity.InvalidateContinuation(stClear.PendingContinuationWorkflowId, oldContinuationKey, "Outlook")
+                        End If
+                        ClearLocalChatPendingContinuation(stClear)
+                        EnsureLocalChatContinuationSessionId(stClear, rotate:=True)
+                        DeleteLocalChatContinuationInputs(oldContinuationSessionId)
+
                         ' Clear agent files on chat clear
                         ChatAgentClearFiles()
 
@@ -4288,7 +4974,10 @@ Partial Public Class ThisAddIn
                             .activeChat = activeChatId,
                             .greeting = GetFriendlyGreeting(),
                             .toolingEnabled = effectiveToolingEnabled,
-                            .supportsTooling = supportsTooling
+                            .supportsTooling = supportsTooling,
+                            .modelSupportsTooling = CurrentModelSupportsTooling(stClear),
+                            .autoPilotActive = _apActive,
+                            .agentRuntimeBusy = SharedLibrary.Agents.AgentGate.IsBusy
                         })
 
                     Case "inky_copylast"
@@ -4388,8 +5077,11 @@ Partial Public Class ThisAddIn
                                 .ok = True,
                                 .supportsFiles = st.SupportsFileUploads,
                                 .activeChat = activeChatId,
-                                .supportsTooling = supportsTooling,
-                                .toolingEnabled = st.ToolingEnabled,
+                                .supportsTooling = supportsTooling AndAlso Not _apActive,
+                                .modelSupportsTooling = supportsTooling,
+                                .autoPilotActive = _apActive,
+                                .agentRuntimeBusy = SharedLibrary.Agents.AgentGate.IsBusy,
+                                .toolingEnabled = st.ToolingEnabled AndAlso supportsTooling AndAlso Not _apActive,
                                 .advancedToolsEnabled = st.AgentModeEnabled,
                                 .agentFiles = GetAgentFileListForBrowser(),
                                 .agentWorkspace = GetAgentWorkspaceForBrowser(),
@@ -4442,7 +5134,7 @@ Partial Public Class ThisAddIn
         Select Case cmd0
             Case "redink_sendtooutlook"
 
-                SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Browser_SentToOutlook invoked")
+                SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Browser_SendToOutlook invoked")
 
                 ' (Legacy Outlook insert)
                 If String.IsNullOrWhiteSpace(textBody0) Then Return ""
@@ -4566,10 +5258,17 @@ Partial Public Class ThisAddIn
                 Dim promptCaption As String = AN & " Freestyle (for Browser)"
                 Dim wordInstalled As Boolean = False
                 Try
-                    Dim wordApp As Object = CreateObject("Word.Application")
-                    wordInstalled = True
-                    wordApp.Quit()
-                    System.Runtime.InteropServices.Marshal.ReleaseComObject(wordApp)
+                    wordInstalled = Await SLib.PostToHostUiAsync(Of Boolean)(
+                        Function() As Boolean
+                            Try
+                                Dim wordApp As Object = CreateObject("Word.Application")
+                                wordApp.Quit()
+                                System.Runtime.InteropServices.Marshal.ReleaseComObject(wordApp)
+                                Return True
+                            Catch ex As System.Exception
+                                Return False
+                            End Try
+                        End Function).ConfigureAwait(False)
                 Catch ex As System.Exception
                     wordInstalled = False
                 End Try
@@ -4693,11 +5392,8 @@ Partial Public Class ThisAddIn
 
                 Dim plainText As String
 
-                ' Convert RTF to plain text using RichTextBox
-                Using rtb As New RichTextBox()
-                    rtb.Rtf = finalTxt
-                    plainText = rtb.Text
-                End Using
+                ' Parse/dispose the hidden RichEdit control on STA without installing a worker UI context.
+                plainText = SLib.RtfToPlainText(finalTxt)
 
                 Return plainText
         End Select
@@ -4710,15 +5406,18 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Async Function TryCreateWordDocFromMarkdown(markdown As String) As Task(Of Boolean)
         Try
-            Dim wordApp As New Microsoft.Office.Interop.Word.Application()
-            wordApp.Visible = True
-            Dim newDoc As Microsoft.Office.Interop.Word.Document = wordApp.Documents.Add()
-            Dim docSelection As Microsoft.Office.Interop.Word.Selection = wordApp.Selection
-            InsertTextWithMarkdown(docSelection, markdown, True)
-            Await SwitchToUi(Sub()
-                                 ShowCustomMessageBox("Your Word document has been created. It may be hidden behind the other windows.")
-                             End Sub)
-            Return True
+            ' Browser continuations may be MTA. Dispatch the complete Office COM
+            ' block, not only the message shown after document creation.
+            Return Await SLib.PostToHostUiAsync(Of Boolean)(
+                Function() As Boolean
+                    Dim wordApp As New Microsoft.Office.Interop.Word.Application()
+                    wordApp.Visible = True
+                    Dim newDoc As Microsoft.Office.Interop.Word.Document = wordApp.Documents.Add()
+                    Dim docSelection As Microsoft.Office.Interop.Word.Selection = wordApp.Selection
+                    InsertTextWithMarkdown(docSelection, markdown, True)
+                    ShowCustomMessageBox("Your Word document has been created. It may be hidden behind the other windows.")
+                    Return True
+                End Function).ConfigureAwait(False)
         Catch
             Return False
         End Try
@@ -4775,8 +5474,15 @@ Partial Public Class ThisAddIn
                 exists = False
             End If
             If Not exists Then
-                st.SelectedModelKey = ""
-                SaveInkyState(st)
+                ' An active AgentDefaultModel selection is explicit state, not a stale-selection
+                ' candidate. A transient alternate-model list miss (for example while the automatic
+                ' INI updater replaces the local file) must not silently clear the model while leaving
+                ' AgentModeEnabled/AgentModelActive set. The next list build can reconcile once the
+                ' source is available again.
+                If Not st.AgentModelActive Then
+                    st.SelectedModelKey = ""
+                    SaveInkyState(st)
+                End If
             End If
         End If
 
@@ -4879,7 +5585,10 @@ Partial Public Class ThisAddIn
     Private Function SanitizeModelOutputForBrowser(ByVal raw As System.String) As System.String
         If raw Is Nothing Then Return System.String.Empty
 
-        Dim s As System.String = raw
+        ' Browser chat is an end-user boundary, not a tool-to-model payload.
+        ' Preserve quoted examples, but remove a real trailing protocol footer.
+        Dim s As System.String =
+            SharedLibrary.Agents.ToolCallSequencing.StripTaskStatusBlocksFromUserFacingText(raw)
 
         ' 1) Remove full role-only lines (e.g. "[ASSISTANT]" or "[USER]:")
         s = System.Text.RegularExpressions.Regex.Replace(

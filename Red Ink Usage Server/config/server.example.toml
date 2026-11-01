@@ -1,0 +1,66 @@
+# Red Ink Usage Server - restart the server after editing this file.
+# Relative paths below are relative to this data directory.
+[server]
+host = "127.0.0.1"
+port = 8765
+threads = 8
+# Add the hostname used by browsers/add-ins before exposing the server.
+trusted_hosts = ["localhost", "127.0.0.1", "[::1]"]
+# Set true when browsers connect through HTTPS (recommended for production).
+secure_cookies = false
+# Direct plain HTTP on a non-loopback interface requires this explicit opt-in.
+allow_insecure_remote = false
+
+[tls]
+# Localhost HTTP needs no certificate. Set true for native HTTPS.
+enabled = false
+# PEM leaf certificate followed by intermediate certificates, and its PEM key.
+# Relative paths are below this data directory. Keep them outside config-files.
+certificate = ""
+private_key = ""
+# Optional environment variable holding an encrypted PEM key's password.
+# Native HTTPS always enables secure cookies, regardless of server.secure_cookies.
+key_password_env = ""
+
+[collection]
+# These two options are retained for v1.0 configuration compatibility.
+# They are no longer used for daily or monthly counting.
+recent_report_window_seconds = 43200
+maximum_clock_skew_seconds = 120
+maximum_request_bytes = 65536
+
+[imports]
+# Existing LicenseCounterPath shares and SharedLogger LogPath folders.
+# A source must be readable by the account running the server.
+counter_paths = []
+# Directories/files containing existing redink-<hash>-WD/XL/OL.log files.
+# LogPath is an add-in setting; point these server paths to a readable share.
+log_paths = []
+recursive = true
+scan_seconds = 60
+# Counter-file size cap; for SharedLogger .log this is the per-scan read budget.
+# Larger growing logs continue on subsequent scans from their last full line.
+maximum_file_bytes = 16777216
+maximum_files_per_scan = 10000
+
+[retention]
+# Earliest client-local date that the collector retains (YYYY-MM-DD; empty disables).
+# This is a HARD ingestion floor: older offline replays are acknowledged and discarded.
+cutoff_date = ""
+# Optional rolling window in calendar months (0 disables). The newer floor wins.
+keep_months = 0
+# Optional scheduled cleanup on scans (false = manual cleanup from Settings).
+auto_cleanup = false
+
+[billing]
+# Leave unit_price empty for a usage-only report. No tax is calculated.
+unit_price = ""
+currency = "CHF"
+
+[publishing]
+# Empty = DATA_DIR/config-files; alternately use an absolute share or folder.
+source_directory = ""
+
+[authentication]
+# Encrypted policy set only from the authenticated Settings page.
+passwordless_mode = ""

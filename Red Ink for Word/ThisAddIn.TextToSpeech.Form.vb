@@ -189,8 +189,7 @@ Partial Public Class ThisAddIn
             _twoVoicesRequired = twoVoicesRequired
 
             ' --- FORM PROPERTIES ---
-            Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-            Me.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(Me)
             Me.Text = _formTitle
             Me.StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen
             Me.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font

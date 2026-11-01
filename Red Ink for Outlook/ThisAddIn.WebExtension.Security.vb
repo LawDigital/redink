@@ -16,6 +16,11 @@
 '   - Existing Chromium browser-extension POST payloads to /redink remain unchanged.
 '   - Persistence is optional: missing My.Settings entries fall back to process-memory
 '     state, never to unauthenticated access.
+'
+' KEY ARCHITECTURE
+'   • Surface: ThisAddIn (host partial/UI).
+'   • Entry points/helpers: GetLocalHttpSecurity, LogLocalHttpSecurity,
+'     ReadLocalHttpSecuritySetting.
 ' =============================================================================
 
 Option Explicit On

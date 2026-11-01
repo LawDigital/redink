@@ -23,6 +23,11 @@
 ' Notes:
 '  - These helpers bypass `LLM(...)` because SSE transport returns the effective
 '    tool result on the GET stream rather than in the POST response body.
+'
+' KEY ARCHITECTURE
+'   • Surface: SharedMethods, MCPStreamableSessionState (VB implementation).
+'   • Entry points/helpers: AcquireMCPSSESessionEndpoint, WriteMCPDebugFile,
+'     ExecuteMCPSSEToolCall.
 ' =============================================================================
 
 Option Explicit On
@@ -101,7 +106,7 @@ Namespace SharedLibrary
                     Dim preview = Await sseResponse.Content.ReadAsStringAsync().ConfigureAwait(False)
                     Throw New Exception(
                         $"SSE handshake GET {CInt(sseResponse.StatusCode)} ({sseResponse.ReasonPhrase}): " &
-                        If(preview.Length > 300, preview.Substring(0, 300), preview))
+                        preview)
                 End If
 
                 Dim stream = Await sseResponse.Content.ReadAsStreamAsync().ConfigureAwait(False)
@@ -134,7 +139,7 @@ Namespace SharedLibrary
             Try
                 Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
                 Dim debugFilePath As String = Path.Combine(desktopPath, fileName)
-                File.WriteAllText(debugFilePath, If(content, ""))
+                File.WriteAllText(debugFilePath, RedactSensitiveDebugText(If(content, "")))
             Catch
             End Try
         End Sub
@@ -170,6 +175,7 @@ Namespace SharedLibrary
             Try
 
                 EnsureTls12()
+                Dim expectedId As Newtonsoft.Json.Linq.JToken = Newtonsoft.Json.Linq.JObject.Parse(requestBody)("id")?.DeepClone()
 
                 Dim handler As New HttpClientHandler()
                 ConfigureMCPHandler(handler)
@@ -196,7 +202,7 @@ Namespace SharedLibrary
                         Dim preview = Await sseResponse.Content.ReadAsStringAsync().ConfigureAwait(False)
                         Throw New Exception(
                             $"SSE GET {CInt(sseResponse.StatusCode)} ({sseResponse.ReasonPhrase}): " &
-                            If(preview.Length > 300, preview.Substring(0, 300), preview))
+                            preview)
                     End If
 
                     Dim stream = Await sseResponse.Content.ReadAsStreamAsync().ConfigureAwait(False)
@@ -246,11 +252,12 @@ Namespace SharedLibrary
                             Dim initResp = Await postClient.PostAsync(postEndpoint, initContent).ConfigureAwait(False)
                             If Not initResp.IsSuccessStatusCode Then
                                 Dim err = Await initResp.Content.ReadAsStringAsync().ConfigureAwait(False)
-                                Throw New Exception($"SSE initialize POST {CInt(initResp.StatusCode)}: {If(err.Length > 300, err.Substring(0, 300), err)}")
+                                Throw New System.Exception($"SSE initialize POST {CInt(initResp.StatusCode)}: {err}")
                             End If
 
                             ' Wait for initialize response on SSE stream (consume it)
-                            Await WaitForSSEResponse(reader, "1", timeoutMs).ConfigureAwait(False)
+                            Dim initResult As Newtonsoft.Json.Linq.JObject = Await WaitForSSEResponse(reader, New Newtonsoft.Json.Linq.JValue(1), timeoutMs).ConfigureAwait(False)
+                            CheckJsonRpcError(initResult)
 
                             ' notifications/initialized
                             Dim notifPayload As New JObject From {{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}}
@@ -266,7 +273,7 @@ Namespace SharedLibrary
 
                             If Not toolResp.IsSuccessStatusCode Then
                                 Dim err = Await toolResp.Content.ReadAsStringAsync().ConfigureAwait(False)
-                                Throw New Exception($"SSE tool POST {CInt(toolResp.StatusCode)}: {If(err.Length > 300, err.Substring(0, 300), err)}")
+                                Throw New System.Exception($"SSE tool POST {CInt(toolResp.StatusCode)}: {err}")
                             End If
 
                             ' Check if the POST response itself contains a JSON-RPC result
@@ -274,7 +281,7 @@ Namespace SharedLibrary
                             If Not String.IsNullOrWhiteSpace(postBody) AndAlso postBody.TrimStart().StartsWith("{") Then
                                 Try
                                     Dim directResult = JObject.Parse(postBody)
-                                    If directResult("result") IsNot Nothing OrElse directResult("error") IsNot Nothing Then
+                                    If IsMatchingMCPResponse(directResult, expectedId) Then
                                         Dim directResultText As String = directResult.ToString(Formatting.None)
 
                                         If context IsNot Nothing AndAlso context.INI_APIDebug Then
@@ -284,20 +291,14 @@ Namespace SharedLibrary
 
                                         Return directResultText
                                     End If
-                                Catch
+                                Catch ex As Newtonsoft.Json.JsonReaderException
+                                    System.Diagnostics.Trace.TraceWarning("Invalid JSON in direct SSE response: " & ex.Message)
                                 End Try
                             End If
                         End Using
                     End Using
 
                     ' ── Step 4: Read the tool call response from the SSE stream ──
-                    Dim expectedId As String = ""
-                    Try
-                        Dim reqObj = JObject.Parse(requestBody)
-                        expectedId = If(reqObj("id")?.ToString(), "")
-                    Catch
-                    End Try
-
                     Dim responseJson = Await WaitForSSEResponse(reader, expectedId, timeoutMs).ConfigureAwait(False)
                     Dim responseJsonText As String = responseJson.ToString(Formatting.None)
 
@@ -321,42 +322,50 @@ Namespace SharedLibrary
         ''' <summary>
         ''' Reads SSE events from the stream until a JSON-RPC response with a matching id arrives.
         ''' </summary>
-        Private Shared Async Function WaitForSSEResponse(reader As StreamReader, expectedId As String, timeoutMs As Integer) As Task(Of JObject)
-            Dim currentEvent As String = ""
-            Dim deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs)
-
-            While DateTime.UtcNow < deadline
-                Dim line = Await ReadLineWithTimeout(reader, Math.Min(timeoutMs, 30000)).ConfigureAwait(False)
-                If line Is Nothing Then Exit While
-
-                If line.StartsWith("event:", StringComparison.OrdinalIgnoreCase) Then
+        Private Shared Async Function WaitForSSEResponse(reader As System.IO.StreamReader,
+                                                         expectedId As Newtonsoft.Json.Linq.JToken,
+                                                         timeoutMs As System.Int32) As System.Threading.Tasks.Task(Of Newtonsoft.Json.Linq.JObject)
+            Dim currentEvent As System.String = System.String.Empty
+            Dim deadline As System.DateTime = System.DateTime.UtcNow.AddMilliseconds(timeoutMs)
+            While System.DateTime.UtcNow < deadline
+                Dim remaining As System.Int32 = System.Math.Max(1, CInt((deadline - System.DateTime.UtcNow).TotalMilliseconds))
+                Dim line As System.String = Await ReadLineWithTimeout(reader, remaining).ConfigureAwait(False)
+                If line Is Nothing Then Throw New System.IO.EndOfStreamException("The SSE stream ended before the matching response arrived.")
+                If line.StartsWith("event:", System.StringComparison.OrdinalIgnoreCase) Then
                     currentEvent = line.Substring(6).Trim()
-                ElseIf line.StartsWith("data:", StringComparison.OrdinalIgnoreCase) Then
-                    Dim data = line.Substring(5).Trim()
-                    If String.IsNullOrWhiteSpace(data) Then Continue While
-                    If currentEvent.Equals("endpoint", StringComparison.OrdinalIgnoreCase) Then Continue While
-
-                    If data.TrimStart().StartsWith("{") Then
-                        Try
-                            Dim msg = JObject.Parse(data)
-                            If Not String.IsNullOrWhiteSpace(expectedId) Then
-                                Dim msgId = msg("id")?.ToString()
-                                If msgId IsNot Nothing AndAlso msgId = expectedId Then
-                                    CheckJsonRpcError(msg)
-                                    Return msg
-                                End If
-                            End If
-                            If msg("result") IsNot Nothing OrElse msg("error") IsNot Nothing Then
-                                CheckJsonRpcError(msg)
-                                Return msg
-                            End If
-                        Catch
-                        End Try
-                    End If
+                ElseIf line.StartsWith("data:", System.StringComparison.OrdinalIgnoreCase) Then
+                    Dim data As System.String = line.Substring(5).Trim()
+                    If data = System.String.Empty OrElse currentEvent.Equals("endpoint", System.StringComparison.OrdinalIgnoreCase) Then Continue While
+                    If Not data.StartsWith("{", System.StringComparison.Ordinal) Then Continue While
+                    Dim message As Newtonsoft.Json.Linq.JObject = Nothing
+                    Try
+                        message = Newtonsoft.Json.Linq.JObject.Parse(data)
+                    Catch ex As Newtonsoft.Json.JsonReaderException
+                        System.Diagnostics.Trace.TraceWarning("Invalid JSON in SSE data: " & ex.Message)
+                        Continue While
+                    End Try
+                    ' Correlate before accepting either success or error. Service errors are
+                    ' returned intact; only the initialize caller turns them into exceptions.
+                    If IsMatchingMCPResponse(message, expectedId) Then Return message
                 End If
             End While
+            Throw New System.TimeoutException("Timeout waiting for the matching SSE response.")
+        End Function
 
-            Throw New Exception("Timeout waiting for SSE response.")
+        Private Shared Function IsMatchingMCPResponse(message As Newtonsoft.Json.Linq.JObject,
+                                                      expectedId As Newtonsoft.Json.Linq.JToken) As System.Boolean
+            If message Is Nothing OrElse (message("result") Is Nothing AndAlso message("error") Is Nothing) Then Return False
+            If expectedId Is Nothing Then Return True
+            Dim responseId As Newtonsoft.Json.Linq.JToken = message("id")
+            If responseId Is Nothing Then Return False
+            If Newtonsoft.Json.Linq.JToken.DeepEquals(responseId, expectedId) Then Return True
+            ' The protocol permits a null id if a request could not be identified.
+            ' Surface that uncorrelated failure explicitly; never accept it as task success.
+            If responseId.Type = Newtonsoft.Json.Linq.JTokenType.Null AndAlso
+               TypeOf message("error") Is Newtonsoft.Json.Linq.JObject Then
+                Throw New System.InvalidOperationException("Uncorrelated JSON-RPC error: " & message.ToString(Newtonsoft.Json.Formatting.None))
+            End If
+            Return False
         End Function
 
         ' ─────────────────────────────────────────────────────────────────
@@ -387,8 +396,9 @@ Namespace SharedLibrary
             Dim deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs)
 
             While DateTime.UtcNow < deadline
-                Dim line = Await ReadLineWithTimeout(reader, Math.Min(timeoutMs, 15000)).ConfigureAwait(False)
-                If line Is Nothing Then Exit While
+                Dim remaining As System.Int32 = System.Math.Max(1, CInt((deadline - System.DateTime.UtcNow).TotalMilliseconds))
+                Dim line As System.String = Await ReadLineWithTimeout(reader, remaining).ConfigureAwait(False)
+                If line Is Nothing Then Throw New System.IO.EndOfStreamException("The SSE stream ended before the endpoint event arrived.")
 
                 If line.StartsWith("event:", StringComparison.OrdinalIgnoreCase) Then
                     currentEvent = line.Substring(6).Trim()
@@ -441,7 +451,7 @@ Namespace SharedLibrary
                     Dim initResp = Await postClient.PostAsync(postEndpoint, initContent).ConfigureAwait(False)
                     If Not initResp.IsSuccessStatusCode Then
                         Dim err = Await initResp.Content.ReadAsStringAsync().ConfigureAwait(False)
-                        Throw New Exception($"SSE initialize POST {CInt(initResp.StatusCode)}: {If(err.Length > 300, err.Substring(0, 300), err)}")
+                        Throw New System.Exception($"SSE initialize POST {CInt(initResp.StatusCode)}: {err}")
                     End If
 
                     Dim notifPayload As New JObject From {{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}}
@@ -457,29 +467,35 @@ Namespace SharedLibrary
         ''' <summary>
         ''' Validates a JSON-RPC response and throws if it contains an error object.
         ''' </summary>
-        Private Shared Sub CheckJsonRpcError(result As JObject)
-            Dim err = result("error")
-            If err IsNot Nothing Then
-                Throw New Exception($"JSON-RPC error {If(err("code")?.ToString(), "")}: {If(err("message")?.ToString(), "Unknown error")}")
+        Private Shared Sub CheckJsonRpcError(result As Newtonsoft.Json.Linq.JObject)
+            If result Is Nothing Then Return
+            Dim code As System.String = System.String.Empty
+            Dim kind As System.String = System.String.Empty
+            If Agents.SubAgentRuntimeHardening.TryGetEnvelopeErrorInfo(result.ToString(Newtonsoft.Json.Formatting.None), code, kind) Then
+                Throw New System.InvalidOperationException("JSON-RPC error: " & result.ToString(Newtonsoft.Json.Formatting.None))
             End If
         End Sub
 
         ''' <summary>Reads a single line from a StreamReader with a timeout.</summary>
-        Private Shared Async Function ReadLineWithTimeout(reader As StreamReader, timeoutMs As Integer) As Task(Of String)
-            Using cts As New Threading.CancellationTokenSource(timeoutMs)
-                Try
-                    Dim lineTask = reader.ReadLineAsync()
-                    Dim completed = Await Task.WhenAny(lineTask, Task.Delay(timeoutMs, cts.Token)).ConfigureAwait(False)
-                    If completed Is lineTask Then
-                        cts.Cancel()
-                        Return Await lineTask
-                    End If
-                    Return Nothing
-                Catch ex As OperationCanceledException
-                    Return Nothing
-                Catch
-                    Return Nothing
-                End Try
+        Private Shared Async Function ReadLineWithTimeout(reader As System.IO.StreamReader, timeoutMs As System.Int32) As System.Threading.Tasks.Task(Of System.String)
+            Using delayCancellation As New System.Threading.CancellationTokenSource()
+                Dim lineTask As System.Threading.Tasks.Task(Of System.String) = reader.ReadLineAsync()
+                Dim completed As System.Threading.Tasks.Task = Await System.Threading.Tasks.Task.WhenAny(
+                    lineTask, System.Threading.Tasks.Task.Delay(timeoutMs, delayCancellation.Token)).ConfigureAwait(False)
+                If completed Is lineTask Then
+                    delayCancellation.Cancel()
+                    Return Await lineTask.ConfigureAwait(False)
+                End If
+                ' The owning transport disposes the stream in Finally. Observe any read fault
+                ' caused by that disposal, without turning an I/O failure into successful EOF.
+                Dim observer As System.Threading.Tasks.Task = lineTask.ContinueWith(
+                    Sub(failed As System.Threading.Tasks.Task(Of System.String))
+                        Dim observed As System.AggregateException = failed.Exception
+                    End Sub,
+                    System.Threading.CancellationToken.None,
+                    System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted Or System.Threading.Tasks.TaskContinuationOptions.ExecuteSynchronously,
+                    System.Threading.Tasks.TaskScheduler.Default)
+                Throw New System.TimeoutException("Timeout reading an SSE event line.")
             End Using
         End Function
 
@@ -488,6 +504,57 @@ Namespace SharedLibrary
         ''' initialization before the actual tools/call request is sent.
         ''' </summary>
         Public Const MCP_STREAMABLE_PREFIX As String = "mcp:"
+
+        ''' <summary>Ephemeral Streamable HTTP state; never persist session IDs in INI files.</summary>
+        Public NotInheritable Class MCPStreamableSessionState
+            Private _endpoint As System.String = System.String.Empty
+            Private _sessionId As System.String = System.String.Empty
+            Private _protocolVersion As System.String = System.String.Empty
+
+            Public Sub ApplyHeaders(client As System.Net.Http.HttpClient, endpoint As System.String)
+                If _endpoint.Length > 0 AndAlso Not System.String.Equals(_endpoint, endpoint, System.StringComparison.Ordinal) Then
+                    Throw New System.InvalidOperationException("MCP session cannot be reused for a different endpoint.")
+                End If
+                client.DefaultRequestHeaders.Remove("Mcp-Session-Id")
+                client.DefaultRequestHeaders.Remove("MCP-Protocol-Version")
+                If _sessionId.Length > 0 Then client.DefaultRequestHeaders.Add("Mcp-Session-Id", _sessionId)
+                If _protocolVersion.Length > 0 Then client.DefaultRequestHeaders.Add("MCP-Protocol-Version", _protocolVersion)
+            End Sub
+
+            Public Sub CaptureInitialization(endpoint As System.String,
+                                             response As System.Net.Http.HttpResponseMessage,
+                                             payload As Newtonsoft.Json.Linq.JObject)
+                Dim result As Newtonsoft.Json.Linq.JObject = TryCast(payload("result"), Newtonsoft.Json.Linq.JObject)
+                Dim protocol As System.String = result?.Value(Of System.String)("protocolVersion")
+                If System.String.IsNullOrWhiteSpace(protocol) OrElse protocol.Any(Function(ch As System.Char) ch < "!"c OrElse ch > "~"c) Then
+                    Throw New System.IO.InvalidDataException("MCP initialize returned no valid protocol version.")
+                End If
+                Dim values As System.Collections.Generic.IEnumerable(Of System.String) = Nothing
+                Dim sessionId As System.String = System.String.Empty
+                If response.Headers.TryGetValues("Mcp-Session-Id", values) Then
+                    Dim ids As System.String() = values.ToArray()
+                    If ids.Length <> 1 OrElse System.String.IsNullOrEmpty(ids(0)) OrElse
+                       ids(0).Any(Function(ch As System.Char) ch < "!"c OrElse ch > "~"c) Then
+                        Throw New System.IO.InvalidDataException("MCP initialize returned an invalid session ID.")
+                    End If
+                    sessionId = ids(0)
+                End If
+                _endpoint = endpoint
+                _sessionId = sessionId
+                _protocolVersion = protocol
+            End Sub
+        End Class
+
+        Public NotInheritable Class MCPHttpRequestException
+            Inherits System.Net.Http.HttpRequestException
+
+            Public ReadOnly Property ResponseStatusCode As System.Net.HttpStatusCode
+
+            Public Sub New(statusCode As System.Net.HttpStatusCode, message As System.String)
+                MyBase.New(message)
+                ResponseStatusCode = statusCode
+            End Sub
+        End Class
 
         ''' <summary>
         ''' Performs a complete MCP tool call over Streamable HTTP transport:
@@ -501,7 +568,7 @@ Namespace SharedLibrary
                 requestBody As String,
                 headerA As String,
                 headerB As String,
-                Optional timeoutMs As Integer = 60000) As Task(Of String)
+                Optional timeoutMs As Integer = 60000) As System.Threading.Tasks.Task(Of System.String)
 
             EnsureTls12()
 
@@ -537,27 +604,27 @@ Namespace SharedLibrary
                             }}
                         }
 
+                        Dim session As New MCPStreamableSessionState()
                         Await PostMCPStreamableRequest(
                             client,
                             mcpUrl,
                             initPayload,
                             timeoutMs,
-                            expectResponse:=True).ConfigureAwait(False)
+                            expectResponse:=True,
+                            session:=session).ConfigureAwait(False)
 
                         Dim notifPayload As New JObject From {
                             {"jsonrpc", "2.0"},
                             {"method", "notifications/initialized"}
                         }
 
-                        Try
-                            Await PostMCPStreamableRequest(
-                                client,
-                                mcpUrl,
-                                notifPayload,
-                                timeoutMs,
-                                expectResponse:=False).ConfigureAwait(False)
-                        Catch
-                        End Try
+                        Await PostMCPStreamableRequest(
+                            client,
+                            mcpUrl,
+                            notifPayload,
+                            timeoutMs,
+                            expectResponse:=False,
+                            session:=session).ConfigureAwait(False)
 
                         Dim toolPayload As JObject = JObject.Parse(requestBody)
                         Dim toolResult As JObject =
@@ -566,7 +633,9 @@ Namespace SharedLibrary
                                 mcpUrl,
                                 toolPayload,
                                 timeoutMs,
-                                expectResponse:=True).ConfigureAwait(False)
+                                expectResponse:=True,
+                                preserveRpcError:=True,
+                                session:=session).ConfigureAwait(False)
 
                         Return toolResult.ToString(Formatting.None)
                     End Using
@@ -584,16 +653,19 @@ Namespace SharedLibrary
                 mcpUrl As String,
                 payload As JObject,
                 timeoutMs As Integer,
-                Optional expectResponse As Boolean = True) As Task(Of JObject)
+                Optional expectResponse As System.Boolean = True,
+                Optional preserveRpcError As System.Boolean = False,
+                Optional session As MCPStreamableSessionState = Nothing) As System.Threading.Tasks.Task(Of Newtonsoft.Json.Linq.JObject)
 
+            If session IsNot Nothing Then session.ApplyHeaders(client, mcpUrl)
             Dim content As New StringContent(payload.ToString(Formatting.None), Encoding.UTF8, "application/json")
             Dim response As HttpResponseMessage = Await client.PostAsync(mcpUrl, content).ConfigureAwait(False)
             Dim responseText As String = Await response.Content.ReadAsStringAsync().ConfigureAwait(False)
 
             If Not response.IsSuccessStatusCode Then
-                Throw New Exception(
+                Throw New MCPHttpRequestException(response.StatusCode,
                     $"MCP Streamable HTTP POST {CInt(response.StatusCode)} ({response.ReasonPhrase}): " &
-                    If(responseText.Length > 300, responseText.Substring(0, 300), responseText))
+                    responseText)
             End If
 
             If Not expectResponse Then
@@ -602,21 +674,28 @@ Namespace SharedLibrary
 
             responseText = ExtractJsonFromMCPResponse(
                 responseText,
-                If(response.Content.Headers.ContentType?.MediaType, ""))
+                If(response.Content.Headers.ContentType?.MediaType, ""), payload("id"))
 
-            If String.IsNullOrWhiteSpace(responseText) Then
-                Return New JObject()
+            If System.String.IsNullOrWhiteSpace(responseText) Then
+                Throw New System.InvalidOperationException("MCP returned an empty body for a request that requires a response.")
             End If
 
-            Dim result As JObject = JObject.Parse(responseText)
-            CheckJsonRpcError(result)
+            Dim result As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(responseText)
+            If Not IsMatchingMCPResponse(result, payload("id")) Then
+                Throw New System.InvalidOperationException("MCP response id does not match the request: " & responseText)
+            End If
+            If Not preserveRpcError Then CheckJsonRpcError(result)
+            If session IsNot Nothing AndAlso System.String.Equals(payload.Value(Of System.String)("method"), "initialize", System.StringComparison.Ordinal) Then
+                session.CaptureInitialization(mcpUrl, response, result)
+            End If
             Return result
         End Function
 
         ''' <summary>
         ''' Extracts a JSON-RPC message from a body that may be plain JSON or SSE-framed text.
         ''' </summary>
-        Private Shared Function ExtractJsonFromMCPResponse(responseText As String, contentType As String) As String
+        Private Shared Function ExtractJsonFromMCPResponse(responseText As System.String, contentType As System.String,
+                                                           Optional expectedId As Newtonsoft.Json.Linq.JToken = Nothing) As System.String
             If String.IsNullOrWhiteSpace(responseText) Then
                 Return responseText
             End If
@@ -651,10 +730,9 @@ Namespace SharedLibrary
 
                         Try
                             Dim candidate As JObject = JObject.Parse(data)
-                            If candidate("result") IsNot Nothing OrElse candidate("error") IsNot Nothing Then
-                                lastJson = data
-                            End If
-                        Catch
+                            If IsMatchingMCPResponse(candidate, expectedId) Then lastJson = data
+                        Catch ex As Newtonsoft.Json.JsonReaderException
+                            System.Diagnostics.Trace.TraceWarning("Invalid JSON in MCP event data: " & ex.Message)
                         End Try
                     End If
                 End If

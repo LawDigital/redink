@@ -13,7 +13,7 @@
 '   agent, UI, transcription, and command behavior to the other ThisAddIn.* files.
 ' =============================================================================
 '
-' 21.9.2026
+' 1.11.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -40,7 +40,12 @@
 ' Includes PDFsharp in unchanged form; Copyright (c) 2025 PDFSharp Team; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://docs.pdfsharp.net/
 ' Includes System.Interactive.Async in unchanged form; Copyright (c) 2025 by .NET Foundation and Contributors; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://github.com/dotnet/reactive
 ' Includes Microsoft.Playwright (Playwright for .NET) in unchanged form; Copyright (c) 2020 Darío Kondratiuk and other contributors, with modifications copyright (c) Microsoft Corporation where stated in the source files; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://github.com/microsoft/playwright-dotnet
+' Includes adapted Lucide icon paths; Copyright (c) 2026 Lucide Icons and Contributors, with portions Copyright (c) 2013-present Cole Bemis (Feather); licensed under the ISC and MIT licenses (https://lucide.dev/license).
+' Includes adapted Nord, Catppuccin, Tokyo Night, Dracula, Gruvbox and Solarized color palettes; Copyright (c) Sven Greb, Catppuccin, Enkia and Tokyo Night contributors, Dracula Theme, Pavel Pertsev (morhetz) and Ethan Schoonover respectively; licensed under the MIT license. No theme application or font binaries are included.
 ' Includes also various Microsoft distributables and libraries copyrighted by Microsoft Corporation and available, among others, under the Microsoft EULA, the Visual Studio Community 2022 License, the Microsoft.Web.WebView2 License (for Microsoft.Web.WebView2, see license on https://www.nuget.org/packages/Microsoft.Web.WebView2/ and below) and the MIT License (including Microsoft.Bcl.*, Microsoft.Extensions.*, Microsoft.Identity.Client, Microsoft.Identity.Client.Extensions.Msal, System.*, System.Security.*, System.CodeDom, DocumentFormat.OpenXml.*, Microsoft.ml.*, CommunityToolkit.HighPerformance licensed under MIT License) (https://licenses.nuget.org/MIT); Copyright (c) 2016- Microsoft Corp.
+' Includes libgcc_s_seh-1.dll (GCC runtime support) from Vosk 0.3.38 for Windows x64; upstream licensing: GNU GPLv3 with GCC Runtime Library Exception 3.1 (where applicable); https://www.gnu.org/licenses/gcc-exception-3.1.html; source code: https://sources.debian.org/src/gcc-8/8.3.0-6/
+' Includes libstdc++-6.dll (GNU C++ runtime) from Vosk 0.3.38 for Windows x64; upstream licensing: GNU GPLv3 with GCC Runtime Library Exception 3.1; https://gcc.gnu.org/onlinedocs/libstdc++/manual/license.html; source code: https://sources.debian.org/src/gcc-8/8.3.0-6/
+' Includes libwinpthread-1.dll (MinGW-w64 winpthreads runtime) from Vosk 0.3.38 for Windows x64; upstream copyright/license notices: MIT and BSD-3-Clause; https://github.com/mingw-w64/mingw-w64/blob/master/mingw-w64-libraries/winpthreads/COPYING; source code: https://sources.debian.org/src/mingw-w64/6.0.0-3/
 
 ' The Word add-in calls the Draw.io online diagramming service/app (https://www.draw.io) via embed.diagrams.net for diagram editing (https://github.com/jgraph/drawio); copyright (c) 2026 by draw.io Ltd and draw.io AG (made available under Apache 2.0 license [https://github.com/jgraph/drawio?tab=Apache-2.0-1-ov-file])
 
@@ -67,7 +72,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.210926" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.011126" & SharedMethods.VersionQualifier
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
     Public Const AN5 As String = "RI" ' for bubble comments 
@@ -452,9 +457,8 @@ Partial Public Class ThisAddIn
     End Function
 
     Private Function GetWordMainWindowHandle() As IntPtr
-        ' Word’s top-level windows all have the class name "OpusApp" (Office 2013+)
-        Dim hwnd = FindWindow("OpusApp", Nothing)
-        Return hwnd
+        SharedMethods.InitializeHostWindow("OpusApp")
+        Return SharedMethods.GetHostWindowHandle()
     End Function
 
     Private mainThreadControl As New System.Windows.Forms.Control()
@@ -500,7 +504,57 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
+    Private _hostModelessWindows As Global.SharedLibrary.SharedLibrary.HostModelessFormRegistry
+
+    Friend Function RegisterHostModelessForm(form As System.Windows.Forms.Form) As System.Windows.Forms.IWin32Window
+        If _hostModelessWindows Is Nothing Then
+            Throw New System.InvalidOperationException("Office modeless window lifetime is not initialized.")
+        End If
+        Return _hostModelessWindows.Register(form)
+    End Function
+
+    Friend ReadOnly Property HostWindowLifetimeToken As System.Threading.CancellationToken
+        Get
+            If _hostModelessWindows Is Nothing Then
+                Return New System.Threading.CancellationToken(True)
+            End If
+            Return _hostModelessWindows.ShutdownToken
+        End Get
+    End Property
+
+    Friend Sub ShowHostModelessForm(form As System.Windows.Forms.Form)
+        If _hostModelessWindows Is Nothing Then
+            Throw New System.InvalidOperationException("Office modeless window lifetime is not initialized.")
+        End If
+        _hostModelessWindows.Show(form)
+    End Sub
+
+    Friend ReadOnly Property IsHostModelessClosing As System.Boolean
+        Get
+            Return _hostModelessWindows IsNot Nothing AndAlso _hostModelessWindows.IsClosing
+        End Get
+    End Property
+
+    Private Sub CloseHostModelessWindows()
+        Try
+            Global.SharedLibrary.SharedLibrary.LogWindow.Shutdown()
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine("Red Ink shared log shutdown failed: " & ex.Message)
+        End Try
+        Try
+            If _hostModelessWindows IsNot Nothing Then _hostModelessWindows.CloseAll()
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine("Red Ink modeless host shutdown failed: " & ex.Message)
+            Try
+                Global.SharedLibrary.SharedLibrary.RiCrashLogger.LogMarker("MODELESS_HOST_SHUTDOWN_FAILED", ex.ToString())
+            Catch
+            End Try
+        End Try
+    End Sub
+
     Private Sub ThisAddIn_Startup() Handles Me.Startup
+        _hostModelessWindows = New Global.SharedLibrary.SharedLibrary.HostModelessFormRegistry()
+
 
         ' Crash diagnostics: enabled only when the user's My.Settings.CrashLog is True.
         ' This flag is reconciled from INI_Crashlog after config load, so it takes effect
@@ -535,6 +589,7 @@ Partial Public Class ThisAddIn
             SynchronizationContext.SetSynchronizationContext(_uiContext)
         End If
         _uiScheduler = TaskScheduler.FromCurrentSynchronizationContext()
+        Global.SharedLibrary.SharedLibrary.LogWindow.InitializeUiDispatcher(_uiContext, _hostModelessWindows)
 
         ' 3) Give that Control to the UpdateHandler so it can Invoke on it
         UpdateHandler.MainControl = mainThreadControl
@@ -598,18 +653,10 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
-    Private Shared Function EnsureUIThread() As Task
-        ' If UI context not set or already on it, nothing to do.
-        If _uiContext Is Nothing OrElse SynchronizationContext.Current Is _uiContext Then
-            Return Task.CompletedTask
-        End If
-        Dim tcs As New TaskCompletionSource(Of Object)(TaskCreationOptions.RunContinuationsAsynchronously)
-        _uiContext.Post(
-            Sub(state As Object)
-                tcs.TrySetResult(Nothing)
-            End Sub,
-            Nothing)
-        Return tcs.Task
+    Private Shared Function EnsureUIThread() As Global.SharedLibrary.SharedLibrary.OfficeUiThreadAwaitable
+        ' Await posts the continuation itself; a posted no-op Task cannot switch an MTA caller.
+        Return New Global.SharedLibrary.SharedLibrary.OfficeUiThreadAwaitable(
+            _uiContext, UiThreadId, Globals.ThisAddIn.HostWindowLifetimeToken)
     End Function
 
 
@@ -703,15 +750,19 @@ Partial Public Class ThisAddIn
             ' re-probes if this warm-up is skipped or the cache is cold.
             MeasureWordStartupStep("PythonAgentWarmup.schedule", Sub() PrimePythonAgentVersionCache(), startupTimings)
         Catch ex As System.Exception
-            startupTimings.Add("DelayedStartupTasks.ERROR=" & ex.GetType().FullName & ": " & ex.Message)
+            If _context IsNot Nothing AndAlso _context.INI_APIDebug Then
+                startupTimings.Add("DelayedStartupTasks.ERROR=" & ex.GetType().FullName & ": " & ex.Message)
+            End If
         Finally
             totalStartupStopwatch.Stop()
-            startupTimings.Add(
-                "DelayedStartupTasks.total=" &
-                totalStartupStopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
-                " ms; uiThread=" &
-                (System.Threading.Thread.CurrentThread.ManagedThreadId = UiThreadId).ToString())
-            QueueWordStartupTimingSnapshot(startupTimings)
+            If _context IsNot Nothing AndAlso _context.INI_APIDebug Then
+                startupTimings.Add(
+                    "DelayedStartupTasks.total=" &
+                    totalStartupStopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    " ms; uiThread=" &
+                    (System.Threading.Thread.CurrentThread.ManagedThreadId = UiThreadId).ToString())
+                QueueWordStartupTimingSnapshot(startupTimings)
+            End If
         End Try
     End Sub
 
@@ -742,10 +793,12 @@ Partial Public Class ThisAddIn
                         System.Diagnostics.Debug.WriteLine("[PERF] Word startup warm-up failed: " & ex.Message)
                     Finally
                         stopwatch.Stop()
-                        System.Diagnostics.Debug.WriteLine(
-                            "[PERF] Word model/tool/resource warm-up: " &
-                            stopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
-                            " ms")
+                        PerformanceLogger.LogDuration(
+                            _context,
+                            "Warmup",
+                            "ModelToolResource",
+                            stopwatch.ElapsedMilliseconds,
+                            hostName:="Word")
                     End Try
                 End Sub)
         Catch ex As System.Exception
@@ -772,7 +825,23 @@ Partial Public Class ThisAddIn
             End Sub)
     End Sub
 
+    Private Sub MarkdownEditorHostQuit() Handles Application.Quit
+        CancelActiveToolingForHostExit()
+        ShutdownTalkToMe()
+        CloseHostModelessWindows()
+        Global.SharedLibrary.SharedLibrary.MarkdownEditorForm.HostClosing("Word")
+    End Sub
+
+    Private licenseCounterReporter As System.IDisposable
+
     Private Sub ThisAddIn_Shutdown() Handles Me.Shutdown
+        If licenseCounterReporter IsNot Nothing Then
+            licenseCounterReporter.Dispose()
+            licenseCounterReporter = Nothing
+        End If
+        CancelActiveToolingForHostExit()
+        CloseHostModelessWindows()
+        Global.SharedLibrary.SharedLibrary.MarkdownEditorForm.HostClosing("Word")
         Try
             RiCrashLogger.Shutdown("ThisAddIn_Shutdown was called.")
         Catch
@@ -833,10 +902,15 @@ Partial Public Class ThisAddIn
 
         MeasureWordStartupStep("ContextMenu.schedule", Sub() AddContextMenu(), startupTimings)
 
-        If _context IsNot Nothing AndAlso _context.INIloaded Then
+        ' Reporting checks the stored, verified licence itself. INIloaded also
+        ' depends on model setup and must not suppress a valid license count.
+        If _context IsNot Nothing Then
             MeasureWordStartupStep(
                 "LicenseCounter.schedule",
-                Sub() SharedMethods.RegisterLicenseCounterUsageAndReport(_context, "WD"),
+                Sub()
+                    If licenseCounterReporter IsNot Nothing Then licenseCounterReporter.Dispose()
+                    licenseCounterReporter = Global.SharedLibrary.SharedLibrary.SharedMethods.StartLicenseCounterReporting(_context, "WD")
+                End Sub,
                 startupTimings)
         End If
 
@@ -872,48 +946,19 @@ Partial Public Class ThisAddIn
             action.Invoke()
         Finally
             stopwatch.Stop()
-            Dim entry As String =
-                label & "=" &
-                stopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
-                " ms; uiThread=" &
-                (System.Threading.Thread.CurrentThread.ManagedThreadId = UiThreadId).ToString()
-
-            System.Diagnostics.Debug.WriteLine("[PERF] Word startup " & entry)
-            If timings IsNot Nothing Then timings.Add(entry)
+            If _context IsNot Nothing AndAlso _context.INI_APIDebug Then
+                Dim entry As String =
+                    label & "=" &
+                    stopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    " ms; uiThread=" &
+                    (System.Threading.Thread.CurrentThread.ManagedThreadId = UiThreadId).ToString()
+                If timings IsNot Nothing Then timings.Add(entry)
+            End If
         End Try
     End Sub
 
     Private Sub QueueWordStartupTimingSnapshot(timings As System.Collections.Generic.List(Of String))
-        If timings Is Nothing OrElse timings.Count = 0 Then Return
-
-        Dim snapshot As String() = timings.ToArray()
-        Dim versionSnapshot As String = Version
-        Dim uiThreadIdSnapshot As Integer = UiThreadId
-
-        System.Threading.Tasks.Task.Run(
-            Sub()
-                Try
-                    Dim basePath As String =
-                        System.IO.Path.Combine(
-                            System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
-                            "redink")
-                    System.IO.Directory.CreateDirectory(basePath)
-
-                    Dim outputPath As String =
-                        System.IO.Path.Combine(basePath, "RI_Word_Startup_Perf.txt")
-
-                    Dim lines As New System.Collections.Generic.List(Of String)()
-                    lines.Add("Red Ink Word Startup Performance")
-                    lines.Add("Created=" & System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", System.Globalization.CultureInfo.InvariantCulture))
-                    lines.Add("Version=" & If(versionSnapshot, ""))
-                    lines.Add("UIThreadId=" & uiThreadIdSnapshot.ToString(System.Globalization.CultureInfo.InvariantCulture))
-                    lines.AddRange(snapshot)
-
-                    System.IO.File.WriteAllLines(outputPath, lines, System.Text.Encoding.UTF8)
-                Catch ex As System.Exception
-                    System.Diagnostics.Debug.WriteLine("[PERF] Word startup timing snapshot failed: " & ex.Message)
-                End Try
-            End Sub)
+        PerformanceLogger.LogStartupSnapshot(_context, "Word", Version, timings)
     End Sub
 
 
@@ -929,10 +974,10 @@ Partial Public Class ThisAddIn
     Public Shared Async Function PostCorrection(inputText As String, Optional ByVal UseSecondAPI As Boolean = False) As Task(Of String)
         Return Await SharedMethods.PostCorrection(_context, inputText, UseSecondAPI)
     End Function
-    Public Shared Async Function LLM(ByVal promptSystem As String, ByVal promptUser As String, Optional ByVal Model As String = "", Optional ByVal Temperature As String = "", Optional ByVal Timeout As Long = 0, Optional ByVal UseSecondAPI As Boolean = False, Optional ByVal Hidesplash As Boolean = False, Optional ByVal AddUserPrompt As String = "", Optional ByVal FileObject As String = "", Optional ByVal ToolExecution As Boolean = False, Optional cancellationToken As Threading.CancellationToken = Nothing, Optional EnsureUI As Boolean = True) As Task(Of String)
-        Dim Response = Await SharedMethods.LLM(_context, promptSystem, promptUser, Model, Temperature, Timeout, UseSecondAPI, Hidesplash, AddUserPrompt, FileObject, cancellationToken, ToolExecution:=ToolExecution)
+    Public Shared Async Function LLM(ByVal promptSystem As String, ByVal promptUser As String, Optional ByVal Model As String = "", Optional ByVal Temperature As String = "", Optional ByVal Timeout As Long = 0, Optional ByVal UseSecondAPI As Boolean = False, Optional ByVal Hidesplash As Boolean = False, Optional ByVal AddUserPrompt As String = "", Optional ByVal FileObject As String = "", Optional ByVal ToolExecution As Boolean = False, Optional cancellationToken As System.Threading.CancellationToken = Nothing, Optional EnsureUI As Boolean = True, Optional transportRetryProfile As Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile = Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Inherit) As System.Threading.Tasks.Task(Of String)
+        Dim Response = Await SharedMethods.LLM(_context, promptSystem, promptUser, Model, Temperature, Timeout, UseSecondAPI, Hidesplash, AddUserPrompt, FileObject, cancellationToken, ToolExecution:=ToolExecution, transportRetryProfile:=transportRetryProfile)
         If EnsureUI Then
-            Await EnsureUIThread().ConfigureAwait(False)
+            Await EnsureUIThread()
         End If
         Return Response
     End Function

@@ -13,6 +13,10 @@
 '  2. Before advertising, host calls IsAdvertisable(host, name).
 '  3. Before dispatching, host calls GetExecutorKind(host, name).
 '  4. Thread-safe for typical startup-register + runtime-read pattern.
+'
+' KEY ARCHITECTURE
+'   • Surface: ToolExecutorRegistry (VB implementation).
+'   • Entry points/helpers: Reset, RegisterInternal, RegisterExternal.
 ' =============================================================================
 
 Option Explicit On

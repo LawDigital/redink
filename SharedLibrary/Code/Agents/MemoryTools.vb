@@ -14,6 +14,10 @@
 '  - memory_list: Enumerate all entries with summaries.
 '  - memory_delete: Remove an entry by key.
 '  - All use SessionMemory for persistence across restarts.
+'
+' KEY ARCHITECTURE
+'   • Surface: MemoryTools (VB implementation).
+'   • Entry points/helpers: BuildAll, IsMemoryTool, Execute.
 ' =============================================================================
 
 Option Strict On

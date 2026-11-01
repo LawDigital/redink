@@ -16,6 +16,10 @@
 '  - summary: short textual stub (model sees this in subsequent turns).
 '  - value: actual payload (any JSON value or string).
 '  - createdAt, updatedAt, tags, metadata: operational fields.
+'
+' KEY ARCHITECTURE
+'   • Surface: SessionMemoryEntry, SessionMemory (VB implementation).
+'   • Entry points/helpers: GetStorePath, EnsureLoaded, SaveUnlocked.
 ' =============================================================================
 
 Option Strict On
@@ -51,10 +55,13 @@ Namespace Agents
 
         Private Shared Function GetStorePath() As String
             Dim root As String = TryGetSharedPath("INI_AgentResourcesPathLocal")
-            If String.IsNullOrWhiteSpace(root) Then
-                root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RedInk")
+            If Not System.String.IsNullOrWhiteSpace(root) Then
+                root = SharedLibrary.SharedMethods.ExpandEnvironmentVariables(root)
             End If
-            Dim dir = Path.Combine(root, ".session")
+            If System.String.IsNullOrWhiteSpace(root) Then
+                root = System.IO.Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData), "RedInk")
+            End If
+            Dim dir = System.IO.Path.Combine(root, ".session")
             Try
                 If Not Directory.Exists(dir) Then Directory.CreateDirectory(dir)
             Catch

@@ -58,6 +58,7 @@ Partial Public Class ThisAddIn
                 })
         End If
 
+        Dim retainedToolResults As Newtonsoft.Json.Linq.JArray = Nothing
         Dim scope = CaptureModelConfigScope(_context)
         Dim modelKey As String = If(String.IsNullOrWhiteSpace(request.SpecialModelKey), "agentdefaultmodel", request.SpecialModelKey)
         Dim swapped As Boolean = False
@@ -103,6 +104,22 @@ Partial Public Class ThisAddIn
                     Key .result = New With {Key .status = "unresolved", Key .reason = "subagent_task_not_startable", Key .subagent_task_id = subAgentTaskId, Key .agent = request.AgentName}
                 })
         End If
+
+        ' Every isolated sub-agent invocation owns a fresh child cancellation source.
+        ' Parent cancellation propagates downwards; local child timeout/cancellation
+        ' never propagates back into the parent tooling run. A runner retry invokes
+        ' this host again and therefore receives a new source and deadline.
+        Dim attemptCts As System.Threading.CancellationTokenSource =
+            System.Threading.CancellationTokenSource.CreateLinkedTokenSource(ct)
+        If request.TimeoutSeconds > 0 Then
+            attemptCts.CancelAfter(System.TimeSpan.FromSeconds(request.TimeoutSeconds))
+        End If
+
+        Dim isolatedFailureBudgetScope As System.IDisposable =
+            Global.SharedLibrary.SharedLibrary.LlmTransportRetryPolicyScope.PushIsolatedFailureBudget()
+        Dim subAgentLogIdentity As SharedLibrary.Agents.SubAgentLogScope =
+            SharedLibrary.Agents.SubAgentLogScope.Enter(request.AgentName)
+        Dim subAgentLogClock As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
 
         Try
             If String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
@@ -182,6 +199,13 @@ Partial Public Class ThisAddIn
                 parentRunId = If(_activeToolingContext.RunId, "(no_parent_run)")
                 _activeToolingContext.SubAgentInvocationCount += 1
                 invocationIndex = _activeToolingContext.SubAgentInvocationCount
+
+                If request.RunnerRetryIndex > 0 Then
+                    _activeToolingContext.SubAgentInternalRetryCount += 1
+                    ToolingFileLogger.LogWarn(
+                        $"[subagent-host] agent_empty_result: re-invoking {request.AgentName} (attempt {request.RunnerRetryIndex + 1}); subagent_task_id={subAgentTaskId}.",
+                        details:=$"discardedRawChars={request.PreviousDiscardedResponseLength}; discardedExcerpt={If(request.PreviousDiscardedResponseExcerpt, "")}")
+                End If
 
                 Dim existingAgentInvocationCount As Integer = 0
 
@@ -374,7 +398,7 @@ Partial Public Class ThisAddIn
                     fullPromptOverride:=request.UserMessage,
                     hideSplash:=True,
                     hideLogWindow:=True,
-                    cancellationToken:=ct,
+                    cancellationToken:=attemptCts.Token,
                     subAgentMode:=True,
                     subAgentAllowedToolNames:=effectiveAllowedToolNames,
                     subAgentSpecialModelKey:=request.SpecialModelKey,
@@ -387,7 +411,13 @@ Partial Public Class ThisAddIn
                     workflowId:=request.WorkflowId,
                     finalResponseContract:=SharedLibrary.Agents.ToolingFinalResponseContract.RawCallerText,
                     subAgentExpectedArtifactsJson:=request.ExpectedArtifactsJson,
-                    subAgentRequiredSuccessfulToolNames:=request.RequiredSuccessfulToolNames).ConfigureAwait(False)
+                    subAgentRequiredSuccessfulToolNames:=request.RequiredSuccessfulToolNames,
+                    retainedToolResultsSink:=Sub(results As Newtonsoft.Json.Linq.JArray) retainedToolResults = results).ConfigureAwait(False)
+
+            ' A lower transport/loop may return after cancellation instead of throwing.
+            ' Resolve the actual token owner before normalizing or accepting that response.
+            ct.ThrowIfCancellationRequested()
+            attemptCts.Token.ThrowIfCancellationRequested()
 
             If subAgentTaskId <> "" AndAlso
                _activeToolingContext IsNot Nothing AndAlso
@@ -411,17 +441,9 @@ Partial Public Class ThisAddIn
                             declaredResultKind)
                 End If
 
-                Dim isRetryableEmptyResult As Boolean =
-                    normalized IsNot Nothing AndAlso
-                    normalized.IsError AndAlso
-                    (String.Equals(
-                        errorCode,
-                        SharedLibrary.Agents.SubAgentRuntimeHardening.EmptyResultCode,
-                        StringComparison.OrdinalIgnoreCase) OrElse
-                     String.Equals(
-                        errorCode,
-                        SharedLibrary.Agents.SubAgentRuntimeHardening.ModelEmptyResponseCode,
-                        StringComparison.OrdinalIgnoreCase))
+                Dim isRetryableEmptyResult As System.Boolean =
+                    normalized IsNot Nothing AndAlso normalized.IsError AndAlso
+                    Global.SharedLibrary.Agents.SubAgentRuntimeHardening.IsEmptyResultRetryAllowed(normalized.ToJson(), errorCode)
 
                 If isRetryableEmptyResult AndAlso request.RunnerRetryIndex = 0 Then
                     ' Deliberately leave the task Active. SubAgentRunner owns the one
@@ -462,6 +484,76 @@ Partial Public Class ThisAddIn
             End If
 
             Return If(result, "")
+        Catch ex As System.OperationCanceledException When ct.IsCancellationRequested
+            If subAgentTaskId <> "" AndAlso
+               _activeToolingContext IsNot Nothing AndAlso
+               _activeToolingContext.SequencingState IsNot Nothing AndAlso
+               _activeToolingContext.SequencingState.SubAgentTaskRegistry IsNot Nothing Then
+
+                _activeToolingContext.SequencingState.SubAgentTaskRegistry.MarkUnresolved(
+                    request.AgentName,
+                    subAgentTaskId,
+                    "parent_cancelled",
+                    forceTerminal:=False)
+            End If
+
+            Throw
+        Catch ex As System.OperationCanceledException When attemptCts.IsCancellationRequested AndAlso
+                                                           Not ct.IsCancellationRequested
+            If subAgentTaskId <> "" AndAlso
+               _activeToolingContext IsNot Nothing AndAlso
+               _activeToolingContext.SequencingState IsNot Nothing AndAlso
+               _activeToolingContext.SequencingState.SubAgentTaskRegistry IsNot Nothing Then
+
+                _activeToolingContext.SequencingState.SubAgentTaskRegistry.MarkBlocked(
+                    request.AgentName,
+                    subAgentTaskId,
+                    Global.SharedLibrary.Agents.SubAgentRuntimeHardening.TimeoutCode,
+                    forceTerminal:=False)
+            End If
+
+            ToolingFileLogger.LogWarn(
+                "[subagent-host] Isolated sub-agent attempt reached its local cancellation deadline; parent run remains active.",
+                details:=$"agent={If(request.AgentName, "")}; timeoutSeconds={request.TimeoutSeconds}; retryIndex={request.RunnerRetryIndex}")
+
+            Return Global.SharedLibrary.Agents.SubAgentRuntimeHardening.BuildTimeoutPayload(
+                request.AgentName,
+                request.TimeoutSeconds,
+                ex.Message,
+                completedResults:=retainedToolResults,
+                runState:=_activeToolingContext?.SequencingState)
+        Catch ex As System.OperationCanceledException
+            If _activeToolingContext?.SequencingState?.SubAgentTaskRegistry IsNot Nothing Then
+                _activeToolingContext.SequencingState.SubAgentTaskRegistry.MarkUnresolved(
+                    request.AgentName, subAgentTaskId, "subagent_interrupted", forceTerminal:=False)
+            End If
+            ToolingFileLogger.LogWarn("[subagent-host] Sub-agent interrupted without parent cancellation or local deadline.", details:=ex.Message)
+            Return Global.SharedLibrary.Agents.ToolCallSequencing.BuildBlockedResultPayload(
+                "subagent_interrupted", "subagent_execution", ex.Message, retryable:=True,
+                completedResults:=retainedToolResults)
+        Catch ex As System.TimeoutException
+            If subAgentTaskId <> "" AndAlso
+               _activeToolingContext IsNot Nothing AndAlso
+               _activeToolingContext.SequencingState IsNot Nothing AndAlso
+               _activeToolingContext.SequencingState.SubAgentTaskRegistry IsNot Nothing Then
+
+                _activeToolingContext.SequencingState.SubAgentTaskRegistry.MarkBlocked(
+                    request.AgentName,
+                    subAgentTaskId,
+                    Global.SharedLibrary.Agents.SubAgentRuntimeHardening.TimeoutCode,
+                    forceTerminal:=False)
+            End If
+
+            ToolingFileLogger.LogWarn(
+                "[subagent-host] Isolated sub-agent attempt timed out; parent run remains active.",
+                details:=$"agent={If(request.AgentName, "")}; timeoutSeconds={request.TimeoutSeconds}; retryIndex={request.RunnerRetryIndex}; error={ex.Message}")
+
+            Return Global.SharedLibrary.Agents.SubAgentRuntimeHardening.BuildTimeoutPayload(
+                request.AgentName,
+                request.TimeoutSeconds,
+                ex.Message,
+                completedResults:=retainedToolResults,
+                runState:=_activeToolingContext?.SequencingState)
         Catch ex As System.Exception
             If subAgentTaskId <> "" AndAlso
                _activeToolingContext IsNot Nothing AndAlso
@@ -473,10 +565,19 @@ Partial Public Class ThisAddIn
                     subAgentTaskId,
                     "subagent_host_exception")
             End If
-
-            Throw
+            ToolingFileLogger.LogError("[subagent-host] Isolated execution failed; retained tool results remain available.", ex:=ex)
+            Return Global.SharedLibrary.Agents.ToolCallSequencing.BuildBlockedResultPayload(
+                "subagent_host_exception", "subagent_execution", ex.Message, retryable:=True,
+                completedResults:=retainedToolResults)
         Finally
-            RestoreModelConfigScope(_context, scope)
+            Try
+                subAgentLogClock.Stop()
+                If isolatedFailureBudgetScope IsNot Nothing Then isolatedFailureBudgetScope.Dispose()
+                If attemptCts IsNot Nothing Then attemptCts.Dispose()
+                RestoreModelConfigScope(_context, scope)
+            Finally
+                subAgentLogIdentity.Dispose()
+            End Try
         End Try
     End Function
 

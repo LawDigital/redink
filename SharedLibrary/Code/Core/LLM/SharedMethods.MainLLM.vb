@@ -46,7 +46,703 @@ Imports SharedLibrary.SharedLibrary.SharedContext
 
 Namespace SharedLibrary
 
+    ''' <summary>
+    ''' Represents an LLM transport failure that remained transient (for example
+    ''' HTTP 429/503) but could not be recovered within the bounded transport
+    ''' retry budget. Tooling hosts use this type to stop cleanly without
+    ''' consuming model-turn repair budgets or entering forced-finalization loops.
+    ''' </summary>
+    Public NotInheritable Class LlmTransientTransportException
+        Inherits System.Exception
+
+        Public ReadOnly Property StatusCode As Integer
+        Public ReadOnly Property AttemptCount As Integer
+        Public ReadOnly Property MaxAttempts As Integer
+        Public ReadOnly Property RetryProfile As LlmTransportRetryProfile
+
+        Public Sub New(statusCode As Integer,
+                       attemptCount As Integer,
+                       maxAttempts As Integer,
+                       retryProfile As LlmTransportRetryProfile,
+                       message As String)
+            MyBase.New(message)
+            Me.StatusCode = statusCode
+            Me.AttemptCount = attemptCount
+            Me.MaxAttempts = maxAttempts
+            Me.RetryProfile = retryProfile
+        End Sub
+    End Class
+
     Partial Public Class SharedMethods
+
+        ' <summary>
+        ' Turns an error originating in a model request into a short user-facing
+        ' notice. Raw exceptions remain available to the caller for diagnostics.
+        ' Never include endpoints, credentials, response bodies or stack traces.
+        ' </summary>
+        Public Shared Function FormatModelRequestFailureForUser(requestException As System.Exception) As System.String
+            If requestException Is Nothing Then
+                Return "Inky could not complete the model request. Please try again."
+            End If
+
+            If TypeOf requestException Is System.TimeoutException Then
+                Return "Inky did not receive an answer from the AI service in time. Please try again."
+            End If
+
+            Dim transient As LlmTransientTransportException = TryCast(requestException, LlmTransientTransportException)
+            If transient IsNot Nothing Then
+                Return "The AI service is temporarily unavailable (HTTP " &
+                    transient.StatusCode.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    "). Please try again shortly."
+            End If
+
+            If TypeOf requestException Is System.Net.Http.HttpRequestException OrElse
+               TypeOf requestException Is System.Net.WebException Then
+                Return "Inky could not reach the AI service or the service rejected the request. Please try again."
+            End If
+
+            ' Some model-service failures contain a brief, useful explanation.
+            ' Display only plain, bounded descriptions. Never show an endpoint,
+            ' response JSON, credential, local path, stack trace or source snippet.
+            Dim detail As System.String = If(requestException.Message, System.String.Empty).Trim()
+            If detail.Length > 0 AndAlso detail.Length <= 240 AndAlso
+               Not System.Text.RegularExpressions.Regex.IsMatch(detail,
+                   "(?i)(https?://|bearer|authorization|api[_ -]?key|secret|password|access[_ -]?token|refresh[_ -]?token|stack trace|system[.]|[\r\n{}<>]|[a-z]:[\\]|[/]home[/]|[/]users[/])") Then
+                Return "The AI service reported: " & detail
+            End If
+
+            Return "The AI service could not complete this request. Please try again. If it happens again, contact support."
+        End Function
+
+        Private Shared Function IsTransientTransportStatusCode(statusCode As Integer) As Boolean
+            Select Case statusCode
+                Case 408, 425, 429, 502, 503, 504
+                    Return True
+                Case Else
+                    Return False
+            End Select
+        End Function
+
+        Private Shared Function ClampTransientRetryDelayMilliseconds(requestedMilliseconds As Long,
+                                                                     cumulativeDelayMilliseconds As Integer,
+                                                                     retryPolicy As LlmTransportRetryPolicy,
+                                                                     isServerDirectedDelay As Boolean) As Integer
+            If retryPolicy Is Nothing Then
+                Throw New System.ArgumentNullException(NameOf(retryPolicy))
+            End If
+
+            Dim remainingBudget As Integer =
+                System.Math.Max(0, retryPolicy.MaxCumulativeDelayMilliseconds - cumulativeDelayMilliseconds)
+
+            If retryPolicy.Profile = LlmTransportRetryProfile.Unattended Then
+                remainingBudget = System.Math.Min(
+                    remainingBudget,
+                    LlmTransportRetryPolicyScope.GetRemainingTransientFailureBudgetMilliseconds(
+                        retryPolicy.MaxTransientFailureWallClockMilliseconds))
+            End If
+
+            If remainingBudget <= 0 Then Return 0
+
+            Dim bounded As Long = System.Math.Max(0L, requestedMilliseconds)
+            Dim perDelayLimit As Integer =
+                If(isServerDirectedDelay,
+                   retryPolicy.MaxRetryAfterDelayMilliseconds,
+                   retryPolicy.MaxFallbackDelayMilliseconds)
+            bounded = System.Math.Min(bounded, CLng(perDelayLimit))
+            bounded = System.Math.Min(bounded, CLng(remainingBudget))
+            Return CInt(bounded)
+        End Function
+
+        Private Shared Function GetBoundedTransientRetryDelayMilliseconds(retryAfterMilliseconds As Integer,
+                                                                          retryIndex As Integer,
+                                                                          cumulativeDelayMilliseconds As Integer,
+                                                                          retryPolicy As LlmTransportRetryPolicy) As Integer
+            If retryPolicy Is Nothing Then
+                Throw New System.ArgumentNullException(NameOf(retryPolicy))
+            End If
+
+            Dim hasRetryAfter As Boolean = retryAfterMilliseconds > 0
+            Dim requested As Long = retryAfterMilliseconds
+            If Not hasRetryAfter Then
+                requested = retryPolicy.GetFallbackDelayMilliseconds(retryIndex)
+            End If
+
+            Return ClampTransientRetryDelayMilliseconds(
+                requested,
+                cumulativeDelayMilliseconds,
+                retryPolicy,
+                isServerDirectedDelay:=hasRetryAfter)
+        End Function
+
+        Private Shared Function ClampRawRetryAfterMilliseconds(requestedMilliseconds As Long) As Integer
+            If requestedMilliseconds <= 0L Then Return 0
+            If requestedMilliseconds >= System.Int32.MaxValue Then Return System.Int32.MaxValue
+            Return CInt(requestedMilliseconds)
+        End Function
+
+        Private Shared Function GetRetryAfterMilliseconds(headers As System.Net.Http.Headers.HttpResponseHeaders) As Integer
+            If headers Is Nothing OrElse headers.RetryAfter Is Nothing Then Return 0
+
+            Try
+                If headers.RetryAfter.Delta.HasValue Then
+                    Return ClampRawRetryAfterMilliseconds(
+                        CLng(System.Math.Ceiling(headers.RetryAfter.Delta.Value.TotalMilliseconds)))
+                End If
+
+                If headers.RetryAfter.Date.HasValue Then
+                    Dim delta As System.TimeSpan = headers.RetryAfter.Date.Value - System.DateTimeOffset.UtcNow
+                    Return ClampRawRetryAfterMilliseconds(
+                        CLng(System.Math.Ceiling(System.Math.Max(0.0R, delta.TotalMilliseconds))))
+                End If
+            Catch
+            End Try
+
+            Return 0
+        End Function
+
+        Private Shared Function ParseRetryAfterMilliseconds(value As String) As Integer
+            Dim raw As String = If(value, "").Trim()
+            If raw = "" Then Return 0
+
+            Dim seconds As Integer
+            If System.Int32.TryParse(raw, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, seconds) Then
+                Return ClampRawRetryAfterMilliseconds(CLng(System.Math.Max(0, seconds)) * 1000L)
+            End If
+
+            Dim retryDate As System.DateTimeOffset
+            If System.DateTimeOffset.TryParse(raw,
+                                              System.Globalization.CultureInfo.InvariantCulture,
+                                              System.Globalization.DateTimeStyles.AssumeUniversal Or System.Globalization.DateTimeStyles.AdjustToUniversal,
+                                              retryDate) Then
+                Dim delta As System.TimeSpan = retryDate - System.DateTimeOffset.UtcNow
+                Return ClampRawRetryAfterMilliseconds(
+                    CLng(System.Math.Ceiling(System.Math.Max(0.0R, delta.TotalMilliseconds))))
+            End If
+
+            Return 0
+        End Function
+
+        Private Shared Function BuildTransientTransportExhaustedMessage(statusCode As Integer,
+                                                                        attemptCount As Integer,
+                                                                        maxAttempts As Integer) As String
+            Return $"HTTP Error {statusCode} when accessing the LLM endpoint. The provider remained temporarily unavailable after {attemptCount} bounded attempt(s) (maximum {maxAttempts}); automatic transport retries have stopped."
+        End Function
+
+        Private Shared Function ThrowOrReportTransientTransportExhausted(context As ISharedContext,
+                                                                          statusCode As Integer,
+                                                                          attemptCount As Integer,
+                                                                          maxAttempts As Integer,
+                                                                          endpoint As String,
+                                                                          requestBody As String,
+                                                                          hideSplash As Boolean,
+                                                                          toolExecution As Boolean,
+                                                                          retryProfile As LlmTransportRetryProfile) As String
+            Dim errMsg As String = BuildTransientTransportExhaustedMessage(statusCode, attemptCount, maxAttempts)
+            System.Diagnostics.Debug.WriteLine(
+                "[LLM TRANSIENT TRANSPORT EXHAUSTED] profile=" & retryProfile.ToString() & "; " & errMsg)
+            If context IsNot Nothing AndAlso context.INI_APIDebug Then
+                WriteDebugError(errMsg, endpoint, requestBody)
+            End If
+
+            ' Never surface a transport failure as model content. Hidden/headless and
+            ' tooling callers receive a typed exception so orchestration can distinguish
+            ' infrastructure failure from an assistant response. Visible interactive
+            ' callers retain the historic dialog + empty-result behavior.
+            If toolExecution OrElse hideSplash OrElse retryProfile = LlmTransportRetryProfile.Unattended Then
+                Throw New LlmTransientTransportException(
+                    statusCode, attemptCount, maxAttempts, retryProfile, errMsg)
+            End If
+
+            ShowCustomMessageBox(errMsg)
+            Return ""
+        End Function
+
+        ''' <summary>
+        ''' Applies the Swiss orthography display preference only to ordinary presentation prose.
+        ''' Markdig owns Markdown structure recognition; only proven LiteralInline source spans are
+        ''' rewritten, while structural/literal regions stay byte-for-byte unchanged.
+        ''' </summary>
+        Private Shared Function ApplyDoubleSForPresentation(value As System.String) As System.String
+            If System.String.IsNullOrEmpty(value) OrElse value.IndexOf(System.Convert.ToChar(223)) < 0 Then
+                Return value
+            End If
+
+            ' A structured top-level result is data rather than presentation prose.
+            Try
+                Dim token As Newtonsoft.Json.Linq.JToken = Newtonsoft.Json.Linq.JToken.Parse(value)
+                If token IsNot Nothing AndAlso
+                   (token.Type = Newtonsoft.Json.Linq.JTokenType.Object OrElse
+                    token.Type = Newtonsoft.Json.Linq.JTokenType.Array) Then
+
+                    Return value
+                End If
+            Catch ex As System.Exception
+                ' Plain assistant text is expected to fail JSON parsing.
+            End Try
+
+            Dim document As Markdig.Syntax.MarkdownDocument
+            Try
+                Dim pipeline As Markdig.MarkdownPipeline =
+                    CreateMarkdownHtmlPipeline(
+                        useSoftlineBreakAsHardlineBreak:=False,
+                        usePreciseSourceLocation:=True)
+
+                document = Markdig.Markdown.Parse(value, pipeline)
+            Catch ex As System.Exception
+                ' A display preference must never corrupt output if Markdown parsing itself fails.
+                System.Diagnostics.Debug.WriteLine(
+                    "[DOUBLE-S PRESENTATION] Markdig parse failed; preserving original text. " & ex.Message)
+                Return value
+            End Try
+
+            Dim taskStatusProtectedStart As System.Int32 =
+                GetDoubleSTaskStatusProtectedStart(value)
+
+            Dim protectedInlineSourceSpans As System.Collections.Generic.List(Of Markdig.Syntax.SourceSpan) =
+                CollectDoubleSProtectedInlineSourceSpans(value)
+
+            Dim proseSpans As System.Collections.Generic.List(Of Markdig.Syntax.SourceSpan) =
+                CollectDoubleSProseSourceSpans(
+                    document,
+                    value,
+                    taskStatusProtectedStart)
+
+            If proseSpans.Count = 0 Then
+                Return value
+            End If
+
+            Dim output As New System.Text.StringBuilder(value.Length + 16)
+            Dim sourceIndex As System.Int32 = 0
+
+            For Each proseSpan As Markdig.Syntax.SourceSpan In proseSpans
+                Dim spanStart As System.Int32 = proseSpan.Start
+                Dim spanEnd As System.Int32 = proseSpan.End
+
+                If taskStatusProtectedStart >= 0 Then
+                    If spanStart >= taskStatusProtectedStart Then
+                        Exit For
+                    End If
+                    If spanEnd >= taskStatusProtectedStart Then
+                        spanEnd = taskStatusProtectedStart - 1
+                    End If
+                End If
+
+                If spanEnd < spanStart OrElse spanStart < sourceIndex Then
+                    Continue For
+                End If
+
+                If spanStart > sourceIndex Then
+                    output.Append(value.Substring(sourceIndex, spanStart - sourceIndex))
+                End If
+
+                AppendDoubleSProseSourceRange(
+                    output,
+                    value,
+                    spanStart,
+                    spanEnd,
+                    protectedInlineSourceSpans)
+                sourceIndex = spanEnd + 1
+            Next
+
+            If sourceIndex < value.Length Then
+                output.Append(value.Substring(sourceIndex))
+            End If
+
+            Return output.ToString()
+        End Function
+
+        Private Shared Function CollectDoubleSProseSourceSpans(
+            document As Markdig.Syntax.MarkdownDocument,
+            source As System.String,
+            taskStatusProtectedStart As System.Int32
+        ) As System.Collections.Generic.List(Of Markdig.Syntax.SourceSpan)
+
+            Dim result As New System.Collections.Generic.List(Of Markdig.Syntax.SourceSpan)()
+            Dim protectedBlockSpans As New System.Collections.Generic.List(Of Markdig.Syntax.SourceSpan)()
+            Dim protectedReferenceLabelSpans As New System.Collections.Generic.List(Of Markdig.Syntax.SourceSpan)()
+
+            For Each markdownObject As Markdig.Syntax.MarkdownObject In
+                Markdig.Syntax.MarkdownObjectExtensions.Descendants(document)
+
+                If TypeOf markdownObject Is Markdig.Syntax.QuoteBlock Then
+                    Dim quoteBlock As Markdig.Syntax.QuoteBlock =
+                        DirectCast(markdownObject, Markdig.Syntax.QuoteBlock)
+                    If IsDoubleSUsableSourceSpan(quoteBlock.Span, source.Length) Then
+                        protectedBlockSpans.Add(quoteBlock.Span)
+                    End If
+                    Continue For
+                End If
+
+                If TypeOf markdownObject Is Markdig.Syntax.Inlines.LinkInline Then
+                    Dim link As Markdig.Syntax.Inlines.LinkInline =
+                        DirectCast(markdownObject, Markdig.Syntax.Inlines.LinkInline)
+
+                    ' In shortcut/collapsed reference links the visible first label is also the
+                    ' structural reference identifier. Protect the whole link source span so a
+                    ' presentation rewrite cannot change link resolution. Full reference links
+                    ' keep a separate second label and may still rewrite visible link prose.
+                    If IsDoubleSSharedReferenceLabel(link, source) AndAlso
+                       IsDoubleSUsableSourceSpan(link.Span, source.Length) Then
+                        protectedReferenceLabelSpans.Add(link.Span)
+                    End If
+                End If
+            Next
+
+            Dim htmlLiteralDepth As System.Int32 = 0
+
+            For Each markdownObject As Markdig.Syntax.MarkdownObject In
+                Markdig.Syntax.MarkdownObjectExtensions.Descendants(document)
+
+                If TypeOf markdownObject Is Markdig.Syntax.Inlines.HtmlInline Then
+                    Dim htmlInline As Markdig.Syntax.Inlines.HtmlInline =
+                        DirectCast(markdownObject, Markdig.Syntax.Inlines.HtmlInline)
+
+                    Dim depthDelta As System.Int32 =
+                        GetDoubleSLiteralHtmlTagDepthDelta(htmlInline.Tag)
+
+                    If depthDelta < 0 Then
+                        htmlLiteralDepth = System.Math.Max(0, htmlLiteralDepth + depthDelta)
+                    ElseIf depthDelta > 0 Then
+                        htmlLiteralDepth += depthDelta
+                    End If
+
+                    Continue For
+                End If
+
+                If htmlLiteralDepth <> 0 OrElse
+                   Not TypeOf markdownObject Is Markdig.Syntax.Inlines.LiteralInline Then
+                    Continue For
+                End If
+
+                Dim literal As Markdig.Syntax.Inlines.LiteralInline =
+                    DirectCast(markdownObject, Markdig.Syntax.Inlines.LiteralInline)
+
+                If Not IsDoubleSUsableSourceSpan(literal.Span, source.Length) Then
+                    Continue For
+                End If
+
+                If taskStatusProtectedStart >= 0 AndAlso literal.Span.Start >= taskStatusProtectedStart Then
+                    Continue For
+                End If
+
+                If DoubleSSpanOverlapsAny(literal.Span, protectedBlockSpans) OrElse
+                   DoubleSSpanOverlapsAny(literal.Span, protectedReferenceLabelSpans) Then
+                    Continue For
+                End If
+
+                result.Add(literal.Span)
+            Next
+
+            result.Sort(
+                Function(left As Markdig.Syntax.SourceSpan, right As Markdig.Syntax.SourceSpan) As System.Int32
+                    Return left.Start.CompareTo(right.Start)
+                End Function)
+
+            Return result
+        End Function
+
+        Private Shared Function IsDoubleSSharedReferenceLabel(
+            link As Markdig.Syntax.Inlines.LinkInline,
+            source As System.String
+        ) As System.Boolean
+
+            If link Is Nothing OrElse link.Reference Is Nothing Then
+                Return False
+            End If
+
+            If link.IsShortcut Then
+                Return True
+            End If
+
+            If Not IsDoubleSUsableSourceSpan(link.Span, source.Length) Then
+                Return True
+            End If
+
+            Dim sourceLength As System.Int32 = link.Span.End - link.Span.Start + 1
+            If sourceLength < 2 Then
+                Return True
+            End If
+
+            Dim linkSource As System.String = source.Substring(link.Span.Start, sourceLength)
+            Return linkSource.EndsWith("[]", System.StringComparison.Ordinal)
+        End Function
+
+        Private Shared Function DoubleSSpanOverlapsAny(
+            span As Markdig.Syntax.SourceSpan,
+            protectedSpans As System.Collections.Generic.List(Of Markdig.Syntax.SourceSpan)
+        ) As System.Boolean
+
+            For Each protectedSpan As Markdig.Syntax.SourceSpan In protectedSpans
+                If span.Start <= protectedSpan.End AndAlso span.End >= protectedSpan.Start Then
+                    Return True
+                End If
+            Next
+
+            Return False
+        End Function
+
+        Private Shared Function CollectDoubleSProtectedInlineSourceSpans(
+            source As System.String
+        ) As System.Collections.Generic.List(Of Markdig.Syntax.SourceSpan)
+
+            Dim result As System.Collections.Generic.List(Of Markdig.Syntax.SourceSpan) =
+                CollectDoubleSQuotedSourceSpans(source)
+
+            Dim index As System.Int32 = 0
+            While index < source.Length
+                If IsLiteralReferenceStart(source, index) Then
+                    Dim literalEnd As System.Int32 = index + 1
+                    While literalEnd < source.Length AndAlso
+                          Not System.Char.IsWhiteSpace(source(literalEnd))
+                        literalEnd += 1
+                    End While
+
+                    result.Add(New Markdig.Syntax.SourceSpan(index, literalEnd - 1))
+                    index = literalEnd
+                    Continue While
+                End If
+
+                index += 1
+            End While
+
+            Return result
+        End Function
+
+        Private Shared Function CollectDoubleSQuotedSourceSpans(
+            source As System.String
+        ) As System.Collections.Generic.List(Of Markdig.Syntax.SourceSpan)
+
+            Dim result As New System.Collections.Generic.List(Of Markdig.Syntax.SourceSpan)()
+            Dim lineStart As System.Int32 = 0
+
+            While lineStart < source.Length
+                Dim lineEnd As System.Int32 = lineStart
+                While lineEnd < source.Length AndAlso
+                      source(lineEnd) <> Microsoft.VisualBasic.ControlChars.Cr AndAlso
+                      source(lineEnd) <> Microsoft.VisualBasic.ControlChars.Lf
+                    lineEnd += 1
+                End While
+
+                Dim index As System.Int32 = lineStart
+                While index < lineEnd
+                    Dim current As System.Char = source(index)
+                    Dim lowDoubleQuote As System.Char = System.Convert.ToChar(&H201E)
+                    Dim leftDoubleQuote As System.Char = System.Convert.ToChar(&H201C)
+                    Dim rightDoubleQuote As System.Char = System.Convert.ToChar(&H201D)
+
+                    If current = """"c OrElse current = lowDoubleQuote OrElse current = leftDoubleQuote Then
+                        Dim closingQuote As System.Char = current
+                        If current = lowDoubleQuote Then closingQuote = leftDoubleQuote
+                        If current = leftDoubleQuote Then closingQuote = rightDoubleQuote
+
+                        Dim closingIndex As System.Int32 = index + 1
+                        While closingIndex < lineEnd
+                            If source(closingIndex) = closingQuote AndAlso
+                               Not IsBackslashEscaped(source, closingIndex) Then
+                                Exit While
+                            End If
+                            closingIndex += 1
+                        End While
+
+                        If closingIndex >= lineEnd Then
+                            If lineEnd > index Then
+                                result.Add(New Markdig.Syntax.SourceSpan(index, lineEnd - 1))
+                            End If
+                            Exit While
+                        End If
+
+                        result.Add(New Markdig.Syntax.SourceSpan(index, closingIndex))
+                        index = closingIndex + 1
+                        Continue While
+                    End If
+
+                    index += 1
+                End While
+
+                If lineEnd >= source.Length Then
+                    Exit While
+                End If
+
+                If source(lineEnd) = Microsoft.VisualBasic.ControlChars.Cr AndAlso
+                   lineEnd + 1 < source.Length AndAlso
+                   source(lineEnd + 1) = Microsoft.VisualBasic.ControlChars.Lf Then
+                    lineStart = lineEnd + 2
+                Else
+                    lineStart = lineEnd + 1
+                End If
+            End While
+
+            Return result
+        End Function
+
+        Private Shared Function GetDoubleSProtectedSourceEnd(
+            index As System.Int32,
+            rangeEnd As System.Int32,
+            protectedSpans As System.Collections.Generic.List(Of Markdig.Syntax.SourceSpan)
+        ) As System.Int32
+
+            Dim protectedEnd As System.Int32 = -1
+
+            For Each protectedSpan As Markdig.Syntax.SourceSpan In protectedSpans
+                If index >= protectedSpan.Start AndAlso index <= protectedSpan.End Then
+                    protectedEnd = System.Math.Max(protectedEnd, protectedSpan.End)
+                End If
+            Next
+
+            If protectedEnd < index Then
+                Return -1
+            End If
+
+            Return System.Math.Min(protectedEnd, rangeEnd)
+        End Function
+
+        Private Shared Function GetDoubleSTaskStatusProtectedStart(value As System.String) As System.Int32
+            Dim location As Global.SharedLibrary.Agents.TaskStatusFooterParser.TaskStatusEnvelopeLocation =
+                Global.SharedLibrary.Agents.TaskStatusFooterParser.LocateTrailingEnvelope(value)
+
+            If location Is Nothing OrElse Not location.IsPresent Then
+                Return -1
+            End If
+
+            Dim protectedStart As System.Int32 = location.StartIndex
+            Dim remainingPrecedingEnvelopes As System.Int32 = location.FooterCount - 1
+
+            While remainingPrecedingEnvelopes > 0 AndAlso protectedStart > 0
+                Dim prefix As System.String = value.Substring(0, protectedStart).TrimEnd()
+                Dim preceding As Global.SharedLibrary.Agents.TaskStatusFooterParser.TaskStatusEnvelopeLocation =
+                    Global.SharedLibrary.Agents.TaskStatusFooterParser.LocateTrailingEnvelope(prefix)
+
+                If preceding Is Nothing OrElse Not preceding.IsPresent Then
+                    Exit While
+                End If
+
+                protectedStart = preceding.StartIndex
+                remainingPrecedingEnvelopes -= 1
+            End While
+
+            Return protectedStart
+        End Function
+
+        Private Shared Function GetDoubleSLiteralHtmlTagDepthDelta(tag As System.String) As System.Int32
+            If System.String.IsNullOrWhiteSpace(tag) Then
+                Return 0
+            End If
+
+            Dim trimmed As System.String = tag.Trim()
+            If trimmed.Length < 3 OrElse trimmed(0) <> "<"c Then
+                Return 0
+            End If
+
+            Dim nameStart As System.Int32 = 1
+            Dim isClosing As System.Boolean = False
+
+            If nameStart < trimmed.Length AndAlso trimmed(nameStart) = "/"c Then
+                isClosing = True
+                nameStart += 1
+            End If
+
+            Dim nameEnd As System.Int32 = nameStart
+            While nameEnd < trimmed.Length AndAlso System.Char.IsLetter(trimmed(nameEnd))
+                nameEnd += 1
+            End While
+
+            If nameEnd = nameStart Then
+                Return 0
+            End If
+
+            Dim tagName As System.String = trimmed.Substring(nameStart, nameEnd - nameStart)
+            If Not System.String.Equals(tagName, "code", System.StringComparison.OrdinalIgnoreCase) AndAlso
+               Not System.String.Equals(tagName, "pre", System.StringComparison.OrdinalIgnoreCase) Then
+                Return 0
+            End If
+
+            If nameEnd < trimmed.Length AndAlso
+               Not System.Char.IsWhiteSpace(trimmed(nameEnd)) AndAlso
+               trimmed(nameEnd) <> ">"c AndAlso
+               trimmed(nameEnd) <> "/"c Then
+                Return 0
+            End If
+
+            If isClosing Then
+                Return -1
+            End If
+
+            If trimmed.EndsWith("/>", System.StringComparison.Ordinal) Then
+                Return 0
+            End If
+
+            Return 1
+        End Function
+
+        Private Shared Function IsDoubleSUsableSourceSpan(
+            span As Markdig.Syntax.SourceSpan,
+            sourceLength As System.Int32
+        ) As System.Boolean
+
+            Return span.Start >= 0 AndAlso
+                   span.End >= span.Start AndAlso
+                   span.End < sourceLength
+        End Function
+
+        Private Shared Sub AppendDoubleSProseSourceRange(
+            output As System.Text.StringBuilder,
+            source As System.String,
+            startIndex As System.Int32,
+            endIndex As System.Int32,
+            protectedInlineSourceSpans As System.Collections.Generic.List(Of Markdig.Syntax.SourceSpan))
+
+            Dim index As System.Int32 = startIndex
+
+            While index <= endIndex
+                Dim protectedEnd As System.Int32 =
+                    GetDoubleSProtectedSourceEnd(index, endIndex, protectedInlineSourceSpans)
+
+                If protectedEnd >= index Then
+                    output.Append(source.Substring(index, protectedEnd - index + 1))
+                    index = protectedEnd + 1
+                    Continue While
+                End If
+
+                Dim current As System.Char = source(index)
+                If current = System.Convert.ToChar(223) Then
+                    output.Append("ss")
+                Else
+                    output.Append(current)
+                End If
+
+                index += 1
+            End While
+        End Sub
+
+        Private Shared Function IsBackslashEscaped(value As System.String, index As System.Int32) As System.Boolean
+            Dim slashCount As System.Int32 = 0
+            Dim probe As System.Int32 = index - 1
+            While probe >= 0 AndAlso value(probe) = "\"c
+                slashCount += 1
+                probe -= 1
+            End While
+            Return (slashCount Mod 2) = 1
+        End Function
+
+        Private Shared Function IsLiteralReferenceStart(value As System.String, index As System.Int32) As System.Boolean
+            If System.String.IsNullOrEmpty(value) OrElse index < 0 OrElse index >= value.Length Then Return False
+
+            If value.IndexOf("https://", index, System.StringComparison.OrdinalIgnoreCase) = index OrElse
+               value.IndexOf("http://", index, System.StringComparison.OrdinalIgnoreCase) = index OrElse
+               value.IndexOf("file://", index, System.StringComparison.OrdinalIgnoreCase) = index OrElse
+               value.IndexOf("mailto:", index, System.StringComparison.OrdinalIgnoreCase) = index Then
+                Return True
+            End If
+
+            If index + 2 < value.Length AndAlso
+               System.Char.IsLetter(value(index)) AndAlso
+               value(index + 1) = ":"c AndAlso
+               (value(index + 2) = "\"c OrElse value(index + 2) = "/"c) Then
+                Return True
+            End If
+
+            Return index + 1 < value.Length AndAlso value(index) = "\"c AndAlso value(index + 1) = "\"c
+        End Function
 
         ''' <summary>
         ''' Optionally performs a post-processing LLM call as configured by <paramref name="context"/> and returns the resulting text.
@@ -84,12 +780,24 @@ Namespace SharedLibrary
         ''' <param name="FileObject">Optional file/clipboard object reference used for object upload features.</param>
         ''' <param name="cancellationToken">Cancellation token propagated to network calls and linked to splash cancellation.</param>
         ''' <param name="ToolExecution">If <c>True</c> then LLM expects to be in the tooling execution mode when calling an LLM (necessary for building APICall).</c>.</param>
+        ''' <param name="transportRetryProfile">Provider-agnostic transport retry profile. Inherit uses the current async-flow scope and otherwise falls back to Interactive.</param>
         ''' <returns>Extracted text from the JSON response. Caller cancellation is propagated; request timeout is surfaced as System.TimeoutException.</returns>
-        Public Shared Async Function LLM(context As ISharedContext, ByVal promptSystem As String, ByVal promptUser As String, Optional ByVal Model As String = "", Optional ByVal Temperature As String = "", Optional ByVal Timeout As Long = 0, Optional ByVal UseSecondAPI As Boolean = False, Optional ByVal Hidesplash As Boolean = False, Optional ByVal AddUserPrompt As String = "", Optional FileObject As String = "", Optional cancellationToken As Threading.CancellationToken = Nothing, Optional ToolExecution As Boolean = False, Optional binaryOutputDirectory As String = Nothing) As Task(Of String)
+        Public Shared Async Function LLM(context As ISharedContext, ByVal promptSystem As String, ByVal promptUser As String, Optional ByVal Model As String = "", Optional ByVal Temperature As String = "", Optional ByVal Timeout As Long = 0, Optional ByVal UseSecondAPI As Boolean = False, Optional ByVal Hidesplash As Boolean = False, Optional ByVal AddUserPrompt As String = "", Optional FileObject As String = "", Optional cancellationToken As System.Threading.CancellationToken = Nothing, Optional ToolExecution As Boolean = False, Optional binaryOutputDirectory As String = Nothing, Optional transportRetryProfile As LlmTransportRetryProfile = LlmTransportRetryProfile.Inherit) As System.Threading.Tasks.Task(Of String)
             cancellationToken.ThrowIfCancellationRequested()
 
+            Dim transportRetryPolicy As LlmTransportRetryPolicy =
+                LlmTransportRetryPolicy.ForProfile(transportRetryProfile)
+
             Await Agents.AgentGate.EnterAsync(cancellationToken).ConfigureAwait(False)
+            Dim requestProfileScope As System.IDisposable = Nothing
+            Dim requestFailureScope As System.IDisposable = Nothing
             Try
+                If transportRetryPolicy.Profile = LlmTransportRetryProfile.Unattended Then
+                    ' One logical request owns its bounded retry budget. Do not reset a
+                    ' mutable parent budget: other concurrent requests may still use it.
+                    requestProfileScope = LlmTransportRetryPolicyScope.Push(transportRetryPolicy.Profile)
+                    requestFailureScope = LlmTransportRetryPolicyScope.PushIsolatedFailureBudget()
+                End If
 
                 ' Anonymization features
 
@@ -129,7 +837,9 @@ Namespace SharedLibrary
 
                 cancellationToken.ThrowIfCancellationRequested()
 
-                Dim splash As SplashScreenCountDown = Nothing
+                Dim splash As Global.SharedLibrary.SharedLibrary.SplashScreenCountDown = Nothing
+                Dim splashCancelHandler As System.EventHandler = Nothing
+                Dim splashCancelRequested As System.Int32 = 0
                 Dim cts As System.Threading.CancellationTokenSource = Nothing
 
                 Dim TokenCountString As String = ""
@@ -171,13 +881,13 @@ Namespace SharedLibrary
                     If UseSecondAPI Then
 
                         If context.INI_OAuth2_2 Then
-                            context.DecodedAPI_2 = Await GetFreshAccessToken(context, context.INI_OAuth2ClientMail_2, context.INI_OAuth2Scopes_2, context.INI_APIKey_2, context.INI_OAuth2Endpoint_2, context.INI_OAuth2ATExpiry_2, True, Hidesplash)
+                            context.DecodedAPI_2 = Await GetFreshAccessToken(context, context.INI_OAuth2ClientMail_2, context.INI_OAuth2Scopes_2, context.INI_APIKey_2, context.INI_OAuth2Endpoint_2, context.INI_OAuth2ATExpiry_2, True, Hidesplash, cancellationToken:=cancellationToken)
                             If context.DecodedAPI_2 = "" Then Exit Function
                         End If
 
                     Else
                         If context.INI_OAuth2 Then
-                            context.DecodedAPI = Await GetFreshAccessToken(context, context.INI_OAuth2ClientMail, context.INI_OAuth2Scopes, context.INI_APIKey, context.INI_OAuth2Endpoint, context.INI_OAuth2ATExpiry, False, Hidesplash)
+                            context.DecodedAPI = Await GetFreshAccessToken(context, context.INI_OAuth2ClientMail, context.INI_OAuth2Scopes, context.INI_APIKey, context.INI_OAuth2Endpoint, context.INI_OAuth2ATExpiry, False, Hidesplash, cancellationToken:=cancellationToken)
                             If context.DecodedAPI = "" Then Exit Function
                         End If
                     End If
@@ -332,38 +1042,87 @@ Namespace SharedLibrary
                         Next
                     End If
 
-                    ' Create splash & CTS once:
-                    splash = New SplashScreenCountDown("Waiting for the AI to respond...", 0, 0, 0)
+                    ' Hidden requests create no splash/controller or WinForms resources.
+                    If Not Hidesplash Then
+                        splash = New Global.SharedLibrary.SharedLibrary.SplashScreenCountDown("Waiting for the AI to respond...", 0, 0, 0)
+                        splashCancelHandler =
+                            Sub(sender As System.Object, e As System.EventArgs)
+                                ' Record ESC before the controller cancels its own token.
+                                ' Never capture/cancel a request CTS from a late UI callback.
+                                System.Threading.Interlocked.Exchange(splashCancelRequested, 1)
+                            End Sub
+                        AddHandler splash.CancelRequested, splashCancelHandler
+                    End If
 
-                    ' Link a local CTS with the external token so caller cancellation, timeout, and the splash cancel button apply.
-                    cts = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)
-                    Dim splashCancelRequested As System.Int32 = 0
-                    AddHandler splash.CancelRequested,
-                        Sub()
-                            System.Threading.Interlocked.Exchange(splashCancelRequested, 1)
-                            cts.Cancel()
-                        End Sub
+                    ' Cancellation and per-attempt timeout remain active for EVERY request.
+                    ' Linking tokens replaces the unsafe UI callback into a disposed CTS.
+                    cts = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(
+                        cancellationToken,
+                        If(splash IsNot Nothing, splash.RequestCancellationToken, System.Threading.CancellationToken.None))
                     Dim ct As System.Threading.CancellationToken = cts.Token
 
+                    Dim lastAttemptTimeoutMilliseconds As System.Int32 = 0
                     Dim restartCountdownAndTimeout As Action(Of String) =
                             Sub(newBaseText As String)
-                                cts.CancelAfter(TimeSpan.FromMilliseconds(TimeoutValue))
+                                Dim effectiveTimeoutMilliseconds As System.Int32 =
+                                    System.Convert.ToInt32(
+                                        System.Math.Min(
+                                            TimeoutValue,
+                                            System.Convert.ToInt64(System.Int32.MaxValue)))
+
+                                If transportRetryPolicy.Profile = LlmTransportRetryProfile.Unattended Then
+                                    Dim remainingFailureBudgetMilliseconds As System.Int32 =
+                                        LlmTransportRetryPolicyScope.GetRemainingTransientFailureBudgetMilliseconds(
+                                            transportRetryPolicy.MaxTransientFailureWallClockMilliseconds)
+
+                                    effectiveTimeoutMilliseconds =
+                                        System.Math.Max(
+                                            1,
+                                            System.Math.Min(
+                                                effectiveTimeoutMilliseconds,
+                                                remainingFailureBudgetMilliseconds))
+                                End If
+
+                                lastAttemptTimeoutMilliseconds = effectiveTimeoutMilliseconds
+                                cts.CancelAfter(System.TimeSpan.FromMilliseconds(effectiveTimeoutMilliseconds))
 
                                 If Not Hidesplash Then
+                                    Dim effectiveTimeoutSeconds As System.Int32 =
+                                        System.Math.Max(
+                                            1,
+                                            CInt(System.Math.Ceiling(effectiveTimeoutMilliseconds / 1000.0R)))
                                     If newBaseText Is Nothing Then
-                                        splash.RestartCountdown(timeoutSeconds)
+                                        splash.RestartCountdown(effectiveTimeoutSeconds)
                                     Else
-                                        splash.RestartCountdown(timeoutSeconds, newBaseText)
+                                        splash.RestartCountdown(effectiveTimeoutSeconds, newBaseText)
                                     End If
                                 End If
                             End Sub
 
-                    If Not Hidesplash Then
-                        splash.Show()
+                    Dim prepareForTransientRetryDelay As Action(Of Integer) =
+                            Sub(delayMilliseconds As Integer)
+                                ' A retry delay is not a network request timeout. Disable the local
+                                ' per-attempt timer while backing off; caller cancellation remains
+                                ' active through the linked token. The request timer is restarted
+                                ' immediately before the next transport attempt.
+                                cts.CancelAfter(System.Threading.Timeout.Infinite)
+
+                                If Not Hidesplash Then
+                                    Dim delaySeconds As Integer =
+                                        System.Math.Max(1, CInt(System.Math.Ceiling(System.Math.Max(0, delayMilliseconds) / 1000.0R)))
+                                    splash.RestartCountdown(delaySeconds, "Slowing down due to AI...")
+                                End If
+                            End Sub
+
+                    If splash IsNot Nothing Then
+                        ' Preserve the incoming context for existing clipboard/UI preparation.
+                        Await splash.ShowAsync(ct)
                     End If
+                    ct.ThrowIfCancellationRequested()
 
                     restartCountdownAndTimeout(Nothing)
 
+                    ValidateIsolatedEndpointPromptBudget(context, Endpoint, promptSystem, promptUser)
                     Endpoint = Endpoint.Replace("{promptsystem}", CleanString(Left(promptSystem, 32000)))
                     Endpoint = Endpoint.Replace("{promptuser}", CleanString(Left(promptUser, 32000).Replace("<TEXTTOPROCESS>", "").Replace("</TEXTTOPROCESS>", "").Trim()))
                     Endpoint = Endpoint.Replace("{userinstruction}", CleanString(AddUserPrompt))
@@ -596,6 +1355,7 @@ Namespace SharedLibrary
                     End If
 
                     requestBody = requestBody.Replace("{objectcall}", "")
+                    ValidateIsolatedSerializedRequestBudget(context, Endpoint, requestBody)
 
                     Dim Returnvalue As String = ""
 
@@ -610,15 +1370,35 @@ Namespace SharedLibrary
                                     client.Timeout = TimeSpan.FromMilliseconds(TimeoutValue)
 
                                     Try
-                                        Dim maxRetries As Integer = 3
-                                        Dim delayIntervals As Integer() = {5000, 10000, 30000}
+                                        Dim maxRetries As Integer = transportRetryPolicy.MaxRetries
                                         Dim responseText As String = ""
                                         Dim lastContentType As String = Nothing
+                                        Dim pendingRetryDelayMs As Integer = 0
+                                        Dim cumulativeRetryDelayMs As Integer = 0
+                                        Dim lastTransientStatusCode As System.Int32 = 0
 
                                         For attempt As Integer = 0 To maxRetries
                                             If attempt > 0 Then
-                                                restartCountdownAndTimeout("Slowing down due to AI...")
-                                                Await System.Threading.Tasks.Task.Delay(delayIntervals(attempt - 1), ct)
+                                                prepareForTransientRetryDelay(pendingRetryDelayMs)
+                                                If pendingRetryDelayMs > 0 Then
+                                                    Await System.Threading.Tasks.Task.Delay(pendingRetryDelayMs, ct)
+                                                    cumulativeRetryDelayMs += pendingRetryDelayMs
+                                                End If
+
+                                                If transportRetryPolicy.Profile = LlmTransportRetryProfile.Unattended AndAlso
+                                                   LlmTransportRetryPolicyScope.GetRemainingTransientFailureBudgetMilliseconds(
+                                                       transportRetryPolicy.MaxTransientFailureWallClockMilliseconds) <= 0 Then
+                                                    Return ThrowOrReportTransientTransportExhausted(
+                                                        context,
+                                                        lastTransientStatusCode,
+                                                        attempt,
+                                                        maxRetries + 1,
+                                                        Endpoint,
+                                                        requestBody,
+                                                        Hidesplash,
+                                                        ToolExecution,
+                                                        transportRetryPolicy.Profile)
+                                                End If
                                             End If
 
                                             ' Recreate MultipartFormDataContent on each attempt to avoid duplicate parts.
@@ -686,13 +1466,35 @@ Namespace SharedLibrary
                                             If response.IsSuccessStatusCode Then
                                                 responseText = Await response.Content.ReadAsStringAsync().ConfigureAwait(False)
                                                 Exit For
-                                            ElseIf response.StatusCode = 429 Then
-                                                If attempt = maxRetries Then
-                                                    Dim errMsg As String = $"HTTP Error {response.StatusCode} when accessing the LLM endpoint: This error is typically either because (1) the server resource is exhausted on the side of the provider (retry it later or reduce the work load; {AN} already tried to slow down and wait, but this could not overcome the overload condition), or (2) you have not yet correctly configured your service account (e.g., with OpenAI API, you have to have a credit card registered and an amount entered before you generate your API key)."
-                                                    If context.INI_APIDebug Then WriteDebugError(errMsg, Endpoint, requestBody)
-                                                    If Not Hidesplash Then ShowCustomMessageBox(errMsg) Else Return errMsg
-                                                    Return ""
+                                            ElseIf IsTransientTransportStatusCode(CInt(response.StatusCode)) Then
+                                                lastTransientStatusCode = CInt(response.StatusCode)
+                                                LlmTransportRetryPolicyScope.NoteTransientFailure(
+                                                    transportRetryPolicy.MaxTransientFailureWallClockMilliseconds)
+                                                LlmTransportRetryPolicyScope.ReportTransientAttempt(transportRetryPolicy.Profile, CInt(response.StatusCode), attempt + 1, maxRetries + 1, -1)
+
+                                                If attempt = maxRetries OrElse
+                                                   (transportRetryPolicy.Profile = LlmTransportRetryProfile.Unattended AndAlso
+                                                    LlmTransportRetryPolicyScope.GetRemainingTransientFailureBudgetMilliseconds(
+                                                        transportRetryPolicy.MaxTransientFailureWallClockMilliseconds) <= 0) Then
+                                                    Return ThrowOrReportTransientTransportExhausted(
+                                                        context,
+                                                        CInt(response.StatusCode),
+                                                        attempt + 1,
+                                                        maxRetries + 1,
+                                                        Endpoint,
+                                                        requestBody,
+                                                        Hidesplash,
+                                                        ToolExecution,
+                                                        transportRetryPolicy.Profile)
                                                 End If
+
+                                                Dim retryAfterMs As Integer = GetRetryAfterMilliseconds(response.Headers)
+                                                pendingRetryDelayMs = GetBoundedTransientRetryDelayMilliseconds(
+                                                    retryAfterMs,
+                                                    attempt,
+                                                    cumulativeRetryDelayMs,
+                                                    transportRetryPolicy)
+                                                LlmTransportRetryPolicyScope.ReportTransientAttempt(transportRetryPolicy.Profile, CInt(response.StatusCode), attempt + 1, maxRetries + 1, pendingRetryDelayMs)
                                                 Continue For
                                             Else
                                                 Dim errorContent As String = Await response.Content.ReadAsStringAsync().ConfigureAwait(False)
@@ -777,27 +1579,31 @@ Namespace SharedLibrary
                                         Throw New OperationCanceledException(ct)
                                     Catch ex As TaskCanceledException When Not ct.IsCancellationRequested
                                         If context.INI_APIDebug Then WriteDebugError("Request to the endpoint timed out.", Endpoint, requestBody, "", ex)
-                                        If Not Hidesplash Then splash.Close()
+                                        If splash IsNot Nothing Then splash.Close()
                                         If Not Hidesplash Then ShowCustomMessageBox($"The request to the endpoint timed out. Please try again or increase the timeout setting.")
+                                    Catch ex As LlmTransientTransportException
+                                        Throw
                                     Catch ex As System.Exception When Not ct.IsCancellationRequested
                                         If context.INI_APIDebug Then WriteDebugError("Response from the endpoint resulted in an error.", Endpoint, requestBody, "", ex)
-                                        If Not Hidesplash Then splash.Close()
+                                        If splash IsNot Nothing Then splash.Close()
                                         If Not Hidesplash Then ShowCustomMessageBox($"The response from the endpoint resulted in an error: {ex.Message}")
                                     End Try
                                 End Using
                             End Using
                         Catch ex As System.OperationCanceledException
+                            If splash IsNot Nothing Then splash.ThrowIfFailed()
                             If cancellationToken.IsCancellationRequested OrElse
                                System.Threading.Interlocked.CompareExchange(splashCancelRequested, 0, 0) <> 0 Then
                                 Throw New System.OperationCanceledException("LLM request canceled by caller.", ex, cancellationToken)
                             End If
 
                             Throw New System.TimeoutException(
-                                $"LLM request timed out after {TimeoutValue} ms.",
+                                $"LLM request timed out after the effective attempt limit of {lastAttemptTimeoutMilliseconds} ms (configured: {TimeoutValue} ms).",
                                 ex)
                         Finally
-                            cts.Dispose()
-                            If Not Hidesplash Then splash.Close()
+                            ' Stop the attempt timer; the outer Finally owns CTS disposal.
+                            cts.CancelAfter(System.Threading.Timeout.Infinite)
+                            If splash IsNot Nothing Then splash.Close()
                         End Try
 
                         GoTo PostProcess
@@ -809,16 +1615,36 @@ Namespace SharedLibrary
                         ' Send the request.
                         Try
 
-                            Dim maxRetries As Integer = 3
-                            Dim delayIntervals As Integer() = {5000, 10000, 30000} ' delays in milliseconds
+                            Dim maxRetries As Integer = transportRetryPolicy.MaxRetries
                             Dim responseText As String = ""
                             Dim lastContentType As String = Nothing
+                            Dim pendingRetryDelayMs As Integer = 0
+                            Dim cumulativeRetryDelayMs As Integer = 0
+                            Dim lastTransientStatusCode As System.Int32 = 0
 
                             For attempt As Integer = 0 To maxRetries
                                 ' On retries, wait the specified delay before sending a new request.
                                 If attempt > 0 Then
-                                    restartCountdownAndTimeout("Slowing down due to AI...")
-                                    Await System.Threading.Tasks.Task.Delay(delayIntervals(attempt - 1), ct)
+                                    prepareForTransientRetryDelay(pendingRetryDelayMs)
+                                    If pendingRetryDelayMs > 0 Then
+                                        Await System.Threading.Tasks.Task.Delay(pendingRetryDelayMs, ct)
+                                        cumulativeRetryDelayMs += pendingRetryDelayMs
+                                    End If
+
+                                    If transportRetryPolicy.Profile = LlmTransportRetryProfile.Unattended AndAlso
+                                       LlmTransportRetryPolicyScope.GetRemainingTransientFailureBudgetMilliseconds(
+                                           transportRetryPolicy.MaxTransientFailureWallClockMilliseconds) <= 0 Then
+                                        Return ThrowOrReportTransientTransportExhausted(
+                                            context,
+                                            lastTransientStatusCode,
+                                            attempt,
+                                            maxRetries + 1,
+                                            Endpoint,
+                                            requestBody,
+                                            Hidesplash,
+                                            ToolExecution,
+                                            transportRetryPolicy.Profile)
+                                    End If
                                 End If
 
                                 restartCountdownAndTimeout(Nothing)
@@ -853,14 +1679,34 @@ Namespace SharedLibrary
                                     responseText = result.Body
                                     Exit For
 
-                                ElseIf result.StatusCode = 429 Then
-                                    If attempt = maxRetries Then
-                                        Dim errMsg As String = $"HTTP Error {result.StatusCode} when accessing the LLM endpoint: This error is typically either because (1) the server resource is exhausted on the side of the provider (retry it later or reduce the work load; {AN} already tried to slow down and wait, but this could not overcome the overload condition), or (2) you have not yet correctly configured your service account (e.g., with OpenAI API, you have to have a credit card registered and an amount entered before you generate your API key)."
-                                        System.Diagnostics.Debug.WriteLine($"[LLM FATAL] " & errMsg)
-                                        If context.INI_APIDebug Then WriteDebugError(errMsg, Endpoint, requestBody)
-                                        If Not Hidesplash Then ShowCustomMessageBox(errMsg) Else Return errMsg
-                                        Return ""
+                                ElseIf IsTransientTransportStatusCode(result.StatusCode) Then
+                                    lastTransientStatusCode = result.StatusCode
+                                    LlmTransportRetryPolicyScope.NoteTransientFailure(
+                                        transportRetryPolicy.MaxTransientFailureWallClockMilliseconds)
+                                    LlmTransportRetryPolicyScope.ReportTransientAttempt(transportRetryPolicy.Profile, result.StatusCode, attempt + 1, maxRetries + 1, -1)
+
+                                    If attempt = maxRetries OrElse
+                                       (transportRetryPolicy.Profile = LlmTransportRetryProfile.Unattended AndAlso
+                                        LlmTransportRetryPolicyScope.GetRemainingTransientFailureBudgetMilliseconds(
+                                            transportRetryPolicy.MaxTransientFailureWallClockMilliseconds) <= 0) Then
+                                        Return ThrowOrReportTransientTransportExhausted(
+                                            context,
+                                            result.StatusCode,
+                                            attempt + 1,
+                                            maxRetries + 1,
+                                            Endpoint,
+                                            requestBody,
+                                            Hidesplash,
+                                            ToolExecution,
+                                            transportRetryPolicy.Profile)
                                     End If
+
+                                    pendingRetryDelayMs = GetBoundedTransientRetryDelayMilliseconds(
+                                        result.RetryAfterMilliseconds,
+                                        attempt,
+                                        cumulativeRetryDelayMs,
+                                        transportRetryPolicy)
+                                    LlmTransportRetryPolicyScope.ReportTransientAttempt(transportRetryPolicy.Profile, result.StatusCode, attempt + 1, maxRetries + 1, pendingRetryDelayMs)
                                     Continue For
                                 Else
                                     Dim errMsg As String = $"HTTP Error {result.StatusCode} when accessing the LLM endpoint: {result.Body}"
@@ -970,6 +1816,7 @@ Namespace SharedLibrary
                                     Next
                                 End If
 
+                                ValidateIsolatedSerializedRequestBudget(context, rawGetEndpoint, rawGetBody)
                                 If context.INI_APIDebug Then
                                     Debug.WriteLine($"SENT TO API as GET ({rawGetEndpoint}):{Environment.NewLine}{rawGetBody}")
                                     Try
@@ -984,16 +1831,78 @@ Namespace SharedLibrary
                                 restartCountdownAndTimeout(Nothing)
 
                                 ' 4) Send GET request via WebRequest.
-                                Dim getResult = Await SendViaWebRequestAsync(
-                                    rawGetEndpoint, "GET", HeaderA, HeaderB,
-                                    rawGetBody, TimeoutValue, ct).ConfigureAwait(False)
+                                Dim getResponseText As String = ""
+                                Dim getPendingRetryDelayMs As Integer = 0
+                                Dim getCumulativeRetryDelayMs As Integer = 0
+                                Dim getLastTransientStatusCode As System.Int32 = 0
 
-                                Dim getResponseText As String
-                                If getResult.StatusCode >= 200 AndAlso getResult.StatusCode < 300 Then
-                                    getResponseText = getResult.Body
-                                Else
+                                For getAttempt As Integer = 0 To transportRetryPolicy.MaxRetries
+                                    If getAttempt > 0 AndAlso getPendingRetryDelayMs > 0 Then
+                                        prepareForTransientRetryDelay(getPendingRetryDelayMs)
+                                        Await System.Threading.Tasks.Task.Delay(getPendingRetryDelayMs, ct)
+                                        getCumulativeRetryDelayMs += getPendingRetryDelayMs
+                                    End If
+
+                                    If getAttempt > 0 AndAlso
+                                       transportRetryPolicy.Profile = LlmTransportRetryProfile.Unattended AndAlso
+                                       LlmTransportRetryPolicyScope.GetRemainingTransientFailureBudgetMilliseconds(
+                                           transportRetryPolicy.MaxTransientFailureWallClockMilliseconds) <= 0 Then
+                                        Return ThrowOrReportTransientTransportExhausted(
+                                            context,
+                                            getLastTransientStatusCode,
+                                            getAttempt,
+                                            transportRetryPolicy.MaxRetries + 1,
+                                            rawGetEndpoint,
+                                            rawGetBody,
+                                            Hidesplash,
+                                            ToolExecution,
+                                            transportRetryPolicy.Profile)
+                                    End If
+
+                                    restartCountdownAndTimeout(Nothing)
+
+                                    Dim getResult = Await SendViaWebRequestAsync(
+                                        rawGetEndpoint, "GET", HeaderA, HeaderB,
+                                        rawGetBody, TimeoutValue, ct).ConfigureAwait(False)
+
+                                    If getResult.StatusCode >= 200 AndAlso getResult.StatusCode < 300 Then
+                                        getResponseText = getResult.Body
+                                        Exit For
+                                    End If
+
+                                    If IsTransientTransportStatusCode(getResult.StatusCode) Then
+                                        getLastTransientStatusCode = getResult.StatusCode
+                                        LlmTransportRetryPolicyScope.NoteTransientFailure(
+                                            transportRetryPolicy.MaxTransientFailureWallClockMilliseconds)
+                                        LlmTransportRetryPolicyScope.ReportTransientAttempt(transportRetryPolicy.Profile, getResult.StatusCode, getAttempt + 1, transportRetryPolicy.MaxRetries + 1, -1)
+
+                                        If getAttempt = transportRetryPolicy.MaxRetries OrElse
+                                           (transportRetryPolicy.Profile = LlmTransportRetryProfile.Unattended AndAlso
+                                            LlmTransportRetryPolicyScope.GetRemainingTransientFailureBudgetMilliseconds(
+                                                transportRetryPolicy.MaxTransientFailureWallClockMilliseconds) <= 0) Then
+                                            Return ThrowOrReportTransientTransportExhausted(
+                                                context,
+                                                getResult.StatusCode,
+                                                getAttempt + 1,
+                                                transportRetryPolicy.MaxRetries + 1,
+                                                rawGetEndpoint,
+                                                rawGetBody,
+                                                Hidesplash,
+                                                ToolExecution,
+                                                transportRetryPolicy.Profile)
+                                        End If
+
+                                        getPendingRetryDelayMs = GetBoundedTransientRetryDelayMilliseconds(
+                                            getResult.RetryAfterMilliseconds,
+                                            getAttempt,
+                                            getCumulativeRetryDelayMs,
+                                            transportRetryPolicy)
+                                        LlmTransportRetryPolicyScope.ReportTransientAttempt(transportRetryPolicy.Profile, getResult.StatusCode, getAttempt + 1, transportRetryPolicy.MaxRetries + 1, getPendingRetryDelayMs)
+                                        Continue For
+                                    End If
+
                                     Throw New System.Exception($"HTTP GET Error {getResult.StatusCode}: {getResult.Body}")
-                                End If
+                                Next
 
                                 If context.INI_APIDebug Then
                                     Debug.WriteLine($"RECEIVED FROM API (GET):{Environment.NewLine}{getResponseText}")
@@ -1096,6 +2005,10 @@ Namespace SharedLibrary
                                         If Not Hidesplash Then ShowCustomMessageBox(errMsg)
                                 End Select
                             End If
+                        Catch ex As LlmTransientTransportException
+                            Throw
+                        Catch ex As SemanticSearchRequestBudgetException
+                            Throw
                         Catch ex As System.Net.WebException When Not ct.IsCancellationRequested
                             If context.INI_APIDebug Then WriteDebugError("HTTP request exception when accessing the LLM endpoint (2).", Endpoint, requestBody, "", ex)
                             If Not Hidesplash Then ShowCustomMessageBox($"An HTTP request exception occurred: {ex.Message} when accessing the LLM endpoint (2).")
@@ -1103,30 +2016,33 @@ Namespace SharedLibrary
                             Throw New OperationCanceledException(ct)
                         Catch ex As TaskCanceledException When Not ct.IsCancellationRequested
                             If context.INI_APIDebug Then WriteDebugError("Request to the endpoint timed out.", Endpoint, requestBody, "", ex)
-                            If Not Hidesplash Then splash.Close()
+                            If splash IsNot Nothing Then splash.Close()
                             If Not Hidesplash Then ShowCustomMessageBox($"The request to the endpoint timed out. Please try again or increase the timeout setting.")
                         Catch ex As System.Exception When Not ct.IsCancellationRequested
                             If context.INI_APIDebug Then WriteDebugError("Response from the endpoint resulted in an error.", Endpoint, requestBody, "", ex)
-                            If Not Hidesplash Then splash.Close()
+                            If splash IsNot Nothing Then splash.Close()
                             If Not Hidesplash Then ShowCustomMessageBox($"The response from the endpoint resulted in an error: {ex.Message}")
                         End Try
                     Catch ex As System.OperationCanceledException
+                        If splash IsNot Nothing Then splash.ThrowIfFailed()
                         If cancellationToken.IsCancellationRequested OrElse
                            System.Threading.Interlocked.CompareExchange(splashCancelRequested, 0, 0) <> 0 Then
                             Throw New System.OperationCanceledException("LLM request canceled by caller.", ex, cancellationToken)
                         End If
 
                         Throw New System.TimeoutException(
-                            $"LLM request timed out after {TimeoutValue} ms.",
+                            $"LLM request timed out after the effective attempt limit of {lastAttemptTimeoutMilliseconds} ms (configured: {TimeoutValue} ms).",
                             ex)
                     Finally
-                        cts.Dispose()
-                        If Not Hidesplash Then splash.Close()
+                        ' Stop the attempt timer; the outer Finally owns CTS disposal.
+                        cts.CancelAfter(System.Threading.Timeout.Infinite)
+                        If splash IsNot Nothing Then splash.Close()
                     End Try
 
 PostProcess:
+                    If splash IsNot Nothing Then splash.ThrowIfFailed()
                     If context.INI_DoubleS Then
-                        Returnvalue = Returnvalue.Replace(ChrW(223), "ss")
+                        Returnvalue = ApplyDoubleSForPresentation(Returnvalue)
                     End If
                     If context.INI_NoDash Then
                         Returnvalue = System.Text.RegularExpressions.Regex.Replace(
@@ -1167,10 +2083,23 @@ PostProcess:
 
                     Return Returnvalue
 
+                Catch ex As Global.SharedLibrary.SharedLibrary.SplashScreenCountDown.SplashDisplayException
+                    ' The controller has logged technical details. Do not continue an
+                    ' interactive request without its expected progress/ESC surface.
+                    If context.INI_APIDebug Then WriteDebugError("Progress display unavailable.", "", "", "", ex)
+                    If Not Hidesplash Then ShowCustomMessageBox(ex.Message)
+                    Throw New System.OperationCanceledException("The request was stopped because the progress window was unavailable.", ex)
+
                 Catch ex As System.TimeoutException
                     Throw
 
                 Catch ex As System.OperationCanceledException
+                    Throw
+
+                Catch ex As LlmTransientTransportException
+                    Throw
+
+                Catch ex As SemanticSearchRequestBudgetException
                     Throw
 
                 Catch ex As System.Exception
@@ -1186,11 +2115,17 @@ PostProcess:
                     If Not Hidesplash Then ShowCustomMessageBox($"An unexpected error occurred when accessing the LLM endpoint: {ex.Message}") Else Return $"An unexpected error occurred when accessing the LLM endpoint: {ex.Message}"
                     Return ""
                 Finally
-                    If Not Hidesplash Then
-                        splash.Close()
+                    ' Covers early validation failures, startup failure, both transport
+                    ' paths and normal completion. Close is non-blocking/idempotent.
+                    If splash IsNot Nothing Then
+                        If splashCancelHandler IsNot Nothing Then RemoveHandler splash.CancelRequested, splashCancelHandler
+                        splash.Dispose()
                     End If
+                    If cts IsNot Nothing Then cts.Dispose()
                 End Try
             Finally
+                If requestFailureScope IsNot Nothing Then requestFailureScope.Dispose()
+                If requestProfileScope IsNot Nothing Then requestProfileScope.Dispose()
                 Agents.AgentGate.Release()
             End Try
         End Function
@@ -1208,7 +2143,7 @@ PostProcess:
         headerB As String,
         requestBody As String,
         timeoutMs As Long,
-        ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of (StatusCode As Integer, Body As String, ContentType As String))
+        ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of (StatusCode As Integer, Body As String, ContentType As String, RetryAfterMilliseconds As Integer))
 
             Dim req As System.Net.HttpWebRequest = DirectCast(System.Net.WebRequest.Create(endpoint), System.Net.HttpWebRequest)
 
@@ -1305,7 +2240,11 @@ PostProcess:
 
                         ct.ThrowIfCancellationRequested()
 
-                        Return (CInt(resp.StatusCode), responseBody, resp.ContentType)
+                        Return (
+                            CInt(resp.StatusCode),
+                            responseBody,
+                            resp.ContentType,
+                            ParseRetryAfterMilliseconds(resp.Headers("Retry-After")))
                     End Using
 
                 Catch webEx As System.Net.WebException When IsCancellationWebException(webEx, ct)
@@ -1346,7 +2285,11 @@ PostProcess:
 
                             ct.ThrowIfCancellationRequested()
 
-                            Return (CInt(errResp.StatusCode), errBody, errResp.ContentType)
+                            Return (
+                                CInt(errResp.StatusCode),
+                                errBody,
+                                errResp.ContentType,
+                                ParseRetryAfterMilliseconds(errResp.Headers("Retry-After")))
                         End Using
                     End If
 
@@ -1919,10 +2862,19 @@ PostProcess:
 
                     text = ResponseText
                 Else
-                    text = text & JsonTemplateFormatter.FormatJsonWithTemplate(jsonObject, ResponseKey, RKMode)
                     Dim hasLoop = Regex.IsMatch(ResponseKey, "\{\%\s*for\s+([^\s\%]+)\s*\%\}", RegexOptions.Singleline)
                     Dim hasPh = Regex.IsMatch(ResponseKey, "\{([^}]+)\}")
-                    If Not hasLoop AndAlso Not hasPh Then text = text & ExtractCitations(jsonObject)
+                    If Not hasLoop AndAlso Not hasPh Then
+                        ' Citation adapters separate evidence from answer content on a clone.
+                        ' Preserve the original response and the formatter's lossless fragments.
+                        JsonTemplateFormatter.NormalizeSources(jsonObject)
+                        Dim answerPayload As Newtonsoft.Json.Linq.JObject = Nothing
+                        Dim citations As System.String = ExtractCitations(jsonObject, answerPayload)
+                        text &= JsonTemplateFormatter.FormatJsonWithTemplate(answerPayload, ResponseKey, RKMode) & citations
+                    Else
+                        ' Explicit templates retain full access to metadata and source links.
+                        text &= JsonTemplateFormatter.FormatJsonWithTemplate(jsonObject, ResponseKey, RKMode)
+                    End If
                 End If
 
                 Return text
@@ -1966,7 +2918,8 @@ PostProcess:
         ''' </summary>
         ''' <param name="jsonObj">JSON object to inspect.</param>
         ''' <returns>Formatted citations text; returns an empty string if no citations are found.</returns>
-        Public Shared Function ExtractCitations(ByRef jsonObj As JObject) As String
+        Public Shared Function ExtractCitations(ByRef jsonObj As JObject, Optional ByRef answerPayload As Newtonsoft.Json.Linq.JObject = Nothing) As String
+            answerPayload = DirectCast(jsonObj.DeepClone(), Newtonsoft.Json.Linq.JObject)
             Try
                 Dim OriginalJsonObj As JObject = CType(jsonObj.DeepClone(), JObject)
                 Dim citationList As New List(Of String)
@@ -2022,7 +2975,7 @@ PostProcess:
                 End If
 
                 ' 3b. Evaluate Google grounding supports.
-                ProcessGroundingSupports(jsonObj, citationList, sourceUris)
+                ProcessGroundingSupports(jsonObj, citationList, sourceUris, answerPayload)
 
                 ' 4. Check legacy formats
                 ExtractLegacyCitations(jsonObj, citationList, sourceUris)
@@ -2326,7 +3279,18 @@ PostProcess:
         ''' <param name="sourceUris">Set used to deduplicate source URLs.</param>
         Private Shared Sub ProcessGroundingSupports(jsonObj As Newtonsoft.Json.Linq.JObject,
                                             ByRef citationList As System.Collections.Generic.List(Of String),
-                                            ByRef sourceUris As System.Collections.Generic.HashSet(Of String))
+                                            ByRef sourceUris As System.Collections.Generic.HashSet(Of String),
+                                            Optional answerPayload As Newtonsoft.Json.Linq.JObject = Nothing)
+
+            ' This adapter owns the grounding schema. Evidence segments repeat answer text;
+            ' they are not additional answer fragments. Remove only their metadata container
+            ' from the text projection, never from the original used to render references.
+            If answerPayload IsNot Nothing Then
+                For Each metadata As Newtonsoft.Json.Linq.JToken In answerPayload.SelectTokens("candidates[*].groundingMetadata").ToList()
+                    Dim propertyNode As Newtonsoft.Json.Linq.JProperty = TryCast(metadata.Parent, Newtonsoft.Json.Linq.JProperty)
+                    If propertyNode IsNot Nothing Then propertyNode.Remove()
+                Next
+            End If
 
             Try
                 ' Check expected paths.
@@ -2487,7 +3451,8 @@ PostProcess:
         ''' <param name="TLife">Lifetime in seconds used to compute expiry timestamps in <paramref name="context"/>.</param>
         ''' <param name="SecondAPI">If <c>True</c>, updates the secondary token fields in <paramref name="context"/>.</param>
         ''' <returns>Access token string; returns an empty string on errors.</returns>
-        Public Shared Async Function GetFreshAccessToken(context As ISharedContext, ByVal clientEmail As String, ByVal ClientScopes As String, ByVal PrivateKey As String, ByVal AuthServer As String, ByVal TLife As Long, ByVal SecondAPI As Boolean, Optional ByVal silent As Boolean = False, Optional ByVal forceRefresh As Boolean = False) As Task(Of String)
+        Public Shared Async Function GetFreshAccessToken(context As ISharedContext, ByVal clientEmail As String, ByVal ClientScopes As String, ByVal PrivateKey As String, ByVal AuthServer As String, ByVal TLife As Long, ByVal SecondAPI As Boolean, Optional ByVal silent As Boolean = False, Optional ByVal forceRefresh As Boolean = False, Optional cancellationToken As System.Threading.CancellationToken = Nothing) As System.Threading.Tasks.Task(Of String)
+            cancellationToken.ThrowIfCancellationRequested()
             Try
 
                 Dim accessToken As String = String.Empty
@@ -2537,6 +3502,10 @@ PostProcess:
                         WriteDebugError("[OAuth2 Debug] MCP token cache miss, expired, or forced refresh — acquiring fresh token via interactive flow.")
                     End If
 
+                    If IsHeadlessExecution Then RequireInteractiveExecution("model OAuth authorization", "noninteractive_auth_required")
+                    If TypeOf context Is IsolatedModelCallContext Then
+                        Throw New System.InvalidOperationException("The configured model requires foreground OAuth authorization before an isolated call can use it.")
+                    End If
                     SetMCPOAuthDebugEnabled(context.INI_APIDebug)
 
                     Dim oauthResult As MCPProtectedResourceOAuthResult =
@@ -2574,6 +3543,23 @@ PostProcess:
                         formattedKey &= PrivateKey.Substring(i) & vbLf
                     End If
                 Next
+
+                If TypeOf context Is IsolatedModelCallContext Then
+                    If forceRefresh OrElse System.String.IsNullOrEmpty(accessToken) OrElse System.DateTime.UtcNow >= currentexpiry Then
+                        Dim lifetime As System.Int64 = If(TLife > 0, TLife, 3600)
+                        Dim pemKey As System.String = "-----BEGIN PRIVATE KEY-----" & Microsoft.VisualBasic.vbLf & formattedKey & "-----END PRIVATE KEY-----" & Microsoft.VisualBasic.vbLf
+                        accessToken = Await GoogleOAuthHelper.GetAccessToken(clientEmail, pemKey, ClientScopes,
+                            AuthServer, lifetime, True, cancellationToken).ConfigureAwait(False)
+                        If SecondAPI Then
+                            context.TokenExpiry_2 = System.DateTime.UtcNow.AddSeconds(System.Math.Max(1, lifetime - 300))
+                            context.DecodedAPI_2 = accessToken
+                        Else
+                            context.TokenExpiry = System.DateTime.UtcNow.AddSeconds(System.Math.Max(1, lifetime - 300))
+                            context.DecodedAPI = accessToken
+                        End If
+                    End If
+                    Return accessToken
+                End If
 
                 GoogleOAuthHelper.client_email = clientEmail
                 GoogleOAuthHelper.private_key = "-----BEGIN PRIVATE KEY-----" & vbLf & formattedKey & "-----END PRIVATE KEY-----" & vbLf
@@ -2615,7 +3601,10 @@ PostProcess:
 
                 Return accessToken
 
+            Catch ex As System.OperationCanceledException When cancellationToken.IsCancellationRequested
+                Throw
             Catch ex As System.Exception
+                If TypeOf context Is IsolatedModelCallContext Then Throw
                 ' Handle exceptions explicitly with System.Exception
                 If context.INI_APIDebug Then WriteDebugError("[OAuth2 Debug] Exception in GetFreshAccessToken.", "", "", "", ex)
                 If Not silent Then

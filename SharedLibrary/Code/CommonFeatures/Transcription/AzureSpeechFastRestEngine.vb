@@ -1,4 +1,4 @@
-' Part of "Red Ink for Word"
+' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
 ' =============================================================================

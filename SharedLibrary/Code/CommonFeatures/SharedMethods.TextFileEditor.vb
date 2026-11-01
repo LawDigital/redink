@@ -22,6 +22,11 @@
 '  - ExtractEmbeddedJsonSegments: finds parseable JSON segments (object/array) within text.
 '  - ReplaceSegmentsWithFormatting: replaces segments with a chosen JSON formatting style.
 '  - TryFindBalancedJson: scans for balanced JSON object/array boundaries while honoring strings/escapes.
+'
+' KEY ARCHITECTURE
+'   • Surface: SharedMethods, JsonSegment (VB implementation).
+'   • Entry points/helpers: ShowTextFileEditor, ExtractEmbeddedJsonSegments,
+'     ReplaceSegmentsWithFormatting.
 ' =============================================================================
 
 Option Strict On
@@ -104,8 +109,7 @@ Namespace SharedLibrary
 
             ' Set icon
             Try
-                Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                editorForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(editorForm)
             Catch ex As System.Exception
                 ' Non-fatal
             End Try

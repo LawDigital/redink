@@ -164,6 +164,8 @@ Namespace SharedLibrary
         ''' </summary>
         Friend Shared Sub BackupSharedUserSettingsToRegistry()
             Try
+                Dim archiveSettings As New Global.SharedLibrary.My.MySettings()
+                Dim archivePreferences As Newtonsoft.Json.Linq.JObject = SemanticArchiveConfiguration.CreateUserSettingsBackup(archiveSettings)
                 Dim json As New JObject From {
                     {"T", "UserSettings"},
                     {"V", 1},
@@ -181,6 +183,9 @@ Namespace SharedLibrary
                     {"D", Date.UtcNow.ToString("o")}
                 }
 
+                For Each archivePreference As Newtonsoft.Json.Linq.JProperty In archivePreferences.Properties()
+                    json(archivePreference.Name) = archivePreference.Value.DeepClone()
+                Next
                 Dim encoded As String = CodeString(json.ToString(Newtonsoft.Json.Formatting.None), SK)
                 WriteSharedUserSettingsRegistryValue(encoded)
             Catch ex As Exception
@@ -224,6 +229,7 @@ Namespace SharedLibrary
                 SetMySettingValue("MarkupAuthor", GetJsonStringValue(json, "MarkupAuthor"))
                 SetMySettingValue("SimpleMenuOverride", GetJsonBooleanValue(json, "SimpleMenuOverride", False))
                 SetMySettingValue("SimpleMenuOverrideIsSet", GetJsonBooleanValue(json, "SimpleMenuOverrideIsSet", False))
+                SemanticArchiveConfiguration.ApplyUserSettingsBackup(My.Settings, json)
                 SetMySettingValue("EnableKBBackgroundIndexing", GetJsonBooleanValue(json, "EnableKBBackgroundIndexing", False))
                 SetMySettingValue("KnowledgeStoreBackgroundIndexingWindow", GetJsonStringValue(json, "KnowledgeStoreBackgroundIndexingWindow"))
                 SetMySettingValue("FormulaInstruction", GetJsonStringValue(json, "FormulaInstruction"))
@@ -235,6 +241,12 @@ Namespace SharedLibrary
         End Sub
 
         Private Shared Function HasStoredSharedUserSettings() As Boolean
+            Try
+                If SemanticArchiveConfiguration.HasUserSettings(My.Settings) Then Return True
+            Catch
+                ' Unknown user-config presence must never authorize restoring stale backup values.
+                Return True
+            End Try
             If Not String.IsNullOrWhiteSpace(GetMySettingStringValue("DefaultPrefix")) Then Return True
             If Not String.IsNullOrWhiteSpace(GetMySettingStringValue("ReplaceText2Override")) Then Return True
             If Not String.IsNullOrWhiteSpace(GetMySettingStringValue("RestrictedModelAccessCode")) Then Return True
@@ -242,6 +254,10 @@ Namespace SharedLibrary
             If Not String.IsNullOrWhiteSpace(GetMySettingStringValue("MarkupMethodOutlookOverride")) Then Return True
             If Not String.IsNullOrWhiteSpace(GetMySettingStringValue("MarkupAuthor")) Then Return True
             If GetMySettingBooleanValue("SimpleMenuOverrideIsSet", False) Then Return True
+            If Not GetMySettingBooleanValue("SemanticArchivePermissionMaintenanceEnabled", DEFAULT_SEMANTICARCHIVE_PERMISSION_MAINTENANCE_ENABLED) Then Return True
+            If Not String.IsNullOrWhiteSpace(GetMySettingStringValue("SemanticArchivePermissionMaintenanceWindow")) Then Return True
+            If GetMySettingBooleanValue("SemanticArchiveBackgroundIndexingEnabled", DEFAULT_SEMANTICARCHIVE_BACKGROUND_INDEXING_ENABLED) Then Return True
+            If Not String.IsNullOrWhiteSpace(GetMySettingStringValue("SemanticArchiveBackgroundIndexingWindow")) Then Return True
             If GetMySettingBooleanValue("EnableKBBackgroundIndexing", False) Then Return True
             If Not String.IsNullOrWhiteSpace(GetMySettingStringValue("KnowledgeStoreBackgroundIndexingWindow")) Then Return True
             If Not String.IsNullOrWhiteSpace(GetMySettingStringValue("FormulaInstruction")) Then Return True

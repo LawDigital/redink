@@ -59,7 +59,6 @@ Namespace SharedLibrary
         Public Const SemanticSearchDefaultProfileSelectionHeader As String = "Semantic indexing profile"
 
         Private Shared ReadOnly SemanticSearchUtf8NoBom As New System.Text.UTF8Encoding(False, True)
-        Private Shared ReadOnly SemanticSearchSpecialTaskSemaphore As New System.Threading.SemaphoreSlim(1, 1)
 
         ' Generic structured-document wrapper markers (combine-standard separator):
         '   <documentN name="..."> ... </documentN>
@@ -253,6 +252,15 @@ Namespace SharedLibrary
             Public Property SegmentCount As Integer
             Public Property Documents As New System.Collections.Generic.List(Of SemanticSearchDocumentDescriptor)()
             Public Property Entries As New System.Collections.Generic.List(Of SemanticSearchIndexEntry)()
+            ' An additive diagnostic field: older V1 readers ignore it. It must not affect
+            ' document provenance, byte offsets, or the index validation contract.
+            Public Property MetadataGenerationWarnings As New System.Collections.Generic.List(Of SemanticSearchMetadataWarning)()
+        End Class
+
+        Public Class SemanticSearchMetadataWarning
+            Public Property SegmentId As System.String = ""
+            Public Property ErrorType As System.String = ""
+            Public Property Message As System.String = ""
         End Class
 
         Public Class SemanticSearchIndexEntry
@@ -329,6 +337,10 @@ Namespace SharedLibrary
             Public Property MaximumTitleCharacters As Integer = SemanticSearchDefaultMaximumTitleCharacters
             Public Property MaximumSummaryCharacters As Integer = SemanticSearchDefaultMaximumSummaryCharacters
             Public Property OverwriteOutput As Boolean = False
+            ' Zero preserves the established caller contract. New bounded consumers set a total
+            ' context budget, including the configured output allowance and request framing.
+            Public Property MaximumRequestTokens As System.Int32 = 0
+            Public Property ReservedOutputTokens As System.Int32 = 4096
         End Class
 
         ''' <summary>
@@ -358,7 +370,9 @@ Namespace SharedLibrary
         .MaximumMetadataItemCharacters = options.MaximumMetadataItemCharacters,
         .MaximumTitleCharacters = options.MaximumTitleCharacters,
         .MaximumSummaryCharacters = options.MaximumSummaryCharacters,
-        .OverwriteOutput = options.OverwriteOutput
+        .OverwriteOutput = options.OverwriteOutput,
+        .MaximumRequestTokens = options.MaximumRequestTokens,
+        .ReservedOutputTokens = options.ReservedOutputTokens
     }
         End Function
 
@@ -376,6 +390,7 @@ Namespace SharedLibrary
             Public Property SegmentCount As Integer
             Public Property ContentSha256 As String = ""
             Public Property IndexDocument As SemanticSearchIndexDocument = Nothing
+            Public Property MetadataGenerationWarnings As New System.Collections.Generic.List(Of SemanticSearchMetadataWarning)()
         End Class
 
         Private Class SemanticSearchRawSegment
@@ -485,15 +500,45 @@ Namespace SharedLibrary
                         rawSegment.DocumentSpans,
                         documentManifest)
 
-                Dim metadata As SemanticSearchSegmentMetadataResult = Await GenerateSemanticSearchSegmentMetadataAsync(
-                    context,
-                    effectiveOptions.SpecialTaskName,
-                    segmentId,
-                    rawSegment.Text,
-                    rawSegment.SourceDocuments,
-                    sourceDocumentAttributes,
-                    effectiveOptions,
-                    cancellationToken).ConfigureAwait(False)
+                Dim metadata As SemanticSearchSegmentMetadataResult = Nothing
+                Try
+                    metadata = Await GenerateSemanticSearchSegmentMetadataAsync(
+                        context,
+                        effectiveOptions.SpecialTaskName,
+                        segmentId,
+                        rawSegment.Text,
+                        rawSegment.SourceDocuments,
+                        sourceDocumentAttributes,
+                        effectiveOptions,
+                        cancellationToken).ConfigureAwait(False)
+                Catch ex As System.OperationCanceledException
+                    Throw
+                Catch ex As SemanticSearchRequestBudgetException
+                    ' A caller-specified hard request budget is a contract, not a metadata
+                    ' failure: do not turn an invalid configuration into a successful index.
+                    Throw
+                Catch ex As System.Exception
+                    cancellationToken.ThrowIfCancellationRequested()
+                    ' A malformed, missing, or repeatedly failing LLM answer must not discard
+                    ' previously completed segments. The original content remains authoritative.
+                    metadata = BuildSemanticSearchSourceMetadata(rawSegment.Text, segmentId, effectiveOptions)
+                    Dim failure As System.Exception = If(ex.InnerException, ex)
+                    Dim warning As New SemanticSearchMetadataWarning() With {
+                        .SegmentId = segmentId,
+                        .ErrorType = failure.GetType().Name,
+                        .Message = "Structured metadata unavailable after retries; title and summary derived from source text."
+                    }
+                    indexDocument.MetadataGenerationWarnings.Add(warning)
+                    System.Diagnostics.Debug.WriteLine("Semantic search metadata fallback for " & segmentId & ": " & ex.ToString())
+                    If progress IsNot Nothing Then
+                        progress.Report(New SemanticSearchIndexGenerationProgress() With {
+                            .SegmentNumber = segmentIndex + 1,
+                            .SegmentCount = rawSegments.Count,
+                            .SegmentId = segmentId,
+                            .Message = "Source-derived metadata fallback (" & warning.ErrorType & ")"
+                        })
+                    End If
+                End Try
 
                 indexDocument.Entries.Add(New SemanticSearchIndexEntry() With {
                     .Id = segmentId,
@@ -595,7 +640,8 @@ Namespace SharedLibrary
                 .DocumentCount = indexDocument.Documents.Count,
                 .SegmentCount = indexDocument.Entries.Count,
                 .ContentSha256 = indexDocument.ContentSha256,
-                .IndexDocument = indexDocument
+                .IndexDocument = indexDocument,
+                .MetadataGenerationWarnings = New System.Collections.Generic.List(Of SemanticSearchMetadataWarning)(indexDocument.MetadataGenerationWarnings)
             }
         End Function
 
@@ -678,64 +724,37 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>
-        ''' Executes a serialized LLM call and applies an available special-task model in the
-        ''' same manner as the existing application code. The prior configuration is restored.
+        ''' Executes an isolated LLM call using a pinned accessible special-task assignment.
+        ''' Host and module model state remain untouched; optional budgets reject oversized requests.
         ''' </summary>
         Public Shared Async Function CallSemanticSearchSpecialTaskLlmAsync(
             context As ISharedContext,
             specialTaskName As String,
             systemPrompt As String,
             userPrompt As String,
-            Optional cancellationToken As System.Threading.CancellationToken = Nothing
+            Optional cancellationToken As System.Threading.CancellationToken = Nothing,
+            Optional maximumRequestTokens As System.Int32 = 0,
+            Optional reservedOutputTokens As System.Int32 = 4096
         ) As System.Threading.Tasks.Task(Of String)
-
-            If context Is Nothing Then
-                Throw New System.ArgumentNullException(NameOf(context))
-            End If
-            If String.IsNullOrWhiteSpace(specialTaskName) Then
-                Throw New System.ArgumentException("A special-task name is required.", NameOf(specialTaskName))
-            End If
-
+            If context Is Nothing Then Throw New System.ArgumentNullException(NameOf(context))
+            If String.IsNullOrWhiteSpace(specialTaskName) Then Throw New System.ArgumentException("A special-task name is required.", NameOf(specialTaskName))
             cancellationToken.ThrowIfCancellationRequested()
-            Await SemanticSearchSpecialTaskSemaphore.WaitAsync(cancellationToken).ConfigureAwait(False)
-
-            Dim restoreConfiguration As System.Action = Nothing
-            Dim useSecondApi As Boolean = False
-            Dim timeout As Long = context.INI_Timeout
-
-            Try
-                If Not String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then
-                    Dim previousConfiguration = SharedMethods.GetCurrentConfig(context)
-                    If previousConfiguration IsNot Nothing Then
-                        restoreConfiguration = Sub() SharedMethods.RestoreDefaults(context, previousConfiguration)
-                    End If
-
-                    If SharedMethods.GetSpecialTaskModel(context, context.INI_AlternateModelPath, specialTaskName) Then
-                        useSecondApi = True
-                        timeout = If(context.INI_Timeout_2 > 0, context.INI_Timeout_2, context.INI_Timeout)
-                    End If
-                End If
-
-                cancellationToken.ThrowIfCancellationRequested()
-
-                Return Await SharedMethods.LLM(
-                    context,
-                    systemPrompt,
-                    userPrompt,
-                    "",
-                    "",
-                    timeout,
-                    useSecondApi,
-                    True).ConfigureAwait(False)
-            Finally
-                Try
-                    If restoreConfiguration IsNot Nothing Then
-                        restoreConfiguration()
-                    End If
-                Finally
-                    SemanticSearchSpecialTaskSemaphore.Release()
-                End Try
-            End Try
+            Dim resolved As IsolatedSpecialTaskModel = ResolveIsolatedSpecialTaskModel(context, specialTaskName)
+            If maximumRequestTokens > 0 Then
+                ValidateSemanticSearchRequestBudget(resolved, systemPrompt, userPrompt, maximumRequestTokens, reservedOutputTokens)
+            End If
+            ' LLM may refresh credentials or write call-local settings. Give each request its
+            ' own copy; no backup/restore or module-level model state is touched.
+            Dim callContext As ISharedContext = CreateIsolatedModelCallContext(resolved.Context)
+            If maximumRequestTokens > 0 Then
+                Dim boundedContext As IsolatedModelCallContext = DirectCast(callContext, IsolatedModelCallContext)
+                boundedContext.RequestBudgetTokens = If(resolved.ContextWindowTokens > 0,
+                    System.Math.Min(maximumRequestTokens, resolved.ContextWindowTokens), maximumRequestTokens)
+                boundedContext.ReservedResponseTokens = System.Math.Max(reservedOutputTokens, System.Math.Max(0, resolved.MaximumOutputTokens))
+            End If
+            Return Await SharedMethods.LLM(
+                callContext, systemPrompt, userPrompt, "", "", resolved.TimeoutMilliseconds,
+                resolved.UsesSecondApi, True, cancellationToken:=cancellationToken).ConfigureAwait(False)
         End Function
 
         Private Shared Async Function CallSemanticSearchStructuredLlmAsync(Of TResult As Class)(
@@ -745,7 +764,11 @@ Namespace SharedLibrary
             userPrompt As String,
             maximumAttempts As Integer,
             cancellationToken As System.Threading.CancellationToken,
-            Optional sanitizeResponse As Boolean = False
+            Optional sanitizeResponse As Boolean = False,
+            Optional maximumRequestTokens As System.Int32 = 0,
+            Optional reservedOutputTokens As System.Int32 = 4096,
+            Optional onCallAttempt As System.Action = Nothing,
+            Optional requiredProperties As System.Collections.Generic.IEnumerable(Of System.String) = Nothing
         ) As System.Threading.Tasks.Task(Of TResult)
 
             If maximumAttempts < 1 OrElse maximumAttempts > 5 Then
@@ -760,12 +783,19 @@ Namespace SharedLibrary
                 cancellationToken.ThrowIfCancellationRequested()
 
                 Try
+                    If maximumRequestTokens > 0 Then
+                        ValidateSemanticSearchRequestBudget(ResolveIsolatedSpecialTaskModel(context, specialTaskName),
+                            systemPrompt, effectiveUserPrompt, maximumRequestTokens, reservedOutputTokens)
+                    End If
+                    If onCallAttempt IsNot Nothing Then onCallAttempt()
                     Dim response As String = Await CallSemanticSearchSpecialTaskLlmAsync(
                         context,
                         specialTaskName,
                         systemPrompt,
                         effectiveUserPrompt,
-                        cancellationToken).ConfigureAwait(False)
+                        cancellationToken,
+                        maximumRequestTokens,
+                        reservedOutputTokens).ConfigureAwait(False)
 
                     If sanitizeResponse Then
                         response = WebAgentInterpreter.SanitizeLlmResult(response)
@@ -773,6 +803,16 @@ Namespace SharedLibrary
                     lastRawResponse = If(response, "")
 
                     Dim json As String = ExtractSemanticSearchJsonObject(response)
+                    json = NormalizeSemanticSearchStructuredJson(Of TResult)(json)
+                    If requiredProperties IsNot Nothing Then
+                        Dim responseObject As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(json)
+                        For Each requiredName As System.String In requiredProperties
+                            Dim propertyValue As Newtonsoft.Json.Linq.JToken = responseObject.GetValue(requiredName, System.StringComparison.OrdinalIgnoreCase)
+                            If propertyValue Is Nothing OrElse propertyValue.Type = Newtonsoft.Json.Linq.JTokenType.Null Then
+                                Throw New System.FormatException("The structured response is missing required property " & requiredName & ".")
+                            End If
+                        Next
+                    End If
                     Dim result As TResult = DeserializeSemanticSearchJson(Of TResult)(json)
                     If result Is Nothing Then
                         Throw New System.FormatException("The LLM returned no usable JSON object.")
@@ -780,6 +820,8 @@ Namespace SharedLibrary
 
                     Return result
                 Catch ex As System.OperationCanceledException
+                    Throw
+                Catch ex As SemanticSearchRequestBudgetException
                     Throw
                 Catch ex As System.Exception
                     lastException = ex
@@ -806,6 +848,75 @@ Namespace SharedLibrary
         ''' single-line snippet of the last raw model response so the concrete cause is visible
         ''' without attaching a debugger.
         ''' </summary>
+        Private Shared Function NormalizeSemanticSearchStructuredJson(Of TResult As Class)(json As System.String) As System.String
+            Dim value As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(json)
+            If GetType(TResult) Is GetType(SemanticSearchSegmentMetadataResult) Then
+                NormalizeScalarMetadataProperty(value, "Title")
+                NormalizeScalarMetadataProperty(value, "Summary")
+            End If
+
+            ' The requested result type is the single source of truth. Each List(Of
+            ' String) accepts a scalar as one item; null becomes an empty list. This
+            ' applies identically to indexing, retrieval and all structured tasks.
+            For Each field As System.Reflection.PropertyInfo In GetType(TResult).GetProperties(
+                System.Reflection.BindingFlags.Instance Or System.Reflection.BindingFlags.Public)
+                If field.PropertyType IsNot GetType(System.Collections.Generic.List(Of System.String)) Then Continue For
+                Dim jsonProperty As Newtonsoft.Json.Linq.JProperty = value.Property(field.Name, System.StringComparison.OrdinalIgnoreCase)
+                If jsonProperty Is Nothing Then Continue For
+                jsonProperty.Value = NormalizeSemanticSearchListToken(jsonProperty.Value, field.Name)
+            Next
+            Return value.ToString(Newtonsoft.Json.Formatting.None)
+        End Function
+
+        Private Shared Function NormalizeSemanticSearchListToken(
+            token As Newtonsoft.Json.Linq.JToken,
+            propertyName As System.String
+        ) As Newtonsoft.Json.Linq.JArray
+            Dim values As New Newtonsoft.Json.Linq.JArray()
+            If token Is Nothing OrElse token.Type = Newtonsoft.Json.Linq.JTokenType.Null Then Return values
+            If token.Type = Newtonsoft.Json.Linq.JTokenType.Array Then
+                For Each item As Newtonsoft.Json.Linq.JToken In DirectCast(token, Newtonsoft.Json.Linq.JArray)
+                    AppendSemanticSearchListScalar(values, item, propertyName)
+                Next
+            Else
+                AppendSemanticSearchListScalar(values, token, propertyName)
+            End If
+            Return values
+        End Function
+
+        Private Shared Sub AppendSemanticSearchListScalar(
+            values As Newtonsoft.Json.Linq.JArray,
+            item As Newtonsoft.Json.Linq.JToken,
+            propertyName As System.String
+        )
+            If item Is Nothing OrElse item.Type = Newtonsoft.Json.Linq.JTokenType.Null Then Return
+            Select Case item.Type
+                Case Newtonsoft.Json.Linq.JTokenType.String,
+                     Newtonsoft.Json.Linq.JTokenType.Integer,
+                     Newtonsoft.Json.Linq.JTokenType.Float,
+                     Newtonsoft.Json.Linq.JTokenType.Boolean
+                    Dim scalar As System.String = System.Convert.ToString(
+                        DirectCast(item, Newtonsoft.Json.Linq.JValue).Value,
+                        System.Globalization.CultureInfo.InvariantCulture).Trim()
+                    If scalar.Length > 0 Then values.Add(scalar)
+                Case Else
+                    Throw New System.FormatException("Metadata property '" & propertyName & "' must contain only scalar values.")
+            End Select
+        End Sub
+
+        Private Shared Sub NormalizeScalarMetadataProperty(value As Newtonsoft.Json.Linq.JObject, propertyName As System.String)
+            Dim jsonProperty As Newtonsoft.Json.Linq.JProperty = value.Property(propertyName, System.StringComparison.OrdinalIgnoreCase)
+            If jsonProperty Is Nothing OrElse jsonProperty.Value.Type <> Newtonsoft.Json.Linq.JTokenType.Array Then Return
+            Dim items As Newtonsoft.Json.Linq.JArray = DirectCast(jsonProperty.Value, Newtonsoft.Json.Linq.JArray)
+            Dim parts As New System.Collections.Generic.List(Of System.String)()
+            For Each item As Newtonsoft.Json.Linq.JToken In items
+                If item Is Nothing OrElse item.Type = Newtonsoft.Json.Linq.JTokenType.Null Then Continue For
+                Dim text As System.String = If(item.Type = Newtonsoft.Json.Linq.JTokenType.String, item.ToString(), item.ToString(Newtonsoft.Json.Formatting.None)).Trim()
+                If text.Length > 0 Then parts.Add(text)
+            Next
+            jsonProperty.Value = System.String.Join(" ", parts)
+        End Sub
+
         Private Shared Function BuildSemanticSearchStructuredFailureDetail(
             specialTaskName As String,
             lastException As System.Exception,
@@ -843,6 +954,20 @@ Namespace SharedLibrary
             End If
 
             Return detail.ToString()
+        End Function
+
+        ''' <summary>Generates one complete generic card through the established metadata adapter.</summary>
+        Public Shared Async Function GenerateSemanticSearchMetadataAsync(
+            context As ISharedContext, text As System.String,
+            Optional options As SemanticSearchIndexGeneratorOptions = Nothing,
+            Optional cancellationToken As System.Threading.CancellationToken = Nothing
+        ) As System.Threading.Tasks.Task(Of SemanticSearchSegmentMetadataResult)
+            Dim effective As SemanticSearchIndexGeneratorOptions = CloneSemanticSearchIndexGeneratorOptions(options)
+            ValidateSemanticSearchGeneratorOptions(effective)
+            If System.String.IsNullOrWhiteSpace(text) Then Throw New System.ArgumentException("Non-empty source text is required.", NameOf(text))
+            If effective.MaximumRequestTokens <= 0 Then effective.MaximumRequestTokens = 65536
+            Return Await GenerateSemanticSearchSegmentMetadataAsync(context, effective.SpecialTaskName,
+                "metadata", text, Nothing, Nothing, effective, cancellationToken).ConfigureAwait(False)
         End Function
 
         Private Shared Async Function GenerateSemanticSearchSegmentMetadataAsync(
@@ -896,7 +1021,9 @@ Namespace SharedLibrary
                     userPrompt,
                     options.MaximumMetadataAttempts,
                     cancellationToken,
-                    True).ConfigureAwait(False)
+                    True,
+                    options.MaximumRequestTokens,
+                    options.ReservedOutputTokens).ConfigureAwait(False)
 
             NormalizeSemanticSearchMetadata(metadata, options)
 
@@ -906,6 +1033,33 @@ Namespace SharedLibrary
             End If
 
             Return metadata
+        End Function
+
+        ''' <summary>
+        ''' Safe, explicit fallback for a segment whose structured metadata could not be
+        ''' generated. No invented topics or cross-references: both fields are clipped
+        ''' excerpts of the source; all other facets retain their empty defaults.
+        ''' The caller records the affected segment in the index diagnostics.
+        ''' </summary>
+        Private Shared Function BuildSemanticSearchSourceMetadata(
+            segmentText As System.String,
+            segmentId As System.String,
+            options As SemanticSearchIndexGeneratorOptions
+        ) As SemanticSearchSegmentMetadataResult
+            Dim source As System.String = If(segmentText, "").Trim()
+            Dim firstLine As System.String = ""
+            For Each line As System.String In source.Split(New System.Char() {Microsoft.VisualBasic.ControlChars.Cr, Microsoft.VisualBasic.ControlChars.Lf})
+                If Not System.String.IsNullOrWhiteSpace(line) Then
+                    firstLine = line.Trim()
+                    Exit For
+                End If
+            Next
+            If firstLine.Length = 0 Then firstLine = "Source segment " & segmentId
+            Dim summary As System.String = If(source.Length > 0, source, "Source segment contains only whitespace.")
+            Return New SemanticSearchSegmentMetadataResult() With {
+                .Title = CleanSemanticSearchSingleLine(firstLine, options.MaximumTitleCharacters),
+                .Summary = CleanSemanticSearchText(summary, options.MaximumSummaryCharacters)
+            }
         End Function
 
         Private Shared Function GetSemanticSearchMetadataProfileInstructions(
@@ -1935,6 +2089,20 @@ Namespace SharedLibrary
                         Throw New System.InvalidOperationException("A generated related segment ID is invalid.")
                     End If
                 Next
+            Next
+
+            If indexDocument.MetadataGenerationWarnings Is Nothing Then
+                Throw New System.InvalidOperationException("The index metadata diagnostics are missing.")
+            End If
+            Dim warnedSegmentIds As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            For Each warning As SemanticSearchMetadataWarning In indexDocument.MetadataGenerationWarnings
+                If warning Is Nothing OrElse
+                   Not entryIds.Contains(warning.SegmentId) OrElse
+                   Not warnedSegmentIds.Add(warning.SegmentId) OrElse
+                   System.String.IsNullOrWhiteSpace(warning.ErrorType) OrElse
+                   System.String.IsNullOrWhiteSpace(warning.Message) Then
+                    Throw New System.InvalidOperationException("The index metadata diagnostics are inconsistent.")
+                End If
             Next
         End Sub
 

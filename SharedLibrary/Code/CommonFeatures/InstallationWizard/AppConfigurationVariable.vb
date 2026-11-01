@@ -59,7 +59,7 @@ Namespace SharedLibrary
     ''' 6. Mapped via VarName to ISharedContext properties
     ''' 7. Written to INI file
     ''' 
-    ''' Supports LLM provider configurations (OpenAI, Azure, Google Vertex, etc.)
+    ''' Supports LLM provider configurations (OpenAI, Azure, Google Enterprise Agent Platform, etc.)
     ''' with fields like API keys, endpoints, model names, temperature, timeout,
     ''' HTTP headers, JSON templates, and OAuth2 settings.
     ''' </remarks>

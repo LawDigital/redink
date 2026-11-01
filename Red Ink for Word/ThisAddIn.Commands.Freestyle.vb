@@ -300,7 +300,12 @@ Partial Public Class ThisAddIn
                     minimumBytes.ToString(System.Globalization.CultureInfo.InvariantCulture) & " / " &
                     maximumBytes.ToString(System.Globalization.CultureInfo.InvariantCulture) & "." & vbCrLf &
                     "Segments generated: " &
-                    generationResult.SegmentCount.ToString(System.Globalization.CultureInfo.InvariantCulture) & ".")
+                    generationResult.SegmentCount.ToString(System.Globalization.CultureInfo.InvariantCulture) & "." &
+                    If(generationResult.MetadataGenerationWarnings.Count > 0,
+                        vbCrLf & vbCrLf & "Warning: " &
+                        generationResult.MetadataGenerationWarnings.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                        " segment(s) use source-derived metadata after LLM failures; details are embedded in the index.",
+                        ""))
             Catch ex As System.OperationCanceledException
                 ProgressScope.Report(0, 1, "Cancelled.")
                 ShowCustomMessageBox("Semantic-search index generation was cancelled.")
@@ -403,8 +408,10 @@ Partial Public Class ThisAddIn
     ''' <returns>The content wrapped in document tags, or empty string on failure.</returns>
     Private Async Function LoadUrlContentAsync(url As String, ctx As FileLoadingContext) As Task(Of String)
         Try
+            Await EnsureUIThread()
             ' Retrieve content using WebView2
             Dim content As String = Await RetrieveWebsiteContent_WebView2(url, 0)
+            Await EnsureUIThread()
 
             If String.IsNullOrWhiteSpace(content) Then
                 ctx.FailedFiles.Add(url)
@@ -421,7 +428,9 @@ Partial Public Class ThisAddIn
 
             Return openTag & content & closeTag
 
-        Catch ex As Exception
+        Catch ex As System.Exception When IsWordCommandCancellation(ex)
+            Throw
+        Catch ex As System.Exception
             ctx.FailedFiles.Add(url)
             Return ""
         End Try
@@ -480,6 +489,7 @@ Partial Public Class ThisAddIn
     ''' </returns>
     Private Async Function LoadSingleFileAsync(filePath As String, isWrapped As Boolean, ctx As FileLoadingContext, Optional isFromDirectory As Boolean = False, Optional askWorksheetSelection As Boolean = False) As Task(Of String)
         Try
+            Await EnsureUIThread()
             Dim doOCR As Boolean = False
             Dim askUser As Boolean = False
             ' Check if OCR is available at all
@@ -523,6 +533,7 @@ Partial Public Class ThisAddIn
                 AskWorksheetSelection:=askWorksheetSelection,
                 OcrAdditionalInstruction:=Add_OcrMarkdownInstruction
             )
+            Await EnsureUIThread()
 
             ' Track PDFs that may have incomplete content
             If fileResult.PdfMayBeIncomplete Then
@@ -559,7 +570,9 @@ Partial Public Class ThisAddIn
 
                 Return openTag & fileResult.Content & closeTag
             End If
-        Catch ex As Exception
+        Catch ex As System.Exception When IsWordCommandCancellation(ex)
+            Throw
+        Catch ex As System.Exception
             ctx.FailedFiles.Add(filePath)
         Return ""
         End Try
@@ -584,6 +597,7 @@ Partial Public Class ThisAddIn
     ''' <returns>Combined content of all files, or "ABORT" if user cancelled, or empty string on error.</returns>
     Private Async Function LoadDirectoryFilesAsync(dirPath As String, isWrapped As Boolean, ctx As FileLoadingContext, Optional ensureProgressBar As Boolean = False) As Task(Of String)
         Try
+            Await EnsureUIThread()
             If Not Directory.Exists(dirPath) Then
                 ctx.FailedFiles.Add(dirPath)
                 Return ""
@@ -704,6 +718,7 @@ Partial Public Class ThisAddIn
                 ' Always wrap individual files from directory with document tags
                 ' Pass isFromDirectory=True to use directory OCR mode for PDFs
                 Dim fileContent As String = Await LoadSingleFileAsync(filePath, False, ctx, isFromDirectory:=True)
+                Await EnsureUIThread()
                 If Not String.IsNullOrWhiteSpace(fileContent) Then
                     resultBuilder.Append(fileContent)
                 End If
@@ -715,7 +730,9 @@ Partial Public Class ThisAddIn
             ctx.CurrentDirectoryPath = ""
 
             Return resultBuilder.ToString()
-        Catch ex As Exception
+        Catch ex As System.Exception When IsWordCommandCancellation(ex)
+            Throw
+        Catch ex As System.Exception
             ctx.FailedFiles.Add(dirPath)
             Return ""
         End Try
@@ -729,6 +746,7 @@ Partial Public Class ThisAddIn
     ''' <param name="prompt">The prompt to process.</param>
     ''' <returns>A tuple containing: (success flag, modified prompt). If success is False, the operation should abort.</returns>
     Private Async Function ProcessExternalFileTriggers(prompt As String) As Task(Of (Success As Boolean, ModifiedPrompt As String))
+        Await EnsureUIThread()
         ' Check if any file triggers are present
         Dim hasExtTriggers As Boolean = prompt.IndexOf(ExtTrigger, StringComparison.OrdinalIgnoreCase) >= 0
         Dim hasDirTriggers As Boolean = prompt.IndexOf(ExtDirTrigger, StringComparison.OrdinalIgnoreCase) >= 0
@@ -941,6 +959,7 @@ Partial Public Class ThisAddIn
                             ctx,
                             isFromDirectory:=False,
                             askWorksheetSelection:=askWorksheetSelection)
+                        Await EnsureUIThread()
 
                         ' Start progress bar after selection if it was deferred
                         If askWorksheetSelection AndAlso Not progressBarStarted Then
@@ -990,6 +1009,7 @@ Partial Public Class ThisAddIn
                         ' dialogs (file count confirmation, OCR choice) first and will start the
                         ' progress bar itself once all questions have been answered.
                         replacementText = Await LoadDirectoryFilesAsync(selectedDir, isWrapped, ctx, ensureProgressBar:=Not progressBarStarted)
+                        Await EnsureUIThread()
                         progressBarStarted = True
 
                         If replacementText = "ABORT" Then
@@ -1038,6 +1058,7 @@ Partial Public Class ThisAddIn
 
                         Try
                             replacementText = Await LoadUrlContentAsync(userUrl, ctx)
+                            Await EnsureUIThread()
                         Catch
                         End Try
 
@@ -1089,6 +1110,7 @@ Partial Public Class ThisAddIn
 
                     Try
                         replacementText = Await LoadUrlContentAsync(inlineUrl, ctx)
+                        Await EnsureUIThread()
                     Catch
                     End Try
 
@@ -1154,6 +1176,7 @@ Partial Public Class ThisAddIn
                             ctx,
                             isFromDirectory:=False,
                             askWorksheetSelection:=askWorksheetSelection)
+                        Await EnsureUIThread()
 
                         ' Start progress bar after selection if it was deferred
                         If askWorksheetSelection AndAlso Not progressBarStarted Then
@@ -1168,6 +1191,7 @@ Partial Public Class ThisAddIn
                     ElseIf Directory.Exists(candidatePath) Then
                         ' Directory - defer progress bar to LoadDirectoryFilesAsync (user dialogs first)
                         replacementText = Await LoadDirectoryFilesAsync(candidatePath, isWrapped, ctx, ensureProgressBar:=Not progressBarStarted)
+                        Await EnsureUIThread()
                         progressBarStarted = True
                         If replacementText = "ABORT" Then
                             ProgressBarModule.CancelOperation = True
@@ -1296,7 +1320,8 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public Async Sub FreeStyleNM()
         If INILoadFail() OrElse Not IsDocumentEditable() Then Return
-        FreeStyle(False)
+        Await ExecuteFreeStyleAsync(False)
+        Await EnsureUIThread()
 
         My.Settings.LastFreestyleModelConfig = Nothing
         My.Settings.LastFreestyleWasAM = False
@@ -1314,6 +1339,15 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public Async Sub FreeStyleAM()
         If INILoadFail() OrElse Not IsDocumentEditable() Then Return
+        Dim commentEvidence As WordCommentSelectionTracker.Evidence = Nothing
+        Try
+            commentEvidence = Await CaptureCommentSelectionEvidenceAsync()
+            Await EnsureUIThread()
+        Catch ex As System.Exception
+            ReportWordCommandFailure("Freestyle.CommentSelection", ex)
+            Return
+        End Try
+        Await EnsureUIThread()
 
         If Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
 
@@ -1326,7 +1360,8 @@ Partial Public Class ThisAddIn
 
         LastFreestyleModelConfig = GetCurrentConfig(_context)
 
-        FreeStyle(True)
+        Await ExecuteFreeStyleAsync(True, initialCommentEvidence:=commentEvidence)
+        Await EnsureUIThread()
 
         My.Settings.LastFreestyleModelConfig = LastFreestyleModelConfig
         My.Settings.LastFreestyleWasAM = True
@@ -1369,7 +1404,7 @@ Partial Public Class ThisAddIn
             End If
         End If
 
-        FreeStyle(My.Settings.LastFreestyleWasAM, My.Settings.LastFreestylePrompt)
+        Await ExecuteFreeStyleAsync(My.Settings.LastFreestyleWasAM, My.Settings.LastFreestylePrompt)
 
     End Sub
 
@@ -1393,6 +1428,16 @@ Partial Public Class ThisAddIn
     ''' 10. Restores original configuration if alternate model was used
     ''' </remarks>
     Public Async Sub FreeStyle(UseSecondAPI As Boolean, Optional LastPrompt As String = "")
+        ' Keep the public callback contract (including TalkToMe). The ribbon
+        ' wrappers await the Task core so the new focus probe cannot cause them to
+        ' persist an old prompt before the user has even seen the prompt dialog.
+        Await ExecuteFreeStyleAsync(UseSecondAPI, LastPrompt)
+    End Sub
+
+    Private Async Function ExecuteFreeStyleAsync(UseSecondAPI As System.Boolean,
+                                                  Optional LastPrompt As System.String = "",
+                                                  Optional initialCommentEvidence As WordCommentSelectionTracker.Evidence = Nothing) As System.Threading.Tasks.Task
+        Await EnsureUIThread()
         If INILoadFail() OrElse Not IsDocumentEditable() Then Return
         Try
             ' Initialize prompt and system variables
@@ -1432,6 +1477,7 @@ Partial Public Class ThisAddIn
             Dim DoAssemble As Boolean = False
             Dim DoShowModel As Boolean = False
             Dim DoKB As Boolean = False
+            Dim archivePrepared As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest = Nothing
 
             ' Build instruction strings for user guidance
             Dim MarkupInstruct As String = $"start With '{MarkupPrefixAll}' for markups"
@@ -1450,6 +1496,7 @@ Partial Public Class ThisAddIn
             Dim LibInstruct As String = $"; add '{LibTrigger}' for library search"
             Dim NetInstruct As String = $"; add '{NetTrigger}' for internet search"
             Dim KBInstruct As String = $"; add '{KnowledgeTriggerHelper.KbTrigger}' to search all stores or use '{KnowledgeTriggerHelper.KbTriggerPrefix}your query)' / '{KnowledgeTriggerHelper.KbTriggerPrefix}store:StoreName your query)' / '{KnowledgeTriggerHelper.KbTriggerPrefix}tag:TagName your query)' for Knowledge Store retrieval"
+            Dim SemanticArchiveInstruct As System.String = "; add '(sa)' to retrieve evidence from the selected Semantic Archives, or '(sa: archive:""Name"" query)' for a named archive"
             Dim PureInstruct As String = $"; use '{PurePrefix}' for direct prompting"
             Dim FileInstruct As String = $"; use '{FilePrefix}' for modifying file(s)"
             Dim AssembleInstruct As String = $"; use '{AssemblePrefix}' for assembling a document from templates"
@@ -1470,8 +1517,55 @@ Partial Public Class ThisAddIn
             Dim application As Word.Application = Globals.ThisAddIn.Application
             Dim selection As Microsoft.Office.Interop.Word.Selection = application.Selection
 
-            ' Check if no text is selected (insertion point only)
+            ' Preserve NoText and the normal editing modes. An explicitly selected
+            ' comment is an additional Reply target, independent of the document caret
+            ' or an unrelated text selection. Capture it before opening the prompt UI.
             If selection.Type = WdSelectionType.wdSelectionIP Then NoText = True
+
+            Dim activePushbackComment As Microsoft.Office.Interop.Word.Comment = Nothing
+            Dim cursorOnComment As System.Boolean = False
+            Dim commentSelectionDetected As System.Boolean = False
+            Dim replyNeedsCommentChoice As System.Boolean = False
+            Dim replyUsesBodySelection As System.Boolean = False
+            Dim replyDocument As Microsoft.Office.Interop.Word.Document = selection.Document
+            Dim replyOrigin As Microsoft.Office.Interop.Word.Range = selection.Range.Duplicate
+            Dim commentEvidence As WordCommentSelectionTracker.Evidence = initialCommentEvidence
+            If commentEvidence Is Nothing Then commentEvidence = Await CaptureCommentSelectionEvidenceAsync()
+            Await EnsureUIThread()
+            If initialCommentEvidence IsNot Nothing AndAlso _commentSelectionTracker IsNot Nothing AndAlso
+               initialCommentEvidence.DocumentGeneration >= 0 AndAlso Not _commentSelectionTracker.IsCurrent(initialCommentEvidence) Then
+                Throw New WordCommandNoticeException("The active document changed. Please select the comment again and retry.")
+            End If
+            Try
+                ' A modern comment card/comment editor has priority over Word's
+                ' possibly stale body selection. Its exact identity is resolved
+                ' only after Reply is actually chosen.
+                commentSelectionDetected = (commentEvidence IsNot Nothing AndAlso commentEvidence.IsComment) OrElse
+                    replyOrigin.StoryType = Microsoft.Office.Interop.Word.WdStoryType.wdCommentsStory OrElse
+                    CBool(selection.Information(Microsoft.Office.Interop.Word.WdInformation.wdInCommentPane))
+                If commentSelectionDetected Then
+                    replyNeedsCommentChoice = replyDocument.Comments.Count > 0
+                Else
+                    ' A main-text selection can include ONE or MANY comments. Never
+                    ' ask for one comment when the user selected several anchors.
+                    Dim anchored As System.Collections.Generic.List(Of Microsoft.Office.Interop.Word.Comment) =
+                        FindCommandCommentsInBodyRange(replyDocument, replyOrigin)
+                    If anchored.Count = 1 AndAlso replyOrigin.Start = replyOrigin.End Then
+                        activePushbackComment = anchored(0)
+                        cursorOnComment = True
+                        NoText = True
+                    ElseIf anchored.Count > 0 Then
+                        replyUsesBodySelection = True
+                    End If
+                End If
+            Catch ex As System.Exception
+                LogWordCommandDiagnostic("Freestyle.CommentSelection", ex.ToString())
+                ' Failure is not evidence that a different comment was selected.
+                ' Only an explicit comment UI context may offer the safe picker.
+                replyNeedsCommentChoice = commentSelectionDetected AndAlso replyDocument.Comments.Count > 0
+                replyUsesBodySelection = False
+            End Try
+            Dim replyTargetCommentIndex As System.Int32 = 0
 
             ' Check if the selected model supports tooling (can call tools)f
             Dim modelSupportsTool As Boolean = False
@@ -1506,6 +1600,9 @@ Partial Public Class ThisAddIn
             If Not String.IsNullOrWhiteSpace(INI_KnowledgeStorePath) OrElse
                Not String.IsNullOrWhiteSpace(INI_KnowledgeStorePathLocal) Then
                 AddOnInstruct += KBInstruct.Replace("; add", ", ")
+            End If
+            If Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.IsConfigured(_context) Then
+                AddOnInstruct += SemanticArchiveInstruct.Replace("; add", ", ")
             End If
             If Not String.IsNullOrWhiteSpace(INI_MyStylePath) Then
                 AddOnInstruct += MyStyleInstruct.Replace("; add", ", ")
@@ -1594,11 +1691,12 @@ SkipPromptInput:
                 End Try
 
                 Dim promptOptions As New SLib.FreestylePromptOptions() With {
+                .SourceMenuProvider = Global.SharedLibrary.SharedLibrary.RetrievalSourceDiscovery.CreateMenuProvider(_context),
                     .Title = $"{AN} Freestyle",
                     .Heading = "What would you like Red Ink to do?",
                     .ModeCaption = "Output",
                     .ModelText = If(UseSecondAPI, INI_Model_2, INI_Model),
-                    .ContextStatusText = If(NoText, "No text selected", "The current selection will be used as context"),
+                    .ContextStatusText = If(cursorOnComment, "Reply will use the comment at the cursor", If(replyUsesBodySelection, "Reply will include the comments in the selected text", If(commentSelectionDetected, "Reply will use the selected comment", If(NoText, "No text selected", "The current selection will be used as context")))),
                     .LastPrompt = My.Settings.LastPrompt,
                     .PromptLibraryEnabled = INI_PromptLib,
                     .ShowShortCommandsHint = True,
@@ -1798,8 +1896,8 @@ SkipPromptInput:
                     .Text = "Reply to comments",
                     .Prefix = PushbackPrefix,
                     .ManualSyntax = PushbackPrefix & " / " & PushbackPrefix2,
-                    .IsAvailable = Not NoText,
-                    .UnavailableReason = "Replying to comments requires selected text."
+                    .IsAvailable = cursorOnComment OrElse replyUsesBodySelection OrElse replyNeedsCommentChoice,
+                    .UnavailableReason = "Select a comment, or select the document text containing the comments you want to reply to."
                 }
 
                 modePushback.Prefixes.Add(PushbackPrefix)
@@ -2026,6 +2124,21 @@ SkipPromptInput:
                             .ArgumentRequired = False
                         })
 
+                End If
+
+                If Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.IsConfigured(_context) Then
+                    sourcesSection.Options.Add(
+                        New Global.SharedLibrary.SharedLibrary.SharedMethods.FreestylePromptToggleOption() With {
+                            .Id = "semantic_archive",
+                            .Text = "Semantic Archives",
+                            .Trigger = "(sa)",
+                            .ManualSyntax = "(sa) / (sa: query) / (sa: archive:""Name"" query)",
+                            .Description = "Retrieve exact excerpts from the selected archives. Leave blank to use this prompt as the query; use mode:files for file locations only. Archive selection is separate from enabling agent tools.",
+                            .ArgumentPrefix = "(sa:",
+                            .ArgumentSuffix = ")",
+                            .ArgumentHint = "Optional: query, archive:""Name"" query, or mode:files query",
+                            .ArgumentRequired = False
+                        })
                 End If
 
                 If sourcesSection.Options.Count > 0 Then
@@ -2314,6 +2427,7 @@ SkipPromptInput:
                 AddItem("kbreindex", "Force full re-index of all knowledge stores (regenerates all metadata, uses API credits).")
                 AddItem("kbrefreshvectors", "Rebuild embeddings from existing wiki pages only (use after changing the embedding model).")
                 AddItem("kbaddstore", "Add a new Knowledge Store (Name|Path).")
+                AddItem("sastore", "Manage Semantic Archives, source roots, indexing and diagnostics.")
                 AddItem("kbstore", "Show the list of Knowledge Stores and their status.")
                 AddItem("kbschema", "Open the selected Knowledge Store schema in the internal JSON editor.")
                 AddItem("kbhealth", "Run an AI health check/lint on the active Wiki (finds orphans/duplicates).")
@@ -2334,6 +2448,7 @@ SkipPromptInput:
                 ' PRIVACY / TRANSFORMS
                 AddItem("anonymize", "Anonymize/redact the current selection (no LLM Call).")
                 AddItem("convertmarkdown", "Convert Markdown In the selected text To Word formatting.")
+                AddItem("ocrclean", "Clean selected OCR text into a new document, or clean a .md/.txt file into a separate copy (no LLM call).")
 
                 ' AUDIO / SPEECH
                 AddItem("speech", "Start speech transcription (Transcriptor).")
@@ -2373,6 +2488,13 @@ SkipPromptInput:
 
                 OtherPrompt = idToCommand(chosen)
                 ' Continue normal execution: the short-command checks below will now match.
+            End If
+
+            If System.String.Equals(OtherPrompt.Trim(), "ocrclean", System.StringComparison.OrdinalIgnoreCase) OrElse
+               System.String.Equals(OtherPrompt.Trim(), "cleanocr", System.StringComparison.OrdinalIgnoreCase) Then
+                Await RunOcrMarkdownCleanupCommandAsync()
+                Await EnsureUIThread()
+                Return
             End If
 
             If Not NoText Then
@@ -2450,6 +2572,7 @@ SkipPromptInput:
                 End If
 
                 Await KnowledgeWikiService.CreatePageFromClipboardAsync(selectedStorePath, My.Computer.Clipboard.GetText(), _context)
+                Await EnsureUIThread()
                 ShowCustomMessageBox("Clipboard saved to Wiki!")
                 Return
             End If
@@ -2476,6 +2599,7 @@ SkipPromptInput:
                 End If
 
                 Dim report = Await KnowledgeWikiService.LintWikiAsync(selectedStorePath, _context)
+                Await EnsureUIThread()
                 SP_MergePrompt_Cached = SP_MergePrompt
 
                 Dim response = ShowCustomWindow("Here is the health report of the Knowledge Store you have selected:", report, "You can copy it to the clipboard, if you wish.", "{AN} Knowledge Store")
@@ -2553,6 +2677,7 @@ SkipPromptInput:
                     kbRootPath:=selectedStorePath,
                     context:=_context,
                     includeLlmRepairs:=True)
+                Await EnsureUIThread()
 
                 SP_MergePrompt_Cached = SP_MergePrompt
 
@@ -2624,6 +2749,7 @@ SkipPromptInput:
                 Await RunForegroundKnowledgeStoreIndexAsync(
                     storeName:=selectedStoreName,
                     forceReindex:=forceReindex)
+                Await EnsureUIThread()
 
                 Return
             End If
@@ -2737,6 +2863,7 @@ SkipPromptInput:
                             progressPrefix:=store.Name,
                             progressOffset:=progressOffset,
                             progressTotal:=totalPages)
+                        Await EnsureUIThread()
 
                         progressOffset += storePageCount
                     Next
@@ -2789,10 +2916,16 @@ SkipPromptInput:
                         KnowledgeStoreCatalog.SaveLocalCatalog(allDefs, _context)
 
                         ShowCustomMessageBox($"Knowledge Store '{def.Name}' successfully created physically at:{vbCrLf}{resolvedPath}", $"{AN} Knowledge Store")
-                    Catch ex As Exception
-                        ShowCustomMessageBox($"Could not create directory at '{resolvedPath}'. Error: {ex.Message}", $"{AN} Knowledge Store")
+                    Catch ex As System.Exception
+                        ReportWordCommandFailure("Freestyle.CreateKnowledgeStore", ex,
+                            "Inky could not create the Knowledge Store folder. Please check the folder location and your access permissions.")
                     End Try
                 End If
+                Return
+            End If
+
+            If String.Equals(OtherPrompt.Trim(), "sastore", System.StringComparison.OrdinalIgnoreCase) Then
+                SharedLibrary.SharedLibrary.SharedMethods.ShowSemanticArchiveConsole(_context)
                 Return
             End If
 
@@ -2915,6 +3048,7 @@ SkipPromptInput:
                 End If
 
                 Dim response As String = Await LLM(SP_GenerateResponseKey & vbCrLf & Code_JsonTemplateFormatter, vbCrLf & SelectedText, "", "", 0, UseSecondAPI)
+                Await EnsureUIThread()
 
                 selection.Range.Collapse(Direction:=Word.WdCollapseDirection.wdCollapseEnd)
                 selection.InsertAfter(vbCrLf & vbCrLf & response)
@@ -3142,10 +3276,14 @@ SkipPromptInput:
 
             ' Check for INI updates and apply if available
             If String.Equals(OtherPrompt.Trim(), "iniupdate", StringComparison.OrdinalIgnoreCase) Then
-                Dim answer As Boolean = CheckForIniUpdates(_context)
+                Dim hadSourceAccessErrors As System.Boolean = False
+                Dim answer As Boolean = CheckForIniUpdates(
+                    _context,
+                    userInitiated:=True,
+                    hadSourceAccessErrors:=hadSourceAccessErrors)
                 If answer Then
                     ShowCustomMessageBox("Updates to the .ini file(s) have been applied.")
-                Else
+                ElseIf Not hadSourceAccessErrors Then
                     ShowCustomMessageBox("No updates were applied. Either no updates were found or you chose not to apply them.")
                 End If
                 Return
@@ -3194,6 +3332,7 @@ SkipPromptInput:
 
             If String.Equals(OtherPrompt.Trim(), "generateindex", StringComparison.OrdinalIgnoreCase) Then
                 Await GenerateSemanticSearchIndexAsync()
+                Await EnsureUIThread()
                 Return
             End If
 
@@ -3221,8 +3360,9 @@ SkipPromptInput:
                     Else
                         ShowCustomMessageBox($"Local logfile at '{logPath}' not found.")
                     End If
-                Catch ex As Exception
-                    ShowCustomMessageBox($"Error opening local logfile at '{logPath}': " & ex.Message)
+                Catch ex As System.Exception
+                    ReportWordCommandFailure("Freestyle.OpenLog", ex,
+                        "Inky could not open the log file. Please check that it exists and that you have permission to read it.")
                 End Try
                 Return
             End If
@@ -3473,8 +3613,8 @@ SkipPromptInput:
 
             ' Process parameter placeholders in prompt (e.g., {param:PromptText})
             If Not SharedMethods.ProcessParameterPlaceholders(OtherPrompt) Then
-                ShowCustomMessageBox("Freestyle canceled.", $"{AN} Freestyle")
-                Exit Sub
+                LogWordCommandDiagnostic("Freestyle.Parameters", "cancelled_by_user")
+                Return
             End If
 
             ' === In-prompt trigger processing ===
@@ -3758,24 +3898,47 @@ SkipPromptInput:
                 DoPane = True
                 DoClipboard = True
                 DoChunks = False
-            ElseIf OtherPrompt.StartsWith(PushbackPrefix, StringComparison.OrdinalIgnoreCase) Then
-                If NoText Then
-                    ShowPrefixRequiresSelection(PushbackPrefix)
+            ElseIf OtherPrompt.StartsWith(PushbackPrefix, StringComparison.OrdinalIgnoreCase) OrElse
+                   OtherPrompt.StartsWith(PushbackPrefix2, StringComparison.OrdinalIgnoreCase) Then
+                Dim requestedPrefix As System.String = If(
+                    OtherPrompt.StartsWith(PushbackPrefix, StringComparison.OrdinalIgnoreCase),
+                    PushbackPrefix, PushbackPrefix2)
+                If replyNeedsCommentChoice OrElse (commentSelectionDetected AndAlso Not cursorOnComment) Then
+                    If Not IsSameProcessingDocument(replyDocument, application.ActiveDocument) Then
+                        Throw New WordCommandNoticeException("The active document changed. Please select the comment again and retry.")
+                    End If
+                    Dim selectedCommentRange As Microsoft.Office.Interop.Word.Range = Nothing
+                    Dim explicitlySelected As System.Boolean = False
+                    cursorOnComment = TryResolveSelectedComment(selection, replyOrigin, activePushbackComment,
+                        selectedCommentRange, explicitlySelected, commentEvidence)
+                    If Not cursorOnComment Then
+                        activePushbackComment = ChooseCommentForCommand(replyDocument, "Reply to comments")
+                        cursorOnComment = activePushbackComment IsNot Nothing
+                    End If
+                End If
+                If Not cursorOnComment AndAlso Not replyUsesBodySelection Then
+                    ShowCustomMessageBox("Select a comment or text containing at least one comment to use Reply.", "Inky")
                     Return
                 End If
-                OtherPrompt = OtherPrompt.Substring(PushbackPrefix.Length).Trim()
+                ' A point selecting several overlapping anchors becomes a nonempty
+                ' selection at Reply execution; the normal empty-selection route
+                ' must never run for that deliberate multi-comment target.
+                If replyUsesBodySelection Then NoText = False
+                OtherPrompt = OtherPrompt.Substring(requestedPrefix.Length).Trim()
                 DoPushback = True
                 DoChunks = False
                 DoBubblesExtract = True
-            ElseIf OtherPrompt.StartsWith(PushbackPrefix2, StringComparison.OrdinalIgnoreCase) Then
-                If NoText Then
-                    ShowPrefixRequiresSelection(PushbackPrefix2)
-                    Return
+
+                If cursorOnComment Then
+                    ' Use the comment's document anchor rather than the live cursor in
+                    ' the comment story. This preserves the existing reply pipeline
+                    ' (BubblesExtract -> LLM -> ReplyBubbles), not the comment editor.
+                    If Not TrySelectPushbackCommentAnchor(activePushbackComment, replyTargetCommentIndex) Then
+                        ShowCustomMessageBox("The text linked to this comment is no longer available. Please select the comment again.", "Inky")
+                        Return
+                    End If
+                    NoText = False
                 End If
-                OtherPrompt = OtherPrompt.Substring(PushbackPrefix2.Length).Trim()
-                DoPushback = True
-                DoChunks = False
-                DoBubblesExtract = True
             ElseIf OtherPrompt.StartsWith(FilePrefix, StringComparison.OrdinalIgnoreCase) Then
                 OtherPrompt = OtherPrompt.Substring(FilePrefix.Length).Trim()
                 DoFiles = True
@@ -3883,7 +4046,40 @@ SkipPromptInput:
 
             ' Handles {doc}, {dir}, {url} and {path} triggers with unified document numbering
 
+            ' Resolve source control syntax from the user's instruction before any
+            ' external file, selected document or retrieved text is inserted.
+            If Global.SharedLibrary.SharedLibrary.SemanticArchiveTriggerHelper.HasSemanticArchiveTrigger(OtherPrompt) Then
+                Dim saSplash As New SLib.SplashScreen("Querying Semantic Archive...   ")
+                saSplash.Show()
+                System.Windows.Forms.Application.DoEvents()
+                Try
+                    archivePrepared = Await Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.PrepareAsync(
+                        _context, OtherPrompt, CreateSelectedSemanticArchiveRunScope(), allowInteractiveSelection:=True)
+                    Await EnsureUIThread()
+                Finally
+                    If saSplash.InvokeRequired Then
+                        saSplash.Invoke(Sub()
+                                            saSplash.Close()
+                                            saSplash.Dispose()
+                                        End Sub)
+                    Else
+                        saSplash.Close()
+                        saSplash.Dispose()
+                    End If
+                End Try
+                OtherPrompt = archivePrepared.CleanPrompt
+                OtherPromptUnfilled = OtherPrompt.Trim()
+                DoKB = False ' A mixed request has already dispatched both providers independently.
+                If Not System.String.Equals(archivePrepared.Status, "ok", System.StringComparison.OrdinalIgnoreCase) AndAlso
+                   Not System.String.Equals(archivePrepared.Status, "partial", System.StringComparison.OrdinalIgnoreCase) Then
+                    ShowCustomMessageBox("Semantic Archive: " & archivePrepared.Status &
+                        If(System.String.IsNullOrWhiteSpace(archivePrepared.ContextText), "", System.Environment.NewLine & archivePrepared.ContextText),
+                        $"{AN} Semantic Archive")
+                End If
+            End If
+
             Dim fileResult = Await ProcessExternalFileTriggers(OtherPrompt)
+            Await EnsureUIThread()
             If Not fileResult.Success Then
                 Return
             End If
@@ -3904,9 +4100,14 @@ SkipPromptInput:
                 End If
 
                 Try
-                    Await AssembleDocumentFromTemplates(OtherPrompt, assembleContext, UseSecondAPI)
+                    Using Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.Push(archivePrepared)
+                        Await AssembleDocumentFromTemplates(OtherPrompt, assembleContext, UseSecondAPI, semanticArchivePrepared:=archivePrepared)
+                        Await EnsureUIThread()
+                    End Using
+                Catch ex As System.Exception When IsWordCommandCancellation(ex)
+                    Throw
                 Catch ex As System.Exception
-                    ShowCustomMessageBox("Error in Freestyle ('Assemble:'): " & ex.Message, "Error")
+                    ReportWordCommandFailure("Freestyle.Assemble", ex)
                 End Try
                 If UseSecondAPI And originalConfigLoaded Then
                     RestoreDefaults(_context, originalConfig)
@@ -3919,9 +4120,14 @@ SkipPromptInput:
 
             If DoForm Then
                 Try
-                    Await CompleteWordDocumentTables(OtherPrompt, UseSecondAPI)
+                    Using Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.Push(archivePrepared)
+                        Await CompleteWordDocumentTables(OtherPrompt, UseSecondAPI, semanticArchivePrepared:=archivePrepared)
+                        Await EnsureUIThread()
+                    End Using
+                Catch ex As System.Exception When IsWordCommandCancellation(ex)
+                    Throw
                 Catch ex As System.Exception
-                    ShowCustomMessageBox("Error in Freestyle ('Form:'): " & ex.Message, "Error")
+                    ReportWordCommandFailure("Freestyle.Form", ex)
                 End Try
 
                 If UseSecondAPI AndAlso originalConfigLoaded Then
@@ -4021,15 +4227,13 @@ SkipPromptInput:
                         pptApp.Quit()
 
                     Catch comEx As System.Runtime.InteropServices.COMException
-                        ' Handle COM-specific errors when creating PowerPoint file
-                        ShowCustomMessageBox("PowerPoint COM error while creating file:" & vbCrLf &
-                     "Message: " & comEx.Message & vbCrLf &
-                     "HResult: 0x" & comEx.HResult.ToString("X8"))
+                        ReportWordCommandFailure("Freestyle.CreatePresentation", comEx,
+                            "Inky could not create the presentation. Please check that PowerPoint is available and that you can save in the selected folder.")
                         Return
 
                     Catch ex As System.Exception
-                        ' Handle general errors when creating PowerPoint file
-                        ShowCustomMessageBox("Error while creating PowerPoint file: " & ex.ToString())
+                        ReportWordCommandFailure("Freestyle.CreatePresentation", ex,
+                            "Inky could not create the presentation. Please check the selected folder and try again.")
                         Return
 
                     Finally
@@ -4091,10 +4295,23 @@ SkipPromptInput:
 
             If DoFiles Then
                 Try
-                    CorrectWordDocuments(SP_Freestyle_Document & " " & MyStyleInsert & " " & InsertDocs, "_freestyle", UseSecondAPI, True)
+                    If archivePrepared Is Nothing Then
+                        Await CorrectWordDocuments(SP_Freestyle_Document & " " & MyStyleInsert & " " & InsertDocs &
+                                " Newly authored prose: use straight ASCII quotation marks and write z.B. without spaces; preserve unchanged source paragraphs character for character.",
+                                "_freestyle", UseSecondAPI, True)
+                        Await EnsureUIThread()
+                    Else
+                        Using Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.Push(archivePrepared)
+                            Await CorrectWordDocuments(SP_Freestyle_Document & " " & MyStyleInsert & " " & InsertDocs &
+                                " Newly authored prose: use straight ASCII quotation marks and write z.B. without spaces; preserve unchanged source paragraphs character for character.",
+                                "_freestyle", UseSecondAPI, True)
+                            Await EnsureUIThread()
+                        End Using
+                    End If
+                Catch ex As System.Exception When IsWordCommandCancellation(ex)
+                    Throw
                 Catch ex As System.Exception
-                    ' Handle any unexpected errors during freestyle execution
-                    ShowCustomMessageBox("Error in Freestyle ('File:'): " & ex.Message, "Error")
+                    ReportWordCommandFailure("Freestyle.File", ex)
                 End Try
                 Return
             End If
@@ -4110,10 +4327,12 @@ SkipPromptInput:
                 If DoLib Then
                     ' Library search mode: consult library and update SysPrompt
                     Dim isSuccess As Boolean = Await ConsultLibrary(DoMarkup)
+                    Await EnsureUIThread()
                     If Not isSuccess Then Return
                 ElseIf DoNet Then
                     ' Internet search mode: consult internet and update SysPrompt
                     Dim isSuccess As Boolean = Await ConsultInternet(DoMarkup)
+                    Await EnsureUIThread()
                     If Not isSuccess Then Return
                 ElseIf NoText Then
                     ' No text selected: use freestyle prompt without text processing
@@ -4165,6 +4384,7 @@ SkipPromptInput:
                         Dim kbResolved As (Content As String, StatusMessage As String)
                         Try
                             kbResolved = Await KnowledgeTriggerHelper.ResolveKnowledgeAsync(kbRequest, _context, kbResolveOptions)
+                            Await EnsureUIThread()
                         Finally
                             If kbSplash.InvokeRequired Then
                                 kbSplash.Invoke(Sub()
@@ -4190,7 +4410,7 @@ SkipPromptInput:
                             ShowCustomMessageBox(If(String.IsNullOrWhiteSpace(kbResolved.StatusMessage),
                                                     "No documents found in the Knowledge Store.",
                                                     kbResolved.StatusMessage), $"{AN} Knowledge Store")
-                            Exit Sub
+                            Return
                         End If
                     End If
                 End If
@@ -4213,18 +4433,192 @@ SkipPromptInput:
             ' === Execute LLM processing with configured parameters ===
 
             ' Invoke ProcessSelectedText with all configured options
-            Dim result As String = Await ProcessSelectedText(InterpolateAtRuntime(SysPrompt), True, DoKeepFormat, DoKeepParaFormat, DoInplace, DoMarkup, MarkupMethod, DoClipboard, DoBubbles, False, UseSecondAPI, KeepFormatCap, DoTPMarkup, TPMarkupName, False, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, InsertDocs <> "", DoMyStyle, DoBubblesExtract, DoPushback, selectedToolsForSession, DoChart, DoShowModel)
+            Dim processingPrompt As System.String = InterpolateAtRuntime(SysPrompt) &
+                " RED_INK_FREESTYLE_TYPOGRAPHY_R22: In newly drafted or rewritten prose, use only straight double/single quotation marks (" &
+                "ASCII 34/39), not typographic quotation marks. Always write the German abbreviation z.B. without spaces. " &
+                "Do not modify paragraphs or source excerpts that the task does not call for changing."
+            If archivePrepared IsNot Nothing AndAlso archivePrepared.HasTrigger Then
+                processingPrompt &= System.Environment.NewLine & archivePrepared.ContextText
+            End If
+            ' External-content dialogs or other preparation can change Word's live
+            ' selection. Revalidate the captured comment and restore ONLY a Reply target
+            ' immediately before processing; other Freestyle modes retain their selection.
+            If DoPushback Then
+                If Not IsSameProcessingDocument(replyDocument, application.ActiveDocument) Then
+                    ShowCustomMessageBox("The active document changed. Please select your comments again.", "Inky")
+                    Return
+                End If
+                If cursorOnComment Then
+                    If Not TrySelectPushbackCommentAnchor(activePushbackComment, replyTargetCommentIndex) Then
+                        ShowCustomMessageBox("This comment or its linked text has changed. No reply was added. Please select the comment again.", "Inky")
+                        Return
+                    End If
+                ElseIf replyUsesBodySelection Then
+                    If Not TryRestorePushbackBodySelection(replyDocument, replyOrigin) Then
+                        ShowCustomMessageBox("The selected comments are no longer available. Please select the text again.", "Inky")
+                        Return
+                    End If
+                End If
+            End If
+            Using Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.Push(archivePrepared)
+                Dim result As String = Await ProcessSelectedText(processingPrompt, True, DoKeepFormat, DoKeepParaFormat, DoInplace, DoMarkup, MarkupMethod, DoClipboard, DoBubbles, False, UseSecondAPI, KeepFormatCap, DoTPMarkup, TPMarkupName, False, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, InsertDocs <> "", DoMyStyle, DoBubblesExtract, DoPushback, selectedToolsForSession, DoChart, DoShowModel,
+                    TargetReplyCommentIndex:=replyTargetCommentIndex)
+                Await EnsureUIThread()
+            End Using
 
+        Catch ex As System.Exception When IsWordCommandCancellation(ex)
+            ' Esc is a normal terminal outcome, not a model/configuration error.
+            LogWordCommandDiagnostic("Freestyle", "cancelled_by_user")
         Catch ex As System.Exception
-            ' Handle any unexpected errors during freestyle execution
-            ShowCustomMessageBox("Error in Freestyle: " & ex.Message)
+            ReportWordCommandFailure("Freestyle", ex)
         Finally
             If UseSecondAPI AndAlso originalConfigLoaded Then
                 RestoreDefaults(_context, originalConfig)
                 originalConfigLoaded = False
             End If
         End Try
-    End Sub
+    End Function
+
+    ''' <summary>
+    ''' Resolves the main-document anchor for a comment and selects a non-empty
+    ''' range so the existing text-based reply pipeline can extract its context.
+    ''' Does not modify the document or the comment text.
+    ''' </summary>
+    ' <summary>
+    ' Restores ONLY a Reply command's captured main-text selection. A nonempty
+    ' selection is preserved exactly (including multiple/partial anchors).
+    ' A point inside several comments is expanded to the union of their
+    ' anchors so BubblesExtract cannot accidentally scan the whole document.
+    ' Other Freestyle commands never use this method.
+    ' </summary>
+    Private Function TryRestorePushbackBodySelection(
+        doc As Microsoft.Office.Interop.Word.Document,
+        original As Microsoft.Office.Interop.Word.Range) As System.Boolean
+
+        Try
+            If original Is Nothing OrElse Not IsSameProcessingDocument(doc, original.Document) OrElse
+               original.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory Then Return False
+            Dim anchored As System.Collections.Generic.List(Of Microsoft.Office.Interop.Word.Comment) =
+                FindCommandCommentsInBodyRange(doc, original)
+            If anchored.Count = 0 Then Return False
+            Dim target As Microsoft.Office.Interop.Word.Range = original.Duplicate
+            If target.Start = target.End Then
+                Dim first As System.Int32 = System.Int32.MaxValue
+                Dim last As System.Int32 = System.Int32.MinValue
+                For Each comment As Microsoft.Office.Interop.Word.Comment In anchored
+                    Dim scope As Microsoft.Office.Interop.Word.Range = comment.Scope
+                    first = System.Math.Min(first, scope.Start)
+                    last = System.Math.Max(last, scope.End)
+                Next
+                Dim content As Microsoft.Office.Interop.Word.Range = doc.Content
+                first = System.Math.Max(content.Start, System.Math.Min(first, content.End))
+                last = System.Math.Max(first, System.Math.Min(last, content.End))
+                If first = last Then
+                    If last < content.End Then
+                        last += 1
+                    ElseIf first > content.Start Then
+                        first -= 1
+                    Else
+                        Return False
+                    End If
+                End If
+                target.SetRange(first, last)
+            End If
+            doc.Activate()
+            target.Select()
+            Dim actual As Microsoft.Office.Interop.Word.Selection = Globals.ThisAddIn.Application.Selection
+            Return actual IsNot Nothing AndAlso IsSameProcessingDocument(doc, actual.Document) AndAlso
+                actual.StoryType = Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory AndAlso
+                actual.Range.Start = target.Start AndAlso actual.Range.End = target.End AndAlso
+                actual.Range.Start < actual.Range.End
+        Catch ex As System.Exception
+            LogWordCommandDiagnostic("Freestyle.ReplyBodySelection", ex.ToString())
+            Return False
+        End Try
+    End Function
+
+    Private Shared Function TrySelectPushbackCommentAnchor(
+        ByVal targetComment As Microsoft.Office.Interop.Word.Comment,
+        ByRef targetCommentIndex As System.Int32) As System.Boolean
+
+        targetCommentIndex = 0
+        If targetComment Is Nothing Then Return False
+
+        Try
+            Dim doc As Microsoft.Office.Interop.Word.Document = targetComment.Range.Document
+            If doc Is Nothing Then Return False
+
+            ' A selected reply belongs to its parent thread. Reply indices are not
+            ' document comment indices; never use one to address a different thread.
+            Dim threadComment As Microsoft.Office.Interop.Word.Comment = targetComment
+            Try
+                Dim ancestor As Microsoft.Office.Interop.Word.Comment = targetComment.Ancestor
+                If ancestor IsNot Nothing Then threadComment = ancestor
+            Catch ex As System.Exception
+                ' Older Word versions need not expose Ancestor. The document-level
+                ' identity check below still has to prove this is a top-level comment.
+                System.Diagnostics.Debug.WriteLine("Comment ancestor unavailable: " & ex.Message)
+            End Try
+            If Not IsSameProcessingDocument(doc, threadComment.Range.Document) Then Return False
+            Dim index As System.Int32 = threadComment.Index
+            If index <= 0 OrElse index > doc.Comments.Count Then Return False
+            Dim currentThreadRange As Microsoft.Office.Interop.Word.Range = doc.Comments(index).Range
+            If Not threadComment.Range.IsEqual(currentThreadRange) Then Return False
+
+            Dim anchor As Microsoft.Office.Interop.Word.Range = Nothing
+            Try
+                anchor = threadComment.Scope.Duplicate
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine($"Comment scope unavailable: {ex.Message}")
+            End Try
+            If anchor Is Nothing Then
+                Try
+                    anchor = threadComment.Reference.Duplicate
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine($"Comment reference unavailable: {ex.Message}")
+                    Return False
+                End Try
+            End If
+            If anchor Is Nothing OrElse anchor.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory Then Return False
+
+            Dim mainStory As Microsoft.Office.Interop.Word.Range = doc.StoryRanges(Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory)
+            If mainStory Is Nothing Then Return False
+            Dim startPos As System.Int32 = System.Math.Max(mainStory.Start, System.Math.Min(anchor.Start, mainStory.End))
+            Dim endPos As System.Int32 = System.Math.Max(startPos, System.Math.Min(anchor.End, mainStory.End))
+
+            ' Point-anchored comments can have an empty Scope/Reference. Select one
+            ' adjoining document character, not the entire document: BubblesExtract
+            ' otherwise interprets an empty range as a whole-document request.
+            If startPos = endPos Then
+                If endPos < mainStory.End Then
+                    endPos += 1
+                ElseIf startPos > mainStory.Start Then
+                    startPos -= 1
+                Else
+                    Return False
+                End If
+            End If
+
+            ' Word.Document.Range declares both arguments ByRef As Object. Passing
+            ' Int32 variables directly causes BC32029 with Option Strict On.
+            Dim wordRangeStart As System.Object = startPos
+            Dim wordRangeEnd As System.Object = endPos
+            doc.Activate()
+            doc.Range(Start:=wordRangeStart, End:=wordRangeEnd).Select()
+            Dim selected As Microsoft.Office.Interop.Word.Selection = Globals.ThisAddIn.Application.Selection
+            If selected Is Nothing OrElse Not IsSameProcessingDocument(doc, selected.Document) OrElse
+               selected.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory OrElse
+               selected.Range.Start <> startPos OrElse selected.Range.End <> endPos OrElse
+               selected.Range.Start >= selected.Range.End OrElse
+               System.String.IsNullOrWhiteSpace(selected.Range.Text) Then Return False
+
+            targetCommentIndex = index
+            Return True
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine($"Selecting comment anchor for pushback failed: {ex.Message}")
+            Return False
+        End Try
+    End Function
 
 End Class
 

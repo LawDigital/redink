@@ -16,6 +16,10 @@
 '  - In "chat author mode", also writable under skill directories.
 '  - All paths canonicalized; ".." and symlink traversal blocked.
 '  - Default file size limit: 2 MiB (configurable via MaxFileSizeBytes).
+'
+' KEY ARCHITECTURE
+'   • Surface: PathPolicy, HostFileOperationScope (VB implementation).
+'   • Entry points/helpers: BeginHostFileOperationScope, Resolve, SetWorkspaceRoot.
 ' =============================================================================
 
 Option Strict On
@@ -40,6 +44,41 @@ Namespace Agents
 
         Private Shared _workspaceRoot As String = Nothing
         Private Shared ReadOnly _restrictToWorkspaceRootOnly As New AsyncLocal(Of Boolean)
+
+        ' A host may run a previously authorized single-file operation outside an agent
+        ' workspace. This capability is internal, scoped to its async flow and exclusive:
+        ' denied paths never fall through to broader workspace/Desktop permissions.
+        Private Shared ReadOnly _hostFileOperation As New System.Threading.AsyncLocal(Of HostFileOperationScope)()
+
+        Friend Shared Function BeginHostFileOperationScope(authorizePath As System.Func(Of System.String, PathAccess, System.Boolean)) As System.IDisposable
+            If authorizePath Is Nothing Then Throw New System.ArgumentNullException(NameOf(authorizePath))
+            Return New HostFileOperationScope(authorizePath)
+        End Function
+
+        Private NotInheritable Class HostFileOperationScope
+            Implements System.IDisposable
+            Private ReadOnly _previous As HostFileOperationScope
+            Private ReadOnly _authorizePath As System.Func(Of System.String, PathAccess, System.Boolean)
+            Private _disposed As System.Int32
+
+            Public Sub New(authorizePath As System.Func(Of System.String, PathAccess, System.Boolean))
+                _previous = _hostFileOperation.Value
+                _authorizePath = authorizePath
+                _hostFileOperation.Value = Me
+            End Sub
+
+            Public Function Resolve(fullPath As System.String, access As PathAccess) As System.String
+                If System.Threading.Volatile.Read(_disposed) <> 0 Then Throw New System.ObjectDisposedException("Host file operation")
+                If Not _authorizePath.Invoke(fullPath, access) Then Throw New System.UnauthorizedAccessException("The path is outside this authorized host file operation.")
+                If System.Threading.Volatile.Read(_disposed) <> 0 Then Throw New System.ObjectDisposedException("Host file operation")
+                Return fullPath
+            End Function
+
+            Public Sub Dispose() Implements System.IDisposable.Dispose
+                If System.Threading.Interlocked.Exchange(_disposed, 1) <> 0 Then Return
+                If System.Object.ReferenceEquals(_hostFileOperation.Value, Me) Then _hostFileOperation.Value = _previous
+            End Sub
+        End Class
 
         ' User-configured workspace permissions (mirrored from WorkspaceState by the host).
         ' These apply ONLY to paths that resolve under the workspace root; skill and
@@ -206,6 +245,24 @@ Namespace Agents
             Return Environment.GetFolderPath(Environment.SpecialFolder.Desktop)
         End Function
 
+        Public Shared Function ResolveDownloadDirectory(requestedDirectory As System.String) As System.String
+            Dim root As System.String = System.String.Empty
+            Dim workspace As WorkspaceState = WorkspaceTools.Active
+            If workspace IsNot Nothing AndAlso workspace.AllowWrite AndAlso
+               Not System.String.IsNullOrWhiteSpace(workspace.RootPath) AndAlso System.IO.Directory.Exists(workspace.RootPath) Then
+                root = workspace.RootPath
+            ElseIf Not System.String.IsNullOrWhiteSpace(SessionStagingRoot) AndAlso System.IO.Directory.Exists(SessionStagingRoot) Then
+                root = SessionStagingRoot
+            End If
+            If System.String.IsNullOrWhiteSpace(root) Then Throw New System.InvalidOperationException("No writable workspace or session staging area is available for downloads.")
+            root = Resolve(root, PathAccess.Write)
+            Dim requested As System.String = If(requestedDirectory, System.String.Empty).Trim()
+            Dim target As System.String = If(requested = System.String.Empty, root,
+                If(System.IO.Path.IsPathRooted(requested), System.IO.Path.GetFullPath(requested), System.IO.Path.GetFullPath(System.IO.Path.Combine(root, requested))))
+            If Not IsUnder(target, root) Then Throw New System.UnauthorizedAccessException("Download directory is outside the active writable workspace/session staging root.")
+            Return Resolve(target, PathAccess.Write)
+        End Function
+
         ' --------------------------------------------------------------- validation
 
         ''' <summary>
@@ -244,6 +301,16 @@ Namespace Agents
                 Throw New UnauthorizedAccessException("Device paths are not allowed.")
             End If
 
+            Dim allowCentralAuthorWrites As System.Boolean = SkillAuthorMode.AllowCentralWrites
+            Dim hostOperation As HostFileOperationScope = _hostFileOperation.Value
+            If hostOperation IsNot Nothing Then
+                If wasRelative Then Throw New System.UnauthorizedAccessException("Authorized host file operations require absolute paths.")
+                ' A host capability replaces the workspace allow-set, never the explicit
+                ' protection against writes to centrally configured agent resources.
+                EnforceCentralWriteAuthority(full, access, allowCentralAuthorWrites)
+                Return hostOperation.Resolve(full, access)
+            End If
+
             Dim ws = If(_workspaceRoot, "")
 
             ' Enforce user-configured workspace permissions for any path that resolves
@@ -257,6 +324,8 @@ Namespace Agents
                     Throw New UnauthorizedAccessException("Workspace write access is disabled.")
                 End If
             End If
+
+            EnforceCentralWriteAuthority(full, access, allowCentralAuthorWrites)
 
             If _restrictToWorkspaceRootOnly.Value Then
                 ' Collect the strict allow-set: the active workspace root plus any
@@ -318,15 +387,19 @@ Namespace Agents
             End If
 
             ' Skill scripts/references — always readable.
-            ' In skill-author mode (or legacy chat-author scope), the ENTIRE skill folder
-            ' is writable (so SKILL.md plus scripts/ and references/ can be edited).
+            ' In skill-author mode (or legacy chat-author scope), an existing LOCAL skill folder
+            ' is writable; CENTRAL skill folders additionally require the explicit central-write opt-in.
             Dim skillReadRoots As New List(Of String)()
             Dim skillFullRoots As New List(Of String)()
+            Dim skillWriteRoots As New List(Of String)()
             Try
                 For Each sk In AgentResources.Skills
                     If sk Is Nothing OrElse String.IsNullOrWhiteSpace(sk.DirectoryPath) Then Continue For
                     Dim skFull As String = Path.GetFullPath(sk.DirectoryPath)
                     skillFullRoots.Add(skFull)
+                    If sk.IsLocal OrElse allowCentralAuthorWrites Then
+                        skillWriteRoots.Add(skFull)
+                    End If
                     Dim sdir As String = Path.Combine(skFull, "scripts")
                     Dim rdir As String = Path.Combine(skFull, "references")
                     If Directory.Exists(sdir) Then skillReadRoots.Add(Path.GetFullPath(sdir))
@@ -338,10 +411,15 @@ Namespace Agents
             ' Existing agent folders (agents/<name>/ or the agents/ base for single-file agents)
             ' are always readable so the author can inspect and revise them.
             Dim agentFullRoots As New List(Of String)()
+            Dim agentWriteRoots As New List(Of String)()
             Try
                 For Each ag In AgentResources.Agents
                     If ag Is Nothing OrElse String.IsNullOrWhiteSpace(ag.DirectoryPath) Then Continue For
-                    agentFullRoots.Add(Path.GetFullPath(ag.DirectoryPath))
+                    Dim agFull As String = Path.GetFullPath(ag.DirectoryPath)
+                    agentFullRoots.Add(agFull)
+                    If ag.IsLocal OrElse allowCentralAuthorWrites Then
+                        agentWriteRoots.Add(agFull)
+                    End If
                 Next
             Catch
             End Try
@@ -354,7 +432,7 @@ Namespace Agents
                 For Each baseDir In AgentResources.GetLocalResourceBaseDirectories()
                     If Not String.IsNullOrWhiteSpace(baseDir) Then authorBaseRoots.Add(Path.GetFullPath(baseDir))
                 Next
-                If SkillAuthorMode.AllowCentralWrites Then
+                If allowCentralAuthorWrites Then
                     For Each baseDir In AgentResources.GetCentralResourceBaseDirectories()
                         If Not String.IsNullOrWhiteSpace(baseDir) Then authorBaseRoots.Add(Path.GetFullPath(baseDir))
                     Next
@@ -396,8 +474,8 @@ Namespace Agents
             Catch
             End Try
             If _chatAuthor.Value OrElse SkillAuthorMode.IsActive Then
-                writeRoots.AddRange(skillFullRoots)
-                writeRoots.AddRange(agentFullRoots)
+                writeRoots.AddRange(skillWriteRoots)
+                writeRoots.AddRange(agentWriteRoots)
                 writeRoots.AddRange(authorBaseRoots)
             End If
 
@@ -420,6 +498,25 @@ Namespace Agents
 
             Throw New UnauthorizedAccessException("Path is outside the allowed roots for " & access.ToString().ToLowerInvariant() & " access.")
         End Function
+
+        Private Shared Sub EnforceCentralWriteAuthority(full As System.String,
+                                                       access As PathAccess,
+                                                       allowCentralWrites As System.Boolean)
+            If access <> PathAccess.Write OrElse allowCentralWrites Then Return
+
+            Dim centralRoot As System.String = AgentResources.ConfiguredCentralPath
+            If System.String.IsNullOrWhiteSpace(centralRoot) Then Return
+
+            Try
+                centralRoot = System.IO.Path.GetFullPath(centralRoot)
+            Catch
+                Return
+            End Try
+
+            If IsUnder(full, centralRoot) Then
+                Throw New System.UnauthorizedAccessException("Central resource writes require explicit central-write permission.")
+            End If
+        End Sub
 
         ''' <summary>
         ''' Classifies an allowed write for the skill-authoring postcondition: a write under a

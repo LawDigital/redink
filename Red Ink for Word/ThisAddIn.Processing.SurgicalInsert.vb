@@ -200,10 +200,18 @@ Partial Public Class ThisAddIn
     ''' <param name="text2">Revised serialized text returned by the LLM after post-processing.</param>
     ''' <param name="targetRange">Live Word range to be patched in place with tracked revisions.</param>
     ''' <param name="trailingCR">True when the original source ended in a trailing paragraph break that must be preserved.</param>
-    Private Sub CompareAndInsertSurgical(ByVal text1 As String, ByVal text2 As String, ByVal targetRange As Microsoft.Office.Interop.Word.Range, Optional ByVal trailingCR As Boolean = False)
+    Private Function CompareAndInsertSurgical(ByVal text1 As String, ByVal text2 As String, ByVal targetRange As Microsoft.Office.Interop.Word.Range, Optional ByVal trailingCR As Boolean = False, Optional ByVal showFailureNotice As System.Boolean = True, Optional exactSegment As System.Boolean = False) As System.Boolean
         Dim wordApp As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
         Dim doc As Microsoft.Office.Interop.Word.Document = targetRange.Document
 
+        Dim entryHandle As System.Int32 = 0
+        Try
+            Dim entryWindow As Microsoft.Office.Interop.Word.Window = GetActiveWordDocumentWindow(wordApp)
+            If entryWindow IsNot Nothing AndAlso IsSameProcessingDocument(entryWindow.Document, doc) Then entryHandle = entryWindow.Hwnd
+        Catch ex As System.Runtime.InteropServices.COMException
+            ' Foreground ownership is unproven: do not restore the selection later.
+            System.Diagnostics.Debug.WriteLine("Surgical selection capture: " & ex.ToString())
+        End Try
         Dim originalTrack As Boolean = doc.TrackRevisions
         Dim originalUpdate As Boolean = wordApp.ScreenUpdating
         Dim originalSmartCutPaste As Boolean = wordApp.Options.SmartCutPaste
@@ -212,6 +220,11 @@ Partial Public Class ThisAddIn
         Dim manualLineBreak As String = ChrW(11).ToString()
 
         Dim splash As SLib.SplashScreen = Nothing
+        Dim recoveryRuns As System.Collections.Generic.List(Of DiffRun) = Nothing
+        Dim mutationStarted As System.Boolean = False
+        Dim noticeRequired As System.Boolean = False
+        Dim skippedChanges As System.Int32 = -1
+        Dim sourceConflict As System.Boolean = False
 
         Try
             splash = New SLib.SplashScreen("Applying markup... press 'Esc' to abort")
@@ -232,11 +245,11 @@ Partial Public Class ThisAddIn
 
             Dim originalTrailingInlineWhitespace As String = GetTrailingInlineBoundaryWhitespace(text1)
 
-            If Not trailingCR Then
+            If Not exactSegment AndAlso Not trailingCR Then
                 text2 = text2.TrimEnd(vbCr, vbLf).TrimEnd(vbCr, vbLf)
             End If
 
-            If originalTrailingInlineWhitespace.Length > 0 Then
+            If Not exactSegment AndAlso originalTrailingInlineWhitespace.Length > 0 Then
                 text2 = EnsureTrailingInlineBoundaryWhitespace(text2, originalTrailingInlineWhitespace)
             End If
 
@@ -248,14 +261,14 @@ Partial Public Class ThisAddIn
             ' ======================================================================
             ' STEP 2: Normalize line breaks to explicit tokens
             ' ======================================================================
-            text1 = text1.Replace(manualLineBreak, " {vbVt} ").
-                      Replace(vbCrLf, " {vbCrLf} ").
-                      Replace(vbCr, " {vbCrLf} ").
-                      Replace(vbLf, " {vbCrLf} ")
-            text2 = text2.Replace(manualLineBreak, " {vbVt} ").
-                      Replace(vbCrLf, " {vbCrLf} ").
-                      Replace(vbCr, " {vbCrLf} ").
-                      Replace(vbLf, " {vbCrLf} ")
+            text1 = text1.Replace(manualLineBreak, "{vbVt}").
+                      Replace(vbCrLf, "{vbCrLf}").
+                      Replace(vbCr, "{vbCrLf}").
+                      Replace(vbLf, "{vbCrLf}")
+            text2 = text2.Replace(manualLineBreak, "{vbVt}").
+                      Replace(vbCrLf, "{vbCrLf}").
+                      Replace(vbCr, "{vbCrLf}").
+                      Replace(vbLf, "{vbCrLf}")
 
             Debug.WriteLine("==== Surgical raw text1 ====")
             Debug.WriteLine(DebugVisualizeToken(text1))
@@ -286,6 +299,8 @@ Partial Public Class ThisAddIn
             Next
 
             DebugDumpRuns("Runs after STEP 5 (after restore)", runs)
+            ' Keep the full run contract before physical placeholders are stripped.
+            recoveryRuns = New System.Collections.Generic.List(Of DiffRun)(runs)
 
             ' ======================================================================
             ' STEP 6: Quick exit if unchanged
@@ -293,7 +308,7 @@ Partial Public Class ThisAddIn
             Dim hasChanges As Boolean = runs.Any(Function(r) r.RunType <> ChangeType.Unchanged)
             If Not hasChanges Then
                 Debug.WriteLine("SurgicalMarkup: No changes detected, skipping.")
-                Return
+                Return True
             End If
 
             ' ======================================================================
@@ -346,8 +361,8 @@ Partial Public Class ThisAddIn
                         uiYieldStopwatch.Restart()
                     End If
 
-                    If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then Exit Do
-                    If (GetAsyncKeyState(VK_ESCAPE) And 1) <> 0 Then Exit Do
+                    If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then Return False
+                    If (GetAsyncKeyState(VK_ESCAPE) And 1) <> 0 Then Return False
 
                     Dim run As DiffRun = runs(ri)
 
@@ -372,20 +387,8 @@ Partial Public Class ThisAddIn
                             If SurgicalTokensMatchAt(atoms, unchangedTokens, atomIndex) Then
                                 unchangedEnd = atomIndex + unchangedTokens.Count
                                 atomIndex = unchangedEnd
-                            ElseIf unchangedTokens.All(Function(token As String) SurgicalIsWeakAnchorToken(token)) Then
-                                ' Spaces and break-padding tokens are often synthetic artefacts of the
-                                ' diff-normalisation layer. Never resync globally on them; doing so can
-                                ' jump to a much later space and make every later real edit disappear.
-                                Debug.WriteLine($"    Weak unchanged run skipped without resync. text='{DebugVisualizeToken(run.Text)}'")
                             Else
-                                Dim unchangedSearchLimit As Integer = System.Math.Min(atoms.Count, atomIndex + System.Math.Max(64, unchangedTokens.Count * 4))
-
-                                If SurgicalTryFindTokenSequence(atoms, unchangedTokens, atomIndex, unchangedSearchLimit, unchangedStart, unchangedEnd) Then
-                                    Debug.WriteLine($"    Resynced unchanged run locally: {atomIndex} -> {unchangedEnd}; skipped visible atoms={unchangedStart - atomIndex}")
-                                    atomIndex = unchangedEnd
-                                Else
-                                    Debug.WriteLine($"    Unchanged run not found in atom map; leaving atom index unchanged. text='{DebugVisualizeToken(run.Text)}'")
-                                End If
+                                Throw New SurgicalSourceChangedException("Surgical source mismatch in unchanged run " & ri.ToString(System.Globalization.CultureInfo.InvariantCulture) & "; no edits applied.")
                             End If
 
                             ri += 1
@@ -424,7 +427,9 @@ Partial Public Class ThisAddIn
                                IsOnlyBreakCharacters(deletedText) AndAlso
                                IsOnlyBreakCharacters(insertedText) Then
 
-                                Debug.WriteLine($"    Break-only replacement skipped; preserving original break(s). delete='{DebugVisualizeToken(deletedText)}' insert='{DebugVisualizeToken(insertedText)}'")
+                                Dim breakTokens As System.Collections.Generic.List(Of System.String) = SurgicalTokenizeComparableText(deletedText)
+                                If Not SurgicalTokensMatchAt(atoms, breakTokens, atomIndex) Then Throw New SurgicalSourceChangedException("Surgical paragraph source mismatch; no edits applied.")
+                                atomIndex += breakTokens.Count
                                 Continue Do
                             End If
 
@@ -455,29 +460,7 @@ Partial Public Class ThisAddIn
                                 deleteEndIndex = atomIndex + deletedTokens.Count
                                 deleteMatched = True
                             Else
-                                Dim nextAnchorTokens As List(Of String) = SurgicalFindNextUnchangedAnchorTokens(runs, ri)
-                                Dim nextAnchorStart As Integer = atoms.Count
-                                Dim nextAnchorEnd As Integer = atoms.Count
-
-                                If nextAnchorTokens.Count > 0 Then
-                                    If Not SurgicalTryFindTokenSequence(atoms, nextAnchorTokens, atomIndex, atoms.Count, nextAnchorStart, nextAnchorEnd) Then
-                                        nextAnchorStart = atoms.Count
-                                        nextAnchorEnd = atoms.Count
-                                    End If
-                                End If
-
-                                If SurgicalTryFindTokenSequence(atoms, deletedTokens, atomIndex, nextAnchorStart, deleteStartIndex, deleteEndIndex) Then
-                                    deleteMatched = True
-                                    Debug.WriteLine($"    Delete tokens found after resync: {atomIndex} -> {deleteStartIndex}/{deleteEndIndex}")
-                                ElseIf nextAnchorStart >= atomIndex Then
-                                    ' The diff cluster sits between the already-consumed original atom and
-                                    ' the next unchanged anchor. If exact token matching fails, use that
-                                    ' bounded original-side region rather than dropping the cluster.
-                                    deleteStartIndex = atomIndex
-                                    deleteEndIndex = nextAnchorStart
-                                    deleteMatched = (deleteEndIndex > deleteStartIndex)
-                                    Debug.WriteLine($"    Delete tokens not found; using bounded cluster region {deleteStartIndex}..{deleteEndIndex} before next unchanged anchor.")
-                                End If
+                                Throw New SurgicalSourceChangedException("Surgical source mismatch in deletion run " & clusterStartRunIndex.ToString(System.Globalization.CultureInfo.InvariantCulture) & "; no edits applied.")
                             End If
 
                             If deleteMatched Then
@@ -511,39 +494,50 @@ Partial Public Class ThisAddIn
                 ' ==================================================================
                 ' STEP 9: Apply the planned edits right-to-left.
                 ' ==================================================================
-                pendingEdits.Sort(Function(a, b)
-                                      Dim startCompare As Integer = b.DeleteStart.CompareTo(a.DeleteStart)
-                                      If startCompare <> 0 Then Return startCompare
-                                      Return b.DeleteEnd.CompareTo(a.DeleteEnd)
-                                  End Function)
-
-                Debug.WriteLine("SurgicalMarkup: pending edit count=" & pendingEdits.Count)
-
-                doc.TrackRevisions = True
-
-                For Each edit As PendingSurgicalEdit In pendingEdits
-                    If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then Exit For
-
-                    Dim contentEnd As Integer = doc.Content.End
-                    Dim editStart As Integer = System.Math.Max(targetRange.Start, System.Math.Min(edit.DeleteStart, contentEnd))
-                    Dim editEnd As Integer = System.Math.Max(editStart, System.Math.Min(edit.DeleteEnd, contentEnd))
-
-                    If editEnd > editStart Then
-                        doc.Range(editStart, editEnd).Delete()
-                    End If
-
-                    If Not String.IsNullOrEmpty(edit.InsertText) Then
-                        Dim insertRange As Microsoft.Office.Interop.Word.Range = doc.Range(editStart, editStart)
-                        insertRange.InsertAfter(edit.InsertText)
+                For remainingIndex As System.Int32 = atomIndex To atoms.Count - 1
+                    If Not SurgicalIsWeakAnchorToken(atoms(remainingIndex).KeyText) Then
+                        Throw New SurgicalSourceChangedException("Surgical source was not fully consumed; no edits applied.")
                     End If
                 Next
 
-                doc.TrackRevisions = False
-                CollapseDoubleSpacesInFinalView(doc, targetRange.Start, targetRange.End)
+                If exactSegment AndAlso (targetRange.Footnotes.Count > 0 OrElse targetRange.Endnotes.Count > 0) Then
+                    Throw New SurgicalSourceChangedException("A native note appeared inside the protected text segment during planning.")
+                End If
+                If Not ApplySurgicalPendingEdits(targetRange, atoms, pendingEdits, mutationStarted) Then Return False
+
+                ' Leave untouched text and existing revisions intact; all whitespace edits belong in the diff.
             End Using
 
+        Catch ex As SurgicalSourceChangedException
+            System.Diagnostics.Debug.WriteLine(ex.ToString())
+            LogSurgicalRecovery("Surgical source recovery requested: " & ex.Message)
+            noticeRequired = True
+            sourceConflict = True
+            If Not exactSegment AndAlso Not mutationStarted Then
+                Try
+                    Dim liveAtoms As System.Collections.Generic.List(Of SurgicalTextAtom) = BuildSurgicalVisibleAtomMap(targetRange)
+                    Dim rebasedEdits As System.Collections.Generic.List(Of PendingSurgicalEdit) = Nothing
+                    Dim plannedSkipped As System.Int32 = 0
+                    If TryPlanSurgicalRecovery(recoveryRuns, liveAtoms, targetRange.End, rebasedEdits, plannedSkipped) Then
+                        Dim completed As System.Boolean = True
+                        If rebasedEdits.Count > 0 Then
+                            Using BeginMarkupAuthorScope(wordApp)
+                                completed = ApplySurgicalPendingEdits(targetRange, liveAtoms, rebasedEdits, mutationStarted)
+                            End Using
+                        End If
+                        If completed Then
+                            skippedChanges = plannedSkipped
+                            noticeRequired = skippedChanges > 0
+                        End If
+                        LogSurgicalRecovery("Surgical recovery outcome=partial-plan; skipped changes=" & plannedSkipped.ToString(System.Globalization.CultureInfo.InvariantCulture) & "; completed=" & completed.ToString())
+                    End If
+                Catch recoveryError As System.Exception
+                    LogSurgicalRecovery("Surgical recovery incomplete: " & recoveryError.ToString())
+                End Try
+            End If
         Catch ex As System.Exception
-            Debug.WriteLine("SurgicalMarkup error: " & ex.Message & vbCrLf & ex.StackTrace)
+            LogSurgicalRecovery("Surgical apply incomplete: " & ex.ToString())
+            noticeRequired = True
         Finally
             If splash IsNot Nothing Then
                 Try
@@ -554,17 +548,280 @@ Partial Public Class ThisAddIn
                 splash = Nothing
             End If
 
-            doc.TrackRevisions = originalTrack
-            wordApp.ScreenUpdating = originalUpdate
-            wordApp.Options.SmartCutPaste = originalSmartCutPaste
+            ' UI yields let Word close a document or activate another window. Restore each
+            ' setting independently; never select a range in a different window or story.
+            Try
+                doc.TrackRevisions = originalTrack
+            Catch ex As System.Runtime.InteropServices.COMException
+                LogSurgicalRecovery("Could not restore revision tracking on the original document: " & ex.ToString())
+            End Try
+            Try
+                wordApp.ScreenUpdating = originalUpdate
+            Finally
+                wordApp.Options.SmartCutPaste = originalSmartCutPaste
+            End Try
+            Try
+                Dim window As Microsoft.Office.Interop.Word.Window = GetActiveWordDocumentWindow(wordApp)
+                If entryHandle <> 0 AndAlso window IsNot Nothing AndAlso window.Hwnd = entryHandle AndAlso
+                   IsSameProcessingDocument(window.Document, doc) Then
+                    Dim selected As Microsoft.Office.Interop.Word.Selection = window.Selection
+                    If selected IsNot Nothing AndAlso selected.Range.InStory(targetRange) Then selected.SetRange(targetRange.Start, targetRange.End)
+                End If
+            Catch ex As System.Runtime.InteropServices.COMException
+                LogSurgicalRecovery("The original selection was unavailable during cleanup: " & ex.ToString())
+            End Try
+            If noticeRequired AndAlso showFailureNotice Then
+                Dim subject As System.String = "One or more changes"
+                If skippedChanges = 1 Then
+                    subject = "One change"
+                ElseIf skippedChanges > 1 Then
+                    subject = skippedChanges.ToString(System.Globalization.CultureInfo.InvariantCulture) & " changes"
+                End If
+                Dim reason As System.String = If(sourceConflict, " because the underlying text has changed", System.String.Empty)
+                SLib.ShowCustomMessageBox(subject & " could not be applied" & reason & ". Please undo any applied changes and retry.")
+            End If
+        End Try
+        Return Not noticeRequired
+    End Function
 
-            wordApp.Selection.SetRange(targetRange.Start, targetRange.End)
+    Private NotInheritable Class SurgicalSourceChangedException
+        Inherits System.Exception
+
+        Public Sub New(message As System.String)
+            MyBase.New(message)
+        End Sub
+    End Class
+
+    Private Structure SurgicalRecoveryChange
+        Public First As System.Int32
+        Public AfterLast As System.Int32
+        Public Replacement As System.String
+        Public CanApply As System.Boolean
+    End Structure
+
+    ' No fuzzy matching: both snapshots must contain exactly one copy of the context.
+    ' KMP keeps each search linear; ambiguous contexts grow geometrically.
+    Private Shared Function CountSurgicalTokenMatches(tokens As System.Collections.Generic.List(Of System.String),
+                                                     pattern As System.Collections.Generic.List(Of System.String),
+                                                     ByRef firstMatch As System.Int32) As System.Int32
+        firstMatch = -1
+        If pattern.Count = 0 Then Return 0
+        Dim prefix(pattern.Count - 1) As System.Int32
+        Dim matched As System.Int32 = 0
+        For i As System.Int32 = 1 To pattern.Count - 1
+            While matched > 0 AndAlso Not System.String.Equals(pattern(i), pattern(matched), System.StringComparison.Ordinal)
+                matched = prefix(matched - 1)
+            End While
+            If System.String.Equals(pattern(i), pattern(matched), System.StringComparison.Ordinal) Then matched += 1
+            prefix(i) = matched
+        Next
+        matched = 0
+        Dim count As System.Int32 = 0
+        For i As System.Int32 = 0 To tokens.Count - 1
+            While matched > 0 AndAlso Not System.String.Equals(tokens(i), pattern(matched), System.StringComparison.Ordinal)
+                matched = prefix(matched - 1)
+            End While
+            If System.String.Equals(tokens(i), pattern(matched), System.StringComparison.Ordinal) Then matched += 1
+            If matched = pattern.Count Then
+                count += 1
+                If firstMatch < 0 Then firstMatch = i - pattern.Count + 1
+                If count = 2 Then Return count
+                matched = prefix(matched - 1)
+            End If
+        Next
+        Return count
+    End Function
+
+    Private Shared Function TryLocateSurgicalRecoverySpan(source As System.Collections.Generic.List(Of System.String),
+                                                          live As System.Collections.Generic.List(Of System.String),
+                                                          first As System.Int32, afterLast As System.Int32,
+                                                          ByRef liveFirst As System.Int32,
+                                                          ByRef liveAfterLast As System.Int32) As System.Boolean
+        liveFirst = -1
+        liveAfterLast = -1
+        If source.Count = 0 Then Return False
+        Dim left As System.Int32 = System.Math.Max(0, first - 1)
+        Dim right As System.Int32 = System.Math.Min(source.Count, afterLast + 1)
+        While left > 0 AndAlso SurgicalIsWeakAnchorToken(source(left))
+            left -= 1
+        End While
+        While right < source.Count AndAlso SurgicalIsWeakAnchorToken(source(right - 1))
+            right += 1
+        End While
+        Do
+            Dim pattern As System.Collections.Generic.List(Of System.String) = source.GetRange(left, right - left)
+            Dim sourceMatch As System.Int32 = -1
+            Dim liveMatch As System.Int32 = -1
+            Dim sourceCount As System.Int32 = CountSurgicalTokenMatches(source, pattern, sourceMatch)
+            Dim liveCount As System.Int32 = CountSurgicalTokenMatches(live, pattern, liveMatch)
+            If liveCount = 0 Then Return False
+            If sourceCount = 1 AndAlso liveCount = 1 Then
+                liveFirst = liveMatch + first - left
+                liveAfterLast = liveMatch + afterLast - left
+                ' Concurrent insertions at a document boundary have no defined ordering.
+                If first = afterLast Then
+                    If first = 0 AndAlso liveFirst <> 0 Then Return False
+                    If first = source.Count AndAlso liveFirst <> live.Count Then Return False
+                End If
+                Return True
+            End If
+            If left = 0 AndAlso right = source.Count Then Return False
+            Dim width As System.Int32 = System.Math.Max(1, right - left)
+            left = System.Math.Max(0, left - width)
+            right = System.Math.Min(source.Count, right + width)
+        Loop
+    End Function
+
+    Private Shared Function TryPlanSurgicalRecovery(runs As System.Collections.Generic.List(Of DiffRun),
+                                                    atoms As System.Collections.Generic.List(Of SurgicalTextAtom),
+                                                    rangeEnd As System.Int32,
+                                                    ByRef planned As System.Collections.Generic.List(Of PendingSurgicalEdit),
+                                                    ByRef skippedChanges As System.Int32) As System.Boolean
+        planned = Nothing
+        skippedChanges = 0
+        If runs Is Nothing Then Return False
+        Dim source As New System.Collections.Generic.List(Of System.String)()
+        Dim changes As New System.Collections.Generic.List(Of SurgicalRecoveryChange)()
+        Dim i As System.Int32 = 0
+        While i < runs.Count
+            If runs(i).RunType = DiffPlex.DiffBuilder.Model.ChangeType.Unchanged Then
+                source.AddRange(SurgicalTokensForRunText(runs(i).Text))
+                i += 1
+                Continue While
+            End If
+            Dim first As System.Int32 = source.Count
+            Dim removed As New System.Text.StringBuilder()
+            Dim added As New System.Text.StringBuilder()
+            Dim canApply As System.Boolean = True
+            While i < runs.Count AndAlso runs(i).RunType <> DiffPlex.DiffBuilder.Model.ChangeType.Unchanged
+                Dim kind As SpecialPlaceholderKind = SpecialPlaceholderKind.None
+                Dim isSpecial As System.Boolean = TryGetSpecialPlaceholderKind(runs(i).Text, kind)
+                If isSpecial Then canApply = False
+                Select Case runs(i).RunType
+                    Case DiffPlex.DiffBuilder.Model.ChangeType.Deleted
+                        If isSpecial Then
+                            source.AddRange(SurgicalTokenizeComparableText(NormalizeForWordFind(removed.ToString())))
+                            removed.Clear()
+                            source.AddRange(SurgicalTokensForRunText(runs(i).Text))
+                        Else
+                            removed.Append(runs(i).Text)
+                        End If
+                    Case DiffPlex.DiffBuilder.Model.ChangeType.Inserted
+                        added.Append(runs(i).Text)
+                    Case Else
+                        Return False
+                End Select
+                i += 1
+            End While
+            Dim deletedText As System.String = NormalizeForWordFind(removed.ToString())
+            Dim insertedText As System.String = NormalizeForWordFind(added.ToString())
+            source.AddRange(SurgicalTokenizeComparableText(deletedText))
+            If canApply AndAlso deletedText.Length > 0 AndAlso insertedText.Length > 0 AndAlso
+               IsOnlyBreakCharacters(deletedText) AndAlso IsOnlyBreakCharacters(insertedText) Then Continue While
+            If Not canApply OrElse first <> source.Count OrElse insertedText.Length > 0 Then
+                changes.Add(New SurgicalRecoveryChange With {.First = first, .AfterLast = source.Count, .Replacement = insertedText, .CanApply = canApply})
+            End If
+        End While
+        Dim live As New System.Collections.Generic.List(Of System.String)()
+        For Each atom As SurgicalTextAtom In atoms
+            live.Add(atom.KeyText)
+        Next
+        Dim pending As New System.Collections.Generic.List(Of PendingSurgicalEdit)()
+        Dim previousEnd As System.Int32 = -1
+        For Each change As SurgicalRecoveryChange In changes
+            Dim first As System.Int32 = -1
+            Dim afterLast As System.Int32 = -1
+            ' A conflict in one change must not discard independent applicable changes.
+            If Not change.CanApply OrElse
+               Not TryLocateSurgicalRecoverySpan(source, live, change.First, change.AfterLast, first, afterLast) OrElse
+               first < previousEnd Then
+                skippedChanges += 1
+                Continue For
+            End If
+            Dim anchor As System.Int32 = SurgicalAnchorPositionFromAtomIndex(atoms, first, rangeEnd)
+            SurgicalAppendPendingEditForAtomRange(pending, atoms, first, afterLast, change.Replacement, anchor)
+            previousEnd = afterLast
+        Next
+        planned = pending
+        Return True
+    End Function
+
+    Private Shared Function SurgicalAtomSnapshotsEqual(first As System.Collections.Generic.List(Of SurgicalTextAtom),
+                                                       second As System.Collections.Generic.List(Of SurgicalTextAtom)) As System.Boolean
+        If first.Count <> second.Count Then Return False
+        For i As System.Int32 = 0 To first.Count - 1
+            Dim a As SurgicalTextAtom = first(i)
+            Dim b As SurgicalTextAtom = second(i)
+            If a.LiveStart <> b.LiveStart OrElse a.LiveEnd <> b.LiveEnd OrElse
+               Not System.String.Equals(a.KeyText, b.KeyText, System.StringComparison.Ordinal) Then Return False
+            If (a.Spans Is Nothing) <> (b.Spans Is Nothing) Then Return False
+            If a.Spans IsNot Nothing Then
+                If a.Spans.Count <> b.Spans.Count Then Return False
+                For j As System.Int32 = 0 To a.Spans.Count - 1
+                    If a.Spans(j).StartPos <> b.Spans(j).StartPos OrElse a.Spans(j).EndPos <> b.Spans(j).EndPos Then Return False
+                Next
+            End If
+        Next
+        Return True
+    End Function
+
+    Private Shared Function ApplySurgicalPendingEdits(targetRange As Microsoft.Office.Interop.Word.Range,
+                                                 atoms As System.Collections.Generic.List(Of SurgicalTextAtom),
+                                                 pending As System.Collections.Generic.List(Of PendingSurgicalEdit),
+                                                 ByRef mutationStarted As System.Boolean) As System.Boolean
+        pending.Sort(Function(a, b)
+                         Dim comparison As System.Int32 = b.DeleteStart.CompareTo(a.DeleteStart)
+                         If comparison <> 0 Then Return comparison
+                         Return b.DeleteEnd.CompareTo(a.DeleteEnd)
+                     End Function)
+        ' Validate the WHOLE plan before any write, including changes during DoEvents.
+        For Each edit As PendingSurgicalEdit In pending
+            If edit.DeleteStart < targetRange.Start OrElse edit.DeleteEnd > targetRange.End OrElse edit.DeleteEnd < edit.DeleteStart Then
+                Throw New SurgicalSourceChangedException("Planned edit is outside the current selection.")
+            End If
+        Next
+        If Not SurgicalAtomSnapshotsEqual(atoms, BuildSurgicalVisibleAtomMap(targetRange)) Then
+            Throw New SurgicalSourceChangedException("Source changed during surgical planning.")
+        End If
+        targetRange.Document.TrackRevisions = True
+        For Each edit As PendingSurgicalEdit In pending
+            If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then Return False
+            If edit.DeleteEnd > edit.DeleteStart Then
+                Dim deletion As Microsoft.Office.Interop.Word.Range = targetRange.Duplicate
+                deletion.SetRange(edit.DeleteStart, edit.DeleteEnd)
+                mutationStarted = True
+                deletion.Delete()
+            End If
+            If Not System.String.IsNullOrEmpty(edit.InsertText) Then
+                Dim insertion As Microsoft.Office.Interop.Word.Range = targetRange.Duplicate
+                insertion.SetRange(edit.DeleteStart, edit.DeleteStart)
+                mutationStarted = True
+                insertion.InsertAfter(edit.InsertText)
+            End If
+        Next
+        Return True
+    End Function
+
+    Private Sub LogSurgicalRecovery(message As System.String)
+        System.Diagnostics.Trace.TraceWarning(message)
+        Try
+            SharedLibrary.SharedLogger.Log(_context, _context.RDV, message)
+        Catch ex As System.Exception
+            System.Diagnostics.Trace.TraceWarning("Surgical recovery log unavailable: " & ex.ToString())
         End Try
     End Sub
 
-    Public Sub ApplySurgicalReplacement(ByVal originalText As String, ByVal newText As String, ByVal targetRange As Microsoft.Office.Interop.Word.Range, Optional ByVal trailingCR As Boolean = False)
-        CompareAndInsertSurgical(originalText, newText, targetRange, trailingCR)
-    End Sub
+    ' The note contract owns exact segment whitespace, prohibits partial rebase and
+    ' never gives the surgical engine a native note mark to delete or recreate.
+    Friend Function ApplyExactNoteFreeReplacement(original As System.String, revised As System.String,
+                                                 target As Microsoft.Office.Interop.Word.Range) As System.Boolean
+        If target.Footnotes.Count <> 0 OrElse target.Endnotes.Count <> 0 Then Return False
+        Return CompareAndInsertSurgical(original, revised, target, showFailureNotice:=False, exactSegment:=True)
+    End Function
+
+    Public Function ApplySurgicalReplacement(ByVal originalText As String, ByVal newText As String, ByVal targetRange As Microsoft.Office.Interop.Word.Range, Optional ByVal trailingCR As Boolean = False, Optional ByVal showFailureNotice As System.Boolean = True) As System.Boolean
+        Return CompareAndInsertSurgical(originalText, newText, targetRange, trailingCR, showFailureNotice)
+    End Function
 
     ''' <summary>
     ''' Returns the exact inline whitespace suffix of the original selection. This suffix is a
@@ -670,33 +927,214 @@ Partial Public Class ThisAddIn
         Public NewIndex As Integer
     End Structure
 
+    Friend Shared Function PrepareChatPlainTarget(source As System.String, desired As System.String) As System.String
+        Dim text As System.String = NormalizeForWordFind(desired)
+        If Not source.EndsWith(vbCr, System.StringComparison.Ordinal) Then text = text.TrimEnd(Microsoft.VisualBasic.ControlChars.Cr, Microsoft.VisualBasic.ControlChars.Lf)
+        Return EnsureTrailingInlineBoundaryWhitespace(text, GetTrailingInlineBoundaryWhitespace(source))
+    End Function
+
+    Friend Shared Function ContainsChatWordStructure(value As System.String) As System.Boolean
+        Return System.Text.RegularExpressions.Regex.IsMatch(value, "[\x00-\x08\x0C\x0E-\x1F]")
+    End Function
+
+    Friend Shared ReadOnly ChatNativeReferencePattern As New System.Text.RegularExpressions.Regex(
+        "\[\[RI-(?:FN|EN):[1-9][0-9]*\]\]", System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+
+    ' One contract for a plain range and a block with native references. Plan ALL
+    ' pieces before the first write. No Selection, Find, DoEvents, or replay of a
+    ' possibly committed COM write. Gaps occupied by old deletions are never edited.
+    Friend Shared Function TryApplyExactWordBlock(target As Microsoft.Office.Interop.Word.Range, source As System.String,
+                                            desired As System.String, trace As System.Text.StringBuilder,
+                                            ByRef mayHaveWritten As System.Boolean, ByRef verifiedEnd As System.Int32,
+                                            ByRef failure As System.String) As System.Boolean
+        Dim doc As Microsoft.Office.Interop.Word.Document = target.Document
+        Dim first As System.Int32 = target.Start
+        Dim finish As System.Int32 = target.End
+        Dim storyEnd As System.Int32 = doc.Content.End
+        Dim notes As System.Int32 = 0
+        Dim phase As System.String = "snapshot"
+        Dim completed As System.Int32 = 0
+        Dim writeError As System.Exception = Nothing
+        Dim expectedMarks As New System.Collections.Generic.List(Of System.String)()
+        mayHaveWritten = False
+        verifiedEnd = first
+        failure = System.String.Empty
+        Try
+            If ContainsChatWordStructure(source) OrElse ContainsChatWordStructure(desired) OrElse target.Fields.Count > 0 OrElse target.InlineShapes.Count > 0 Then Throw New System.InvalidOperationException("The target contains a protected Word object or control character.")
+            Dim map As ThisAddIn.ChatNoteProjection = ReadChatNoteProjection(target)
+            notes = map.References.Count
+            If Not System.String.Equals(map.Text, source, System.StringComparison.Ordinal) OrElse map.Starts.Count <> source.Length OrElse map.Finishes.Count <> source.Length Then Throw New System.InvalidOperationException("The current source no longer matches the selected block.")
+            Dim fromMarks As System.Text.RegularExpressions.MatchCollection = ChatNativeReferencePattern.Matches(source)
+            Dim toMarks As System.Text.RegularExpressions.MatchCollection = ChatNativeReferencePattern.Matches(desired)
+            If notes <> fromMarks.Count OrElse notes <> toMarks.Count Then Throw New System.InvalidOperationException("Native reference count changed.")
+            For i As System.Int32 = 0 To notes - 1
+                Dim token As System.String = map.References(i).Token
+                If Not System.String.Equals(token, fromMarks(i).Value, System.StringComparison.Ordinal) OrElse Not System.String.Equals(token, toMarks(i).Value, System.StringComparison.Ordinal) OrElse map.Starts(fromMarks(i).Index) <> map.References(i).First Then Throw New System.InvalidOperationException("Native reference identity or order changed.")
+                expectedMarks.Add(token)
+            Next
+            phase = "plan"
+            Dim edits As New System.Collections.Generic.List(Of (A As System.Int32, B As System.Int32, FromText As System.String, ToText As System.String))()
+            Dim oldPieces As System.String() = ChatNativeReferencePattern.Split(source)
+            Dim newPieces As System.String() = ChatNativeReferencePattern.Split(desired)
+            Dim baseOffset As System.Int32 = 0
+            For i As System.Int32 = 0 To oldPieces.Length - 1
+                For Each delta In ThisAddIn.PlanExactChatDeltas(oldPieces(i), newPieces(i))
+                    Dim pos As System.Int32 = baseOffset + delta.Offset
+                    Dim anchor As System.Int32 = If(pos < map.Starts.Count, map.Starts(pos), finish)
+                    If delta.OldText.Length = 0 Then
+                        edits.Add((anchor, anchor, System.String.Empty, delta.NewText))
+                    Else
+                        Dim j As System.Int32 = 0
+                        While j < delta.OldText.Length
+                            Dim begin As System.Int32 = j
+                            Dim a As System.Int32 = map.Starts(pos + j)
+                            Dim b As System.Int32 = map.Finishes(pos + j)
+                            j += 1
+                            While j < delta.OldText.Length
+                                ' Some Word positions project multiple UTF-16 code units.
+                                ' Never split an atomic Word character into two writes.
+                                Dim sameAtom As System.Boolean = map.Starts(pos + j) = map.Starts(pos + j - 1) AndAlso map.Finishes(pos + j) = b
+                                If Not sameAtom AndAlso map.Starts(pos + j) <> b Then Exit While
+                                b = map.Finishes(pos + j)
+                                j += 1
+                            End While
+                            edits.Add((a, b, delta.OldText.Substring(begin, j - begin), If(begin = 0, delta.NewText, System.String.Empty)))
+                        End While
+                    End If
+                Next
+                baseOffset += oldPieces(i).Length
+                If i < notes Then baseOffset += fromMarks(i).Length
+            Next
+            Dim previousEnd As System.Int32 = first
+            For Each edit In edits
+                If edit.A < previousEnd OrElse edit.B < edit.A OrElse edit.B > finish Then Throw New System.InvalidOperationException("Unsafe or overlapping physical edit span.")
+                previousEnd = edit.B
+                For Each mark In map.References
+                    If edit.A < mark.Finish AndAlso edit.B > mark.First Then Throw New System.InvalidOperationException("Edit touches a native reference.")
+                Next
+                Dim part As Microsoft.Office.Interop.Word.Range = doc.Range(edit.A, edit.B)
+                If part.Fields.Count > 0 OrElse part.InlineShapes.Count > 0 OrElse Not System.String.Equals(ReadVisibleProjection(part, Nothing), edit.FromText, System.StringComparison.Ordinal) Then Throw New System.InvalidOperationException("A planned text span is not safely editable.")
+            Next
+            trace.AppendLine($"BLOCK plan range=[{first},{finish}] notes={notes} writes={edits.Count}")
+            phase = "write"
+            Using undo As New ThisAddIn.WordUndoScope(doc.Application, "Red Ink: replace text")
+                Try
+                    For i As System.Int32 = edits.Count - 1 To 0 Step -1
+                        If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then Throw New System.OperationCanceledException()
+                        Dim edit = edits(i)
+                        Dim part As Microsoft.Office.Interop.Word.Range = doc.Range(edit.A, edit.B)
+                        If Not doc.TrackRevisions OrElse part.Start <> edit.A OrElse part.End <> edit.B OrElse Not System.String.Equals(ReadVisibleProjection(part, Nothing), edit.FromText, System.StringComparison.Ordinal) Then Throw New System.InvalidOperationException("The planned write range changed.")
+                        mayHaveWritten = True
+                        part.Text = edit.ToText
+                        completed += 1
+                    Next
+                Catch ex As System.Runtime.InteropServices.COMException
+                    ' Word may commit before reporting a COM error. Verify the whole
+                    ' postcondition exactly once; never repeat the edit or guess.
+                    writeError = ex
+                    trace.AppendLine($"BLOCK write-exception hresult={ex.HResult:X8} completed={completed}")
+                End Try
+            End Using
+            phase = "verify"
+            Dim finalEnd As System.Int32 = finish + (doc.Content.End - storyEnd)
+            Dim actual As ThisAddIn.ChatNoteProjection = ReadChatNoteProjection(doc.Range(first, finalEnd))
+            If Not System.String.Equals(actual.Text, desired, System.StringComparison.Ordinal) OrElse actual.References.Count <> notes Then
+                Dim mismatch As System.Int32 = 0
+                While mismatch < System.Math.Min(actual.Text.Length, desired.Length) AndAlso actual.Text(mismatch) = desired(mismatch)
+                    mismatch += 1
+                End While
+                trace.AppendLine($"BLOCK mismatch offset={mismatch} actualLength={actual.Text.Length} expectedLength={desired.Length} actualNotes={actual.References.Count}")
+                Throw New System.InvalidOperationException("Read-back differs from the requested text or native references.", writeError)
+            End If
+            For i As System.Int32 = 0 To notes - 1
+                If Not System.String.Equals(actual.References(i).Token, expectedMarks(i), System.StringComparison.Ordinal) Then Throw New System.InvalidOperationException("Read-back found a different native reference.")
+            Next
+            verifiedEnd = finalEnd
+            trace.AppendLine($"BLOCK verified notes={notes} writesReturned={completed} reconciled={writeError IsNot Nothing}")
+            Return True
+        Catch ex As System.Exception
+            trace.AppendLine($"BLOCK stopped phase={phase} completed={completed} attempted={mayHaveWritten} type={ex.GetType().Name} hresult={ex.HResult:X8}")
+            failure = If(mayHaveWritten, "The replacement was not verified; review this block before retrying. ", "The replacement stopped before writing this block. ") & ex.Message
+            Return False
+        End Try
+    End Function
+
+    ' Exact Word-chat deltas, independent of view state and of Word COM. Reuse the
+    ' patience diff, but compare opaque ordinal IDs: a tab, a space, CR and LF
+    ' must not be trimmed or treated as line delimiters by DiffPlex's line fallback.
+    Friend Shared Function PlanExactChatDeltas(source As System.String, desired As System.String) As System.Collections.Generic.List(Of (Offset As System.Int32, OldText As System.String, NewText As System.String))
+        Dim plan As New System.Collections.Generic.List(Of (Offset As System.Int32, OldText As System.String, NewText As System.String))()
+        If System.String.Equals(source, desired, System.StringComparison.Ordinal) Then Return plan
+        Dim ids As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.Ordinal)
+        Dim words As New System.Collections.Generic.List(Of System.String)()
+        Dim encode As System.Func(Of System.String, System.Collections.Generic.List(Of System.String)) =
+            Function(value As System.String) As System.Collections.Generic.List(Of System.String)
+                Dim stream As New System.Collections.Generic.List(Of System.String)()
+                For Each token As System.Text.RegularExpressions.Match In System.Text.RegularExpressions.Regex.Matches(value, "[\p{L}\p{M}\p{N}_]+|[ \t]+|[\uD800-\uDBFF][\uDC00-\uDFFF]|[\s\S]")
+                    Dim key As System.String = Nothing
+                    If Not ids.TryGetValue(token.Value, key) Then
+                        key = words.Count.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                        ids.Add(token.Value, key)
+                        words.Add(token.Value)
+                    End If
+                    stream.Add(key)
+                Next
+                Return stream
+            End Function
+        Dim before As System.Collections.Generic.List(Of System.String) = encode(source)
+        Dim after As System.Collections.Generic.List(Of System.String) = encode(desired)
+        Dim steps As System.Collections.Generic.List(Of DiffRun) = BuildPatienceTokenDiff(before, after)
+        Dim oldPos As System.Int32 = 0
+        Dim newPos As System.Int32 = 0
+        Dim cluster As System.Int32 = 0
+        Dim removed As New System.Text.StringBuilder()
+        Dim inserted As New System.Text.StringBuilder()
+        For Each stepItem As DiffRun In steps
+            Dim value As System.String = words(System.Int32.Parse(stepItem.Text, System.Globalization.CultureInfo.InvariantCulture))
+            If stepItem.RunType <> DiffPlex.DiffBuilder.Model.ChangeType.Inserted Then
+                If oldPos + value.Length > source.Length OrElse System.String.CompareOrdinal(source, oldPos, value, 0, value.Length) <> 0 Then Throw New System.IO.InvalidDataException("Diff does not replay its source.")
+                oldPos += value.Length
+            End If
+            If stepItem.RunType <> DiffPlex.DiffBuilder.Model.ChangeType.Deleted Then
+                If newPos + value.Length > desired.Length OrElse System.String.CompareOrdinal(desired, newPos, value, 0, value.Length) <> 0 Then Throw New System.IO.InvalidDataException("Diff does not replay its target.")
+                newPos += value.Length
+            End If
+            Select Case stepItem.RunType
+                Case DiffPlex.DiffBuilder.Model.ChangeType.Deleted
+                    removed.Append(value)
+                Case DiffPlex.DiffBuilder.Model.ChangeType.Inserted
+                    inserted.Append(value)
+                Case DiffPlex.DiffBuilder.Model.ChangeType.Unchanged
+                    If removed.Length + inserted.Length > 0 Then plan.Add((cluster, removed.ToString(), inserted.ToString()))
+                    removed.Clear()
+                    inserted.Clear()
+                    cluster = oldPos
+                Case Else
+                    Throw New System.IO.InvalidDataException("Unexpected exact diff operation.")
+            End Select
+        Next
+        If oldPos <> source.Length OrElse newPos <> desired.Length Then Throw New System.IO.InvalidDataException("Incomplete exact diff.")
+        If removed.Length + inserted.Length > 0 Then plan.Add((cluster, removed.ToString(), inserted.ToString()))
+        Return plan
+    End Function
+
     ''' <summary>
     ''' Splits the tokenized text into paragraph bodies plus the break token that followed each body.
-    ''' The normalization step intentionally wrapped every break token in spaces. Those synthetic
-    ''' padding spaces do not exist in Word's live text, so exactly one injected space is removed on
-    ''' each side of a paragraph break while genuine additional spaces are preserved.
+    ''' Break tokens carry no synthetic padding. All original whitespace is preserved.
     ''' </summary>
     Private Shared Function SplitTokenizedIntoParagraphChunks(ByVal text As String) As System.Collections.Generic.List(Of SurgicalParagraphChunk)
         Dim chunks As New System.Collections.Generic.List(Of SurgicalParagraphChunk)()
         Dim current As New System.Text.StringBuilder()
-        Dim skipOneInjectedSpaceAfterBreak As Boolean = False
 
         For Each token As String In TokenizeDiffUnits(If(text, String.Empty))
             If IsDiffLineBreakToken(token) Then
-                RemoveOneTrailingInjectedSpace(current)
                 chunks.Add(New SurgicalParagraphChunk With {
                     .Text = current.ToString(),
                     .BreakText = token
                 })
                 current.Clear()
-                skipOneInjectedSpaceAfterBreak = True
             Else
-                If skipOneInjectedSpaceAfterBreak AndAlso token = " " Then
-                    skipOneInjectedSpaceAfterBreak = False
-                Else
-                    current.Append(token)
-                    skipOneInjectedSpaceAfterBreak = False
-                End If
+                current.Append(token)
             End If
         Next
 
@@ -1795,7 +2233,13 @@ Partial Public Class ThisAddIn
             If fieldIndex < fieldSpans.Count AndAlso
                fieldSpans(fieldIndex).StartPos <= livePos AndAlso livePos < fieldSpans(fieldIndex).EndPos Then
 
-                result.Add(SurgicalCreateFieldAtom(fieldSpans(fieldIndex).KeyText, fieldSpans(fieldIndex).StartPos, fieldSpans(fieldIndex).EndPos))
+                Dim fieldIsVisible As System.Boolean = False
+                Dim probe As System.Int32 = index
+                While probe < liveChars.Count AndAlso liveChars(probe).LiveStart < fieldSpans(fieldIndex).EndPos
+                    If Not liveChars(probe).IsTrackedDeletion Then fieldIsVisible = True
+                    probe += 1
+                End While
+                If fieldIsVisible Then result.Add(SurgicalCreateFieldAtom(fieldSpans(fieldIndex).KeyText, fieldSpans(fieldIndex).StartPos, fieldSpans(fieldIndex).EndPos))
 
                 Dim skipEnd As Integer = fieldSpans(fieldIndex).EndPos
                 Do While index < liveChars.Count AndAlso liveChars(index).LiveStart < skipEnd
@@ -1812,17 +2256,21 @@ Partial Public Class ThisAddIn
             End If
 
             Dim ch As Char = liveChars(index).Text(0)
+            Dim nextFieldStart As System.Int32 = If(fieldIndex < fieldSpans.Count, fieldSpans(fieldIndex).StartPos, System.Int32.MaxValue)
 
             If SurgicalIsParagraphBreakChar(ch) Then
-                result.Add(SurgicalCreateTextAtom(vbCr, liveChars(index).LiveStart, liveChars(index).LiveEnd))
+                Dim breakStart As System.Int32 = liveChars(index).LiveStart
+                Dim breakEnd As System.Int32 = liveChars(index).LiveEnd
                 index += 1
 
                 If ch = ControlChars.Cr AndAlso index < liveChars.Count AndAlso
                    Not liveChars(index).IsTrackedDeletion AndAlso
+                   liveChars(index).LiveStart = breakEnd AndAlso liveChars(index).LiveStart < nextFieldStart AndAlso
                    liveChars(index).Text = vbLf Then
-
+                    breakEnd = liveChars(index).LiveEnd
                     index += 1
                 End If
+                result.Add(SurgicalCreateTextAtom(vbCr, breakStart, breakEnd))
 
             ElseIf ch = ChrW(11) Then
                 result.Add(SurgicalCreateTextAtom(ChrW(11).ToString(), liveChars(index).LiveStart, liveChars(index).LiveEnd))
@@ -1833,10 +2281,10 @@ Partial Public Class ThisAddIn
                 index += 1
 
             ElseIf SurgicalIsHorizontalWhitespaceChar(ch) Then
-                result.Add(SurgicalReadVisibleRunAtom(liveChars, index, Function(c As Char) SurgicalIsHorizontalWhitespaceChar(c)))
+                result.Add(SurgicalReadVisibleRunAtom(liveChars, index, nextFieldStart, Function(c As Char) SurgicalIsHorizontalWhitespaceChar(c)))
 
             ElseIf SurgicalIsWordChar(ch) Then
-                result.Add(SurgicalReadVisibleRunAtom(liveChars, index, Function(c As Char) SurgicalIsWordChar(c)))
+                result.Add(SurgicalReadVisibleRunAtom(liveChars, index, nextFieldStart, Function(c As Char) SurgicalIsWordChar(c)))
 
             Else
                 result.Add(SurgicalCreateTextAtom(ch.ToString(), liveChars(index).LiveStart, liveChars(index).LiveEnd))
@@ -1850,12 +2298,13 @@ Partial Public Class ThisAddIn
     Private Shared Function SurgicalReadVisibleRunAtom(
     ByVal liveChars As List(Of SurgicalLiveCharAtom),
     ByRef index As Integer,
+    ByVal nextFieldStart As System.Int32,
     ByVal belongsToRun As System.Func(Of Char, Boolean)) As SurgicalTextAtom
 
         Dim sb As New System.Text.StringBuilder()
         Dim spans As New List(Of SurgicalPositionSpan)()
 
-        Do While index < liveChars.Count
+        Do While index < liveChars.Count AndAlso liveChars(index).LiveStart < nextFieldStart
             If liveChars(index).IsTrackedDeletion OrElse String.IsNullOrEmpty(liveChars(index).Text) Then
                 index += 1
                 Continue Do
@@ -1932,57 +2381,31 @@ Partial Public Class ThisAddIn
                 Return spans
             End If
 
-            For Each field As Microsoft.Office.Interop.Word.Field In doc.Fields
+            For Each field As Microsoft.Office.Interop.Word.Field In targetRange.Fields
                 If field Is Nothing Then
                     Continue For
                 End If
 
-                Dim codeRange As Microsoft.Office.Interop.Word.Range = Nothing
-                Dim resultRange As Microsoft.Office.Interop.Word.Range = Nothing
-
-                Try
-                    codeRange = field.Code
-                Catch ex As System.Exception
-                    codeRange = Nothing
-                End Try
-
-                Try
-                    resultRange = field.Result
-                Catch ex As System.Exception
-                    resultRange = Nothing
-                End Try
-
-                If resultRange Is Nothing Then
-                    Continue For
+                Dim codeRange As Microsoft.Office.Interop.Word.Range = field.Code
+                Dim resultRange As Microsoft.Office.Interop.Word.Range = field.Result
+                If codeRange Is Nothing OrElse resultRange Is Nothing Then
+                    Throw New System.IO.InvalidDataException("Cannot establish the live boundaries of a Word field.")
                 End If
 
-                Dim resultStart As Integer = resultRange.Start
                 Dim resultEnd As Integer = resultRange.End
 
-                If resultEnd <= resultStart Then
-                    resultEnd = resultStart + 1
-                End If
-
-                If resultEnd <= targetRange.Start OrElse resultStart >= targetRange.End Then
-                    Continue For
-                End If
-
-                Dim spanStart As Integer = System.Math.Max(targetRange.Start, resultStart)
-                Dim spanEnd As Integer = System.Math.Min(targetRange.End, resultEnd)
+                ' Result.End is exclusive, including when the field result is empty. The
+                ' field's closing delimiter occupies exactly one more position, not two.
+                Dim fieldStart As System.Int32 = codeRange.Start - 1
+                If resultEnd + 1 <= targetRange.Start OrElse fieldStart >= targetRange.End Then Continue For
+                Dim spanStart As Integer = System.Math.Max(targetRange.Start, fieldStart)
+                Dim spanEnd As Integer = System.Math.Min(targetRange.End, resultEnd + 1)
 
                 If spanEnd <= spanStart Then
                     Continue For
                 End If
 
-                Dim fieldCode As String = String.Empty
-                If codeRange IsNot Nothing Then
-                    Try
-                        fieldCode = codeRange.Text
-                    Catch ex As System.Exception
-                        fieldCode = String.Empty
-                    End Try
-                End If
-
+                Dim fieldCode As System.String = codeRange.Text
                 Dim keyText As String = BuildCanonicalWfldPlaceholderKey(fieldCode)
                 If String.Equals(keyText, "WFLD:", StringComparison.Ordinal) Then
                     Continue For
@@ -1995,7 +2418,8 @@ Partial Public Class ThisAddIn
             })
             Next
         Catch ex As System.Exception
-            Debug.WriteLine("BuildSurgicalFieldAtomSpans failed: " & ex.Message)
+            ' Never pass a partial map of protected fields to the mutation/recovery planner.
+            Throw New System.IO.InvalidDataException("Cannot safely map all fields in the surgical source range.", ex)
         End Try
 
         spans.Sort(Function(a, b)
@@ -2038,7 +2462,12 @@ Partial Public Class ThisAddIn
         End If
 
         Dim deletionSpans As List(Of SurgicalPositionSpan) = BuildSurgicalTrackedDeletionSpans(targetRange)
-        Dim liveText As String = targetRange.Text
+        Dim sourceRange As Microsoft.Office.Interop.Word.Range = targetRange.Duplicate
+        ' Physical offsets require all characters, including hidden text and field codes.
+        ' Visibility is a projection below, never a window/view setting.
+        sourceRange.TextRetrievalMode.IncludeHiddenText = True
+        sourceRange.TextRetrievalMode.IncludeFieldCodes = True
+        Dim liveText As String = sourceRange.Text
         If liveText Is Nothing Then liveText = String.Empty
 
         Dim rangeStart As Integer = targetRange.Start
@@ -2068,10 +2497,11 @@ Partial Public Class ThisAddIn
             Dim piece As String = String.Empty
 
             Try
-                Dim pieceRange As Microsoft.Office.Interop.Word.Range = targetRange.Document.Range(pos, pos + 1)
+                Dim pieceRange As Microsoft.Office.Interop.Word.Range = sourceRange.Duplicate
+                pieceRange.SetRange(pos, pos + 1)
                 piece = pieceRange.Text
             Catch ex As System.Exception
-                piece = String.Empty
+                Throw New System.IO.InvalidDataException("Cannot map the surgical source range at position " & pos.ToString(System.Globalization.CultureInfo.InvariantCulture), ex)
             End Try
 
             If String.IsNullOrEmpty(piece) Then
@@ -2109,7 +2539,8 @@ Partial Public Class ThisAddIn
 
         Try
             For Each revision As Microsoft.Office.Interop.Word.Revision In targetRange.Revisions
-                If revision.Type = Microsoft.Office.Interop.Word.WdRevisionType.wdRevisionDelete Then
+                If revision.Type = Microsoft.Office.Interop.Word.WdRevisionType.wdRevisionDelete OrElse
+                   revision.Type = Microsoft.Office.Interop.Word.WdRevisionType.wdRevisionMovedFrom Then
                     Dim spanStart As Integer = System.Math.Max(targetRange.Start, revision.Range.Start)
                     Dim spanEnd As Integer = System.Math.Min(targetRange.End, revision.Range.End)
 
@@ -2122,7 +2553,7 @@ Partial Public Class ThisAddIn
                 End If
             Next
         Catch ex As System.Exception
-            Debug.WriteLine("BuildSurgicalTrackedDeletionSpans failed: " & ex.Message)
+            Throw New System.IO.InvalidDataException("Cannot read existing tracked deletions; surgical source mapping was stopped.", ex)
         End Try
 
         spans.Sort(Function(a, b) a.StartPos.CompareTo(b.StartPos))
@@ -3112,7 +3543,13 @@ Partial Public Class ThisAddIn
         End If
 
         If kind = SpecialPlaceholderKind.WFLD Then
-            Return BuildCanonicalWfldPlaceholderKey(payload)
+            ' The serializer transports a checked field-code envelope and, for hyperlinks,
+            ' a separate display payload. Compare the decoded native instruction only.
+            ' Decode here, never in BuildCanonicalWfldPlaceholderKey: live field codes
+            ' are already native text and must not be interpreted as transport envelopes.
+            Dim fieldParts As System.String() = payload.Split(New System.String() {"|||"}, 2, System.StringSplitOptions.None)
+            Dim nativeFieldCode As System.String = DecodeProtectedWordFieldCode(fieldParts(0).Trim())
+            Return BuildCanonicalWfldPlaceholderKey(nativeFieldCode)
         End If
 
         Return If(placeholder, String.Empty)

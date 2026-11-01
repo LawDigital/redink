@@ -21,6 +21,11 @@
 '   - Partial Class M365ExpandedAttachment: adds .Id and .NestedEvent fields.
 '   - Private ParseEventInline / ParseEventBody: shared by the helper and the
 '     mail-message renderer.
+'
+' KEY ARCHITECTURE
+'   • Surface: M365ExpandedAttachment, M365Service (VB implementation).
+'   • Entry points/helpers: GetMailThreadAsTextAsync, GetChatThreadAsTextAsync,
+'     GetChannelThreadAsTextAsync.
 ' =============================================================================
 
 Option Explicit On

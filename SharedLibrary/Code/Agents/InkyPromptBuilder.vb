@@ -34,12 +34,13 @@ Namespace Agents
         ''' <param name="selectedSkillToolNames">Tool names of the form "skill_&lt;name&gt;" that are active for this run.</param>
         ''' <param name="selectedAgentToolNames">Tool names of the form "agent_&lt;name&gt;" that are active for this run.</param>
         Public Shared Function Build(Optional selectedSkillToolNames As IEnumerable(Of String) = Nothing,
-                                     Optional selectedAgentToolNames As IEnumerable(Of String) = Nothing) As String
+                                     Optional selectedAgentToolNames As IEnumerable(Of String) = Nothing,
+                                     Optional isAutoPilot As System.Boolean = False) As String
             Dim sb As New StringBuilder()
 
-            Dim inky As String = AgentResources.InkyMd
+            Dim inky As String = If(isAutoPilot, AgentResources.InkyMdForAutoPilot, AgentResources.InkyMd)
             If Not String.IsNullOrWhiteSpace(inky) Then
-                sb.AppendLine("# Project guidance (Inky.md)")
+                sb.AppendLine(If(isAutoPilot, "# Project guidance (AutoPilot)", "# Project guidance (Inky.md)"))
                 sb.AppendLine(inky.Trim())
                 sb.AppendLine()
             End If
@@ -80,7 +81,7 @@ Namespace Agents
                 sb.AppendLine()
             End If
 
-            If SkillAuthorMode.IsActive Then
+            If SkillAuthorMode.IsActive AndAlso Not isAutoPilot Then
                 sb.AppendLine()
                 sb.Append(SharedLibrary.SharedMethods.Default_SP_Add_AgentLayer_AuthorMode)
             End If

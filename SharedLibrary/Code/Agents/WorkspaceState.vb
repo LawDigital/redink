@@ -16,6 +16,10 @@
 '  - Permissions: AllowRead, AllowWrite, AllowMoveCopyRename, AllowDelete.
 '  - PersistUntilRevoked: survives host restarts until user clears it.
 '  - IncludeHiddenSystem: whether hidden/system files are visible.
+'
+' KEY ARCHITECTURE
+'   • Surface: WorkspaceState, WorkspaceStore (VB implementation).
+'   • Entry points/helpers: ResolveDir, FileFor, Load.
 ' =============================================================================
 
 Option Strict On
@@ -47,10 +51,13 @@ Namespace Agents
 
         Private Shared Function ResolveDir() As String
             Dim root As String = TryGetSharedPath("INI_AgentResourcesPathLocal")
-            If String.IsNullOrWhiteSpace(root) Then
-                root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RedInk")
+            If Not System.String.IsNullOrWhiteSpace(root) Then
+                root = SharedLibrary.SharedMethods.ExpandEnvironmentVariables(root)
             End If
-            Dim dir = Path.Combine(root, ".session")
+            If System.String.IsNullOrWhiteSpace(root) Then
+                root = System.IO.Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData), "RedInk")
+            End If
+            Dim dir = System.IO.Path.Combine(root, ".session")
             Try
                 If Not Directory.Exists(dir) Then Directory.CreateDirectory(dir)
             Catch

@@ -16,6 +16,11 @@
 '              tool-response JSON with memory stub.
 '
 ' Concurrency: Owner-scope on AgentGate ensures only one sub-agent runs globally.
+'
+' KEY ARCHITECTURE
+'   • Surface: SubAgentRunner (VB implementation).
+'   • Entry points/helpers: InvokeAsync, InvokeResolvedAsync,
+'     TryGetDeclaredCanonicalSourceTools.
 ' =============================================================================
 
 Option Strict On
@@ -215,17 +220,28 @@ Namespace Agents
                     allowedTools = ApplyCanonicalSourceHandlePolicy(allowedTools)
                     optionalTools = ApplyCanonicalSourceHandlePolicy(optionalTools)
                 End If
-                optionalTools = EnsureToolName(optionalTools, "context_expand")
             End If
 
+            ' context_expand is a host runtime primitive, not a domain/helper capability.
+            ' Any isolated tooling scope can receive a lossless result_ref when one of its
+            ' own tool results is reference-compacted, so the corresponding reader must be
+            ' available independently of the agent's declared substantive helper list.
+            ' Apply this after any canonical-source narrowing so infrastructure cannot be
+            ' removed by a substantive helper filter.
+            optionalTools = EnsureToolName(optionalTools, ContextExpandTool.ToolName)
+
+            Dim retainedFailedAttempts As New Newtonsoft.Json.Linq.JArray()
             Dim retryCount As Integer = 0
             Dim userMessageForRun As String = baseUserMessage.ToString()
+            Dim previousDiscardedResponseExcerpt As String = ""
+            Dim previousDiscardedResponseLength As Integer = 0
 
             Await AgentGate.EnterAsync(cancellationToken).ConfigureAwait(False)
             AgentGate.MarkCurrentFlowAsOwner()
 
             Try
                 Do
+                    cancellationToken.ThrowIfCancellationRequested()
                     Dim req As New SubAgentRunRequest With {
                 .AgentName = ag.Name,
                 .SystemPrompt = sys.ToString(),
@@ -238,6 +254,8 @@ Namespace Agents
                 .WorkflowId = effectiveWorkflowId,
                 .SubAgentTaskId = normalizedSubAgentTaskId,
                 .RunnerRetryIndex = retryCount,
+                .PreviousDiscardedResponseExcerpt = previousDiscardedResponseExcerpt,
+                .PreviousDiscardedResponseLength = previousDiscardedResponseLength,
                 .ExpectedArtifactsJson = lockedExpectedArtifactsJson,
                 .RequiredSuccessfulToolNames = If(HasCanonicalSourceResultRefs(canonicalSourceResultRefs),
                                                   CType(New String() {"context_expand"}, IReadOnlyList(Of String)),
@@ -260,7 +278,7 @@ Namespace Agents
                     Catch oce As OperationCanceledException
                         Throw
                     Catch ex As System.Exception
-                        Return BuildInfrastructureErrorPayload(ag.Name, "agent_failed", "invoke", ex.Message)
+                        Return BuildInfrastructureErrorPayload(ag.Name, "agent_failed", "invoke", ex.Message, retainedFailedAttempts)
                     End Try
 
                     Dim normalized = SubAgentRuntimeHardening.NormalizeFinalOutput(finalText, jsonRequired:=True)
@@ -273,9 +291,24 @@ Namespace Agents
                             declaredResultKind)
                     LogFinalOutputDiagnostics(ag.Name, req.AllowedToolNames, normalized, retryCount)
 
+                    If (normalized.IsError OrElse hasDeclaredContractFailure) AndAlso Not System.String.IsNullOrEmpty(finalText) Then
+                        Dim storedAttempt As ToolResultStore.StoredResult = ToolResultStore.Put(effectiveWorkflowId, "agent_" & ag.Name, finalText)
+                        Dim attempt As Newtonsoft.Json.Linq.JObject = ToolResultStore.DescribeReference(storedAttempt)
+                        attempt("attempt_index") = retryCount
+                        attempt("execution_succeeded") = False
+                        attempt("result_contract") = "Failed/unusable final response retained in full. Retrieve relevant prior evidence and completed-result references before repeating work; this failed response does not authorize treating an operation as successful."
+                        If Not storedAttempt.IsDurable Then
+                            attempt("representation") = "full_failed_response"
+                            attempt("content_complete") = True
+                            attempt("content") = finalText
+                        End If
+                        retainedFailedAttempts.Add(attempt)
+                    End If
+
                     If Not normalized.IsError AndAlso Not hasDeclaredContractFailure Then
                         Dim resp As JObject = normalized.ToJObject()
                         resp("agent") = ag.Name
+                        If retainedFailedAttempts.Count > 0 Then resp("retained_failed_attempts") = retainedFailedAttempts.DeepClone()
 
                         If storeResultInMemory Then
                             Try
@@ -333,15 +366,30 @@ Namespace Agents
                         effectiveErrorCode = declaredErrorCode
                     End If
 
-                    If retryCount = 0 AndAlso retryableErrorCodes.Contains(effectiveErrorCode) Then
+                    If retryCount = 0 AndAlso retryableErrorCodes.Contains(effectiveErrorCode) AndAlso
+                       SubAgentRuntimeHardening.IsEmptyResultRetryAllowed(normalized.ToJson(), effectiveErrorCode) Then
+                        previousDiscardedResponseLength = If(finalText, "").Length
+                        previousDiscardedResponseExcerpt =
+                            System.Text.RegularExpressions.Regex.Replace(
+                                If(finalText, ""),
+                                "\s+",
+                                " ").Trim()
+                        If previousDiscardedResponseExcerpt.Length > 200 Then
+                            previousDiscardedResponseExcerpt = previousDiscardedResponseExcerpt.Substring(0, 200)
+                        End If
+
                         retryCount += 1
                         userMessageForRun = BuildRetryUserMessage(baseUserMessage.ToString(), normalized, allowedTools)
+                        If retainedFailedAttempts.Count > 0 Then
+                            userMessageForRun &= vbCrLf & "Complete prior failed responses are retained below. Retrieve the task-relevant evidence and completed-result references before repeating work; these stubs and any nested source references are incomplete:" & vbCrLf & retainedFailedAttempts.ToString(Formatting.None)
+                        End If
                         Continue Do
                     End If
 
                     Dim errResp As JObject = normalized.ToJObject()
                     errResp("agent") = ag.Name
                     errResp("retryCount") = retryCount
+                    If retainedFailedAttempts.Count > 0 Then errResp("retained_failed_attempts") = retainedFailedAttempts.DeepClone()
 
                     If Not String.IsNullOrWhiteSpace(effectiveWorkflowId) Then
                         Dim checkpointWritten =
@@ -532,7 +580,8 @@ Namespace Agents
         Private Shared Function BuildInfrastructureErrorPayload(agentName As String,
                                                                 errorCode As String,
                                                                 phase As String,
-                                                                message As String) As String
+                                                                message As String,
+                                                                Optional retainedFailedAttempts As Newtonsoft.Json.Linq.JArray = Nothing) As String
             Dim obj As New JObject(
                 New JProperty("summary", If(message, "Sub-agent failed.")),
                 New JProperty("result", JValue.CreateNull()),
@@ -545,6 +594,9 @@ Namespace Agents
 
             If Not String.IsNullOrWhiteSpace(agentName) Then
                 obj("agent") = agentName
+            End If
+            If retainedFailedAttempts IsNot Nothing AndAlso retainedFailedAttempts.Count > 0 Then
+                obj("retained_failed_attempts") = retainedFailedAttempts.DeepClone()
             End If
 
             Return obj.ToString(Formatting.None)

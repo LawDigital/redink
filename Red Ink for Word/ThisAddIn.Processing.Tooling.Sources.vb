@@ -226,6 +226,7 @@ Partial Public Class ThisAddIn
 
         Return New ModelConfig() With {
             .ToolName = BuildInternalKnowledgeToolName(store),
+            .CapabilityTags = "source_retrieval",
             .ToolInstructionsPrompt = BuildInternalKnowledgeToolInstructionsPrompt(store),
             .ToolDefinition = BuildInternalKnowledgeToolDefinition(store),
             .ModelDescription = $"Knowledge Store: {displayLabel}{InternalToolSuffix}",
@@ -585,6 +586,7 @@ Partial Public Class ThisAddIn
     Public Function GetInternalKnowledgeTool() As ModelConfig
         Return New ModelConfig() With {
         .ToolName = InternalKnowledgeToolName,
+        .CapabilityTags = "source_retrieval",
         .ToolInstructionsPrompt = BuildInternalKnowledgeToolInstructionsPrompt(),
         .ToolDefinition = BuildInternalKnowledgeToolDefinition(),
         .ModelDescription = "Knowledge Store Search" & InternalToolSuffix,
@@ -620,6 +622,7 @@ Partial Public Class ThisAddIn
             End If
 
             Dim storeLabel As String = KnowledgeStoreCatalog.GetDisplayLabel(boundStore)
+            SharedLogger.LogKnowledgeStoreInvocation(_context, _context.RDV, "Word_Agent", boundStore.Name)
             Dim query As String = GetToolArgumentString(toolCall.Arguments, "query")
             Dim taskPrompt As String = GetToolArgumentString(toolCall.Arguments, "task_prompt")
             Dim tagName As String = GetToolArgumentString(toolCall.Arguments, "tag")

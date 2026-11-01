@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>License usage report · {{ report.from_month }} – {{ report.to_month }} · Red Ink</title>
+  <link rel="icon" href="{{ url_for('static', filename='red-ink-logo.png') }}" type="image/png">
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='report.css') }}">
+  <script src="{{ url_for('static', filename='print.js') }}" defer></script>
+</head>
+<body class="report-page">
+  <div class="report-toolbar"><a href="/#reports">← Return to license reports</a><button class="button primary" id="print-button" type="button">Print / Save PDF</button></div>
+  <main class="report-sheet">
+    <header class="report-header"><div class="report-brand"><img src="{{ url_for('static', filename='red-ink-logo.png') }}" width="50" height="50" alt="Red Ink logo"><span>RED INK<small>Usage Server</small></span></div><div class="report-header-meta">LICENSE EVIDENCE<br>Generated {{ report.generated_utc }}<br>Application {{ version }}</div></header>
+    <div class="report-heading"><div class="eyebrow">MONTHLY USAGE REPORT</div><h1>License usage evidence</h1><p>Reporting period: <strong>{{ report.from_month }} – {{ report.to_month }}</strong></p></div>
+    <section class="report-summary" aria-label="Report totals"><div><span>Total identity-month units</span><strong>{{ report.units }}</strong></div><div><span>Scope / product / month rows</span><strong>{{ report.rows|length }}</strong></div>{% if 'amount' in report %}<div><span>Calculated amount · {{ report.currency }}</span><strong>{{ report.amount }}</strong></div>{% endif %}</section>
+    <section class="report-basis"><h2>Counting basis</h2><p>{{ report.basis }}</p><p><strong>License scope:</strong> A stable reporting group associated with the permitted offline-license network scope or the configured NetworkScope for classical licences. Its key groups identities for counting; it is not a user name, license key, or an additional license. The same person in different scopes may appear in multiple rows.</p><p>{{ report.coverage }}</p></section>
+    <div class="table-scroll"><table class="report-table"><caption>Monthly distinct identities by license scope and product</caption><thead><tr><th scope="col">Month</th><th scope="col">License scope<br><small>Reporting group</small></th><th scope="col">Product</th><th scope="col" class="numeric">Users</th><th scope="col" class="numeric">Word</th><th scope="col" class="numeric">Excel</th><th scope="col" class="numeric">Outlook</th><th scope="col" class="numeric">Revision</th>{% if 'amount' in report %}<th scope="col" class="numeric">Amount<br>{{ report.currency }}</th>{% endif %}</tr></thead><tbody>{% for row in report.rows %}<tr><td>{{ row.month }}</td><td class="scope-cell">{{ row.network_scope or row.network_key }}<small>{{ row.network_key }}</small></td><td>{{ row.product_id }}</td><td class="numeric">{{ row.users }}</td><td class="numeric">{{ row.word_users }}</td><td class="numeric">{{ row.excel_users }}</td><td class="numeric">{{ row.outlook_users }}</td><td class="numeric">{{ row.revision }}</td>{% if 'amount' in report %}<td class="numeric">{{ row.amount }}</td>{% endif %}</tr>{% else %}<tr><td class="empty-row" colspan="{{ 9 if 'amount' in report else 8 }}">No usage evidence has arrived for the selected period.</td></tr>{% endfor %}</tbody></table></div>
+    <p class="report-caption">An identity can appear in several Office hosts. The Users column deduplicates those hosts. Summing Users across months produces identity-month units, not a count of unique people across the entire period.</p>
+    {% if report.rows %}<section class="report-evidence"><h2>Evidence and revisions</h2><div class="table-scroll"><table><thead><tr><th scope="col">Month / scope / product</th><th scope="col">First received · UTC</th><th scope="col">Last received · UTC</th><th scope="col">Last load observation · UTC</th><th scope="col">Revision changed · UTC</th></tr></thead><tbody>{% for row in report.rows %}<tr><td>{{ row.month }}<small>{{ row.network_key }} / {{ row.product_id }}</small></td><td>{{ row.first_received_utc or 'Not supplied' }}</td><td>{{ row.last_received_utc or 'Not supplied' }}</td><td>{{ row.last_use_utc or 'Not supplied' }}</td><td>{{ row.changed_utc or 'Not supplied' }}</td></tr>{% endfor %}</tbody></table></div></section>{% endif %}
+    <section class="report-notes"><h2>Interpretation</h2><p>{{ report.daily_evidence }}</p><p>{{ report.identity }}</p><p>{{ report.tax }}</p><p>This report records observed usage for license review. It is not an invoice or a statement that all clients have synchronized. Late reports can change historical totals; retain a report snapshot for each billing run.</p></section>
+    <footer class="report-footer"><strong>Report content SHA256</strong><code>{{ report.content_sha256 }}</code><span>Red Ink Usage Server · {{ report.generated_utc }}</span></footer>
+  </main>
+</body>
+</html>

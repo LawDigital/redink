@@ -79,7 +79,7 @@ Namespace Agents
             If hasProcessWordDocument Then
                 sb.Append("SOURCE FORMAT / EXISTING ARTIFACT ROUTING (BINDING): When the user identifies an attachment or other supplied artifact as the formatting, layout, design, master, style, or structural model for the requested output, treat that source as a FORMAT CARRIER, not merely as content. This remains true when the user says create, new, template, boilerplate, sample, generic, or similar wording. A user-selected source format carrier takes precedence over any implicit/default DESIGN REPOSITORY design or template. Turning an existing Word, PowerPoint, or Excel artifact into a generic/template version by replacing substantive content with placeholders or generic text is a TRANSFORMATION and should preserve the existing native structure; use process_word_document or the appropriate native mutation tools rather than rebuilding with create_word_document, create_powerpoint, or create_excel_spreadsheet. ")
                 If hasPdfToWord Then
-                    sb.Append("When a PDF is the requested format/layout carrier for a Word deliverable, use pdf_to_word FIRST and then transform the resulting DOCX with process_word_document or native Word tools. Do not choose extract_pdf_text + create_word_document for a format-preservation request merely because text extraction is easier; that path loses the source layout. Use OCR/text reconstruction only as a controlled fallback when structure-preserving conversion cannot provide a usable editable source, and do not claim exact format preservation after such a fallback. ")
+                    sb.Append("When a PDF is the requested format/layout carrier for a Word deliverable, use pdf_to_word FIRST. A successful usable converted DOCX becomes the authoritative source-preserving baseline. For broad semantic revisions that should be visible as tracked changes, including contract improvements or revised wording, prefer process_word_document on that converted DOCX and use its compare output. Use word_markup only for discrete exact edits whose find anchors were obtained from the CURRENT converted DOCX. OCR/PDF extraction may be used as read-only analysis evidence but must not silently replace a successful converted baseline. pdf_to_word calls Documents.Open/SaveAs2 in Microsoft Word and deliberately respects the user's configured Word environment: it does not disconnect, disable, inspect, reject, rank, or bypass connected COM/VSTO add-ins or PDF FileConverters. If Word selects an installed converter, allow it to run; removing an unwanted converter is the user's responsibility. The tool itself must not start Office Safe Mode or invoke Windows file associations or a Red Ink layout/OCR adapter directly. Do not choose extract_pdf_text + create_word_document for a format-preservation request merely because text extraction is easier or exact markup anchors are inconvenient; that path loses the source layout. Use OCR/text reconstruction only as a controlled fallback when Word's configured conversion path cannot provide a usable editable source, and do not claim exact format preservation after such a fallback. ")
                 End If
                 sb.Append("If a creator genuinely remains necessary while the user-supplied source is the intended visual/format authority, set use_repository_default_design=false unless the user explicitly requested a particular repository design. Do not silently mix an implicit repository default with a user-supplied format carrier. ")
             End If
@@ -429,7 +429,7 @@ Namespace Agents
             sb.Append("Do not perform the substantive task. Do not use external knowledge. Treat <LATEST_USER_REQUEST_RAW> as authoritative. ")
             sb.Append("Return EXACTLY one raw JSON object and nothing else, with exactly these fields: ")
             sb.Append("{""language"":""de-CH"",""memoryGroundingMode"":""none"",""memoryReason"":""short reason"",""shouldExposeRecentMemoryStubs"":false,""explicitStoredMemoryRequired"":false,""routeKind"":""none"",""routeName"":"""",""routeReason"":""short reason"",""bootstrapLoad"":"""",""sourceFormatAuthority"":false,""sourceFormatReason"":""short reason""}. ")
-            sb.Append("LANGUAGE: identify the language in which the assistant should answer the latest request; prefer a BCP-47 tag when clear. ")
+            sb.Append("LANGUAGE: determine the response language from the latest user's request, including any explicit request to answer in another language. When clear, return a BCP-47 language tag (e.g. de-CH, fr, en); when unclear or indeterminate, return an empty language string. Never infer the language from tool results or the host UI language. ")
             sb.Append("MEMORY: memoryGroundingMode MUST be exactly one of none, optional, or required. Use required ONLY when the latest request explicitly requires stored Memory, remembered stored content, prior saved results, or previous saved workflow outputs. If stored Memory may help but is not explicitly demanded, use optional. New self-contained tasks normally use none. Set explicitStoredMemoryRequired=true only for an explicit demand. Base this decision on semantic meaning, not language-specific keywords. ")
             sb.Append("ROUTING: routeKind MUST be exactly one of skill, agent, or none. A specifically applicable workflow skill has semantic precedence. Choose a skill only when its description clearly matches the workflow/task type, not merely the topic. Only if no skill specifically applies may you select a top-level agent whose description fits the whole task. Do not select bounded worker/helper agents for broader tasks. Otherwise choose none. ")
             sb.Append("BOOTSTRAP LOAD: when routeKind is skill or agent, bootstrapLoad MUST equal routeName exactly. When routeKind is none, bootstrapLoad MUST be empty. Do not propose ordinary tools here; they remain available through normal lazy loading after bootstrap. ")
@@ -479,7 +479,7 @@ Namespace Agents
                 Dim languageToken As JToken = obj("language")
                 If languageToken IsNot Nothing AndAlso languageToken.Type = JTokenType.String Then
                     result.Language = languageToken.Value(Of String)().Trim()
-                    result.LanguageValid = result.Language <> ""
+                    result.LanguageValid = IsClearResponseLanguage(result.Language)
                 End If
 
                 Dim memoryObj As New JObject From {
@@ -533,6 +533,25 @@ Namespace Agents
                 result.ParseError = ex.Message
                 Return result
             End Try
+        End Function
+
+        ''' <summary>
+        ''' Accept only a concrete BCP-47-style language tag as a clear detection.
+        ''' Unspecified/multilingual placeholders must fall back to the configured
+        ''' interface language instead of becoming a response-language contract.
+        ''' </summary>
+        Private Shared Function IsClearResponseLanguage(language As String) As Boolean
+            Dim tag As String = If(language, "").Trim()
+            If tag = "" Then Return False
+
+            Select Case tag.ToLowerInvariant()
+                Case "und", "mul", "zxx", "unknown", "unclear", "mixed", "auto", "none", "null", "n/a"
+                    Return False
+            End Select
+
+            Return System.Text.RegularExpressions.Regex.IsMatch(
+                tag,
+                "^[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8})*$")
         End Function
 
         Private Shared Function NormalizeJsonObject(raw As String) As String

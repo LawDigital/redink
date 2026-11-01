@@ -32,6 +32,10 @@
 '   - `HtmlAgilityPack` (HTML parsing and XPath)
 '   - `Markdig` (Markdown-to-HTML for `send_email_report`)
 '   - `SharedLibrary.SharedMethods` (LLM call + UI helpers + defaults)
+'
+' KEY ARCHITECTURE
+'   • Surface: WebAgentInterpreter (VB implementation).
+'   • Entry points/helpers: _FormatVarValue, GetDebugFlag, InitDebugLogIfNeeded.
 ' =============================================================================
 
 Option Strict On

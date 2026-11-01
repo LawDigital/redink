@@ -402,6 +402,18 @@ Namespace My
         <Global.System.Configuration.UserScopedSettingAttribute(),  _
          Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
          Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property AP_AvailableExternalToolNames() As String
+            Get
+                Return CType(Me("AP_AvailableExternalToolNames"),String)
+            End Get
+            Set
+                Me("AP_AvailableExternalToolNames") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
         Public Property InboxBoardSummaryCache() As String
             Get
                 Return CType(Me("InboxBoardSummaryCache"),String)
@@ -635,6 +647,18 @@ Namespace My
             End Get
             Set
                 Me("AP_EnableVoicemailProcessing") = value
+            End Set
+        End Property
+
+        <Global.System.Configuration.UserScopedSettingAttribute(), _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(), _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")> _
+        Public Property AP_EnableScanProcessing() As System.Boolean
+            Get
+                Return CType(Me("AP_EnableScanProcessing"), System.Boolean)
+            End Get
+            Set
+                Me("AP_EnableScanProcessing") = value
             End Set
         End Property
         
@@ -1082,6 +1106,90 @@ Namespace My
             End Set
         End Property
         
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property AP_LogDiagnosticsReportEmail() As String
+            Get
+                Return CType(Me("AP_LogDiagnosticsReportEmail"),String)
+            End Get
+            Set
+                Me("AP_LogDiagnosticsReportEmail") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("1")>  _
+        Public Property AP_LogDiagnosticsReportIntervalDays() As Global.System.Int32
+            Get
+                Return CType(Me("AP_LogDiagnosticsReportIntervalDays"), Global.System.Int32)
+            End Get
+            Set
+                Me("AP_LogDiagnosticsReportIntervalDays") = value
+            End Set
+        End Property
+
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property AP_LogDiagnosticsMaxInputChars() As Global.System.Int32
+            Get
+                Return CType(Me("AP_LogDiagnosticsMaxInputChars"), Global.System.Int32)
+            End Get
+            Set
+                Me("AP_LogDiagnosticsMaxInputChars") = value
+            End Set
+        End Property
+
+        <Global.System.Configuration.UserScopedSettingAttribute(), _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(), _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")> _
+        Public Property AP_PromptCoachingEnabled() As Global.System.Boolean
+            Get
+                Return CType(Me("AP_PromptCoachingEnabled"), Global.System.Boolean)
+            End Get
+            Set
+                Me("AP_PromptCoachingEnabled") = value
+            End Set
+        End Property
+
+        <Global.System.Configuration.UserScopedSettingAttribute(), _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(), _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")> _
+        Public Property AP_PromptCoachingDefaultForAllUsers() As Global.System.Boolean
+            Get
+                Return CType(Me("AP_PromptCoachingDefaultForAllUsers"), Global.System.Boolean)
+            End Get
+            Set
+                Me("AP_PromptCoachingDefaultForAllUsers") = value
+            End Set
+        End Property
+
+        <Global.System.Configuration.UserScopedSettingAttribute(), _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(), _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")> _
+        Public Property AP_PromptCoachingImmediateDelivery() As Global.System.Boolean
+            Get
+                Return CType(Me("AP_PromptCoachingImmediateDelivery"), Global.System.Boolean)
+            End Get
+            Set
+                Me("AP_PromptCoachingImmediateDelivery") = value
+            End Set
+        End Property
+
+        <Global.System.Configuration.UserScopedSettingAttribute(), _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(), _
+         Global.System.Configuration.DefaultSettingValueAttribute("")> _
+        Public Property AP_PromptCoachingIncludedUsers() As Global.System.String
+            Get
+                Return CType(Me("AP_PromptCoachingIncludedUsers"), Global.System.String)
+            End Get
+            Set
+                Me("AP_PromptCoachingIncludedUsers") = value
+            End Set
+        End Property
+
         <Global.System.Configuration.UserScopedSettingAttribute(),  _
          Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
          Global.System.Configuration.DefaultSettingValueAttribute("")>  _

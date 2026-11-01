@@ -7,6 +7,11 @@
 '          from email body text or document attachments using Google Cloud TTS
 '          or OpenAI TTS. Supports multi-speaker podcast dialogues (via LLM
 '          script generation) and single/alternating-voice audiobook narration.
+'
+' KEY ARCHITECTURE
+'   • Surface: ThisAddIn (host partial/UI).
+'   • Entry points/helpers: AB_NormalizeLanguageForStandardAudio,
+'     AB_BuildStandardLanguageInstruction, AB_NormalizeSpeakerGender.
 ' =============================================================================
 
 Option Explicit On

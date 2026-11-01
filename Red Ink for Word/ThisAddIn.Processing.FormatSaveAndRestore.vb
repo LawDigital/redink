@@ -479,6 +479,57 @@ Partial Public Class ThisAddIn
         Return output.ToString()
     End Function
 
+    ''' <summary>Serializes protected elements and ordinary text using one physical revision map.</summary>
+    Private Shared Function BuildRevisionAwareInlineText(rng As Microsoft.Office.Interop.Word.Range,
+                                                         characters As System.Collections.Generic.List(Of SurgicalLiveCharAtom),
+                                                         placeholders As System.Collections.Generic.List(Of PlaceholderInfo)) As System.String
+        If characters Is Nothing Then Throw New System.ArgumentNullException(NameOf(characters))
+        Dim fullText As System.String = System.String.Concat(characters.Select(Function(item As SurgicalLiveCharAtom) item.Text))
+        Dim previousStart As System.Int32 = rng.Start
+        For Each item As SurgicalLiveCharAtom In characters
+            If item.Text Is Nothing OrElse item.Text.Length <> 1 OrElse item.LiveStart < previousStart OrElse
+               item.LiveStart < rng.Start OrElse item.LiveEnd > rng.End OrElse item.LiveEnd <= item.LiveStart Then
+                Throw New System.IO.InvalidDataException("The revision-aware source map contains an invalid physical position; extraction stopped.")
+            End If
+            previousStart = item.LiveStart
+        Next
+        Dim staged As New System.Collections.Generic.List(Of PlaceholderInfo)()
+        For Each placeholder As PlaceholderInfo In placeholders
+            Dim mapped As PlaceholderInfo = placeholder
+            If placeholder.Length = 0 Then
+                ' Paragraph/list markers originate in physical Word positions.
+                Dim position As System.Int32 = rng.Start + placeholder.Offset
+                mapped = New PlaceholderInfo With {.Offset = characters.FindIndex(Function(item As SurgicalLiveCharAtom) item.LiveStart >= position), .Length = 0, .Token = placeholder.Token}
+                If mapped.Offset < 0 Then mapped.Offset = fullText.Length
+            End If
+            staged.Add(mapped)
+        Next
+        staged.Sort(PlaceholderComparer)
+        Dim output As New System.Text.StringBuilder(fullText.Length + staged.Count * 16)
+        Dim last As System.Int32 = 0
+        Dim appendVisible As System.Action(Of System.Int32, System.Int32) =
+            Sub(first As System.Int32, ending As System.Int32)
+                For index As System.Int32 = first To ending - 1
+                    If Not characters(index).IsTrackedDeletion Then output.Append(characters(index).Text)
+                Next
+            End Sub
+        For Each placeholder As PlaceholderInfo In staged
+            If placeholder.Offset < last Then Continue For
+            If placeholder.Offset < 0 OrElse placeholder.Offset + placeholder.Length > characters.Count Then
+                Throw New System.IO.InvalidDataException("A serialized placeholder lies outside the source map.")
+            End If
+            appendVisible(last, placeholder.Offset)
+            Dim visible As System.Boolean = placeholder.Length = 0
+            For index As System.Int32 = placeholder.Offset To placeholder.Offset + placeholder.Length - 1
+                If Not characters(index).IsTrackedDeletion Then visible = True
+            Next
+            If visible Then output.Append(placeholder.Token)
+            last = placeholder.Offset + placeholder.Length
+        Next
+        appendVisible(last, characters.Count)
+        Return output.ToString()
+    End Function
+
     ''' <summary>
     ''' Extracts text from a Word range, replaces special elements with inline placeholders,
     ''' and optionally converts formatting to Markdown-compatible markers.
@@ -524,36 +575,20 @@ Partial Public Class ThisAddIn
                     Return scope.CancelRequested OrElse ProgressBarModule.CancelOperation
                 End Function
 
-            ' Local helper for early-exit assembly (cancel path).
+            ' Capture once after Markdown preparation; scanning and rendering must share
+            ' the exact same stream, even when bulk Range.Text differs from position reads.
+            Dim sourceCharacters As System.Collections.Generic.List(Of SurgicalLiveCharAtom) = Nothing
             Dim BuildPartial As Func(Of Word.Range, List(Of PlaceholderInfo), String) =
                 Function(r As Word.Range, phs As List(Of PlaceholderInfo)) As String
-                    Dim ft As String = r.Text
-                    Dim sorted As New List(Of PlaceholderInfo)(phs)
-                    sorted.Sort(PlaceholderComparer)
-                    Dim sb As New System.Text.StringBuilder(ft.Length + sorted.Count * 16)
-                    Dim lp As Integer = 0
-                    For Each ph In sorted
-                        ' Skip placeholders nested inside an already-emitted outer span.
-                        ' Zero-length markers are allowed to sit exactly at lp.
-                        If ph.Length > 0 AndAlso ph.Offset < lp Then Continue For
-                        If ph.Length = 0 AndAlso ph.Offset < lp Then Continue For
-                        If ph.Offset > lp Then sb.Append(ft.Substring(lp, ph.Offset - lp))
-                        sb.Append(ph.Token)
-                        Dim newLp As Integer = ph.Offset + ph.Length
-                        If newLp > lp Then lp = newLp
-                    Next
-                    If lp < ft.Length Then sb.Append(ft.Substring(lp))
-                    Return sb.ToString()
+                    Return BuildRevisionAwareInlineText(r, sourceCharacters, phs)
                 End Function
 
+            Dim extractionStage As System.String = "range preparation"
             Try
                 '──────────── 0)  Preparation (range clone, settings) ───────────────
-                Dim rng As Word.Range = workingrange.Duplicate
-                Dim expandedEnd As Boolean = False
-                If rng.End < rng.Document.Content.End - 1 Then
-                    rng.End = rng.End + 1
-                    expandedEnd = True
-                End If
+                ' The supplied end is exclusive. Never borrow a source character from
+                ' outside the selection; marker insertions extend the range explicitly.
+                Dim rng As Microsoft.Office.Interop.Word.Range = workingrange.Duplicate
 
                 ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:="Prepping selection …")
                 If Cancelled() Then Return rng.Text
@@ -563,7 +598,16 @@ Partial Public Class ThisAddIn
 
                 Dim origSel As Word.Range = app.Selection.Range.Duplicate
 
+                ' Native field codes are instructions, not prose. Capture before any
+                ' formatting pass; retain the field objects so their live positions move.
+                extractionStage = "original field-code capture"
+                Dim originalFieldCodes As New System.Collections.Generic.Dictionary(Of Microsoft.Office.Interop.Word.Field, System.String)()
+                For Each sourceField As Microsoft.Office.Interop.Word.Field In rng.Fields
+                    originalFieldCodes.Add(sourceField, sourceField.Code.Text)
+                Next
+
                 If DoMarkdown Then
+                    extractionStage = "Markdown formatting"
                     ' 1) Bold + Italic  (paragraph)
                     ReplaceWithinRange(rng,
                             Sub(f)
@@ -696,18 +740,17 @@ Partial Public Class ThisAddIn
                     ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:="Markdown: strike (inline) …")
                     If Cancelled() Then Return rng.Text
 
-                    ReplaceWithinRange_Highlight(Application.Selection.Range, keepParagraphBreakOutside:=True, includeColorInTag:=True)
+                    extractionStage = "highlight formatting"
+                    ReplaceWithinRange_Highlight(rng, keepParagraphBreakOutside:=True, includeColorInTag:=True)
                     ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:="Markdown: highlight (para-like) …")
                     If Cancelled() Then Return rng.Text
 
-                    ReplaceWithinRange_Highlight(Application.Selection.Range, includeColorInTag:=True)
+                    ReplaceWithinRange_Highlight(rng, includeColorInTag:=True)
                     ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:="Markdown: highlight (inline) …")
                     If Cancelled() Then Return rng.Text
                 End If
 
-                If expandedEnd Then
-                    rng.End = rng.End - 1
-                End If
+                extractionStage = "selection and protected-element mapping"
                 rng.Select()
 
                 '──────────── Prepare placeholders ────────────────────────────
@@ -722,41 +765,30 @@ Partial Public Class ThisAddIn
 
                 Dim placeholders As New List(Of PlaceholderInfo)
 
-                '──────────── Read text once; everything below uses STRING indices ─────────
-                ' Critical: positions returned by Word (fld.Code.Start, fn.Reference.Start)
-                ' are absolute document positions and frequently disagree with indices into
-                ' rng.Text after the Markdown phase has inserted characters.  We therefore
-                ' scan rng.Text itself for field markers (Chr(19)/Chr(20)/Chr(21)) and note
-                ' references (Chr(2)) and pair them with Word objects in document order.
-                Dim fullText As String = rng.Text
+                ' One mapped snapshot owns both the string indices and physical positions.
+                ' A second bulk Range.Text read is not an independent correctness oracle:
+                ' Word may serialize revisions/fields differently from per-position reads.
+                sourceCharacters = BuildSurgicalLiveCharAtoms(rng)
+                Dim fullText As System.String = System.String.Concat(sourceCharacters.Select(Function(item As SurgicalLiveCharAtom) item.Text))
 
                 If (DoMarkdown OrElse IncludeMarkdownListPrefixes) AndAlso Not PreserveParagraphFormatInline Then
                     AddMarkdownListPrefixPlaceholders(rng, placeholders)
                 End If
 
-                ' Snapshot notes in document order (their Chr(2) refs appear in fullText
-                ' in the same order as Reference.Start ascending).
-                Dim noteQueue As New Queue(Of Tuple(Of String, String))()
-                Dim mergedNotes As New List(Of Tuple(Of Integer, String, String))()
+                ' Match reference objects by their physical Word positions, not by ordinal
+                ' order: an omitted/deleted reference must not shift later note identities.
+                Dim notesByPosition As New System.Collections.Generic.Dictionary(Of System.Int32, System.Tuple(Of System.String, System.String))()
                 For Each fn As Word.Footnote In rng.Footnotes
-                    mergedNotes.Add(Tuple.Create(CInt(fn.Reference.Start), "WFNT", fn.Range.Text))
+                    notesByPosition.Add(fn.Reference.Start, System.Tuple.Create("WFNT", fn.Range.Text))
                 Next
                 For Each en As Word.Endnote In rng.Endnotes
-                    mergedNotes.Add(Tuple.Create(CInt(en.Reference.Start), "WENT", en.Range.Text))
-                Next
-                mergedNotes.Sort(Function(a, b) a.Item1.CompareTo(b.Item1))
-                For Each m In mergedNotes
-                    noteQueue.Enqueue(Tuple.Create(m.Item2, m.Item3))
+                    notesByPosition.Add(en.Reference.Start, System.Tuple.Create("WENT", en.Range.Text))
                 Next
 
-                ' Snapshot top-level fields in document order. We use Word.Field.Code/Result
-                ' for content (code text, type, display text) and the string scan for
-                ' positions only — avoids any reliance on TextRetrievalMode behaving
-                ' uniformly across field types and Word versions.
+                ' Use native positions to associate top-level fields with the mapped
+                ' marker stream; nested fields remain represented by their outer field.
                 Dim allFields As New List(Of Word.Field)()
-                For Each fld As Word.Field In rng.Fields
-                    allFields.Add(fld)
-                Next
+                allFields.AddRange(originalFieldCodes.Keys)
                 Dim topLevelFields As New List(Of Word.Field)()
                 For Each fld As Word.Field In allFields
                     Dim isNested As Boolean = False
@@ -769,10 +801,12 @@ Partial Public Class ThisAddIn
                     Next
                     If Not isNested Then topLevelFields.Add(fld)
                 Next
-                topLevelFields.Sort(Function(a, b) a.Code.Start.CompareTo(b.Code.Start))
-                Dim topFieldIdx As Integer = 0
+                Dim fieldsByPosition As New System.Collections.Generic.Dictionary(Of System.Int32, Word.Field)()
+                For Each fld As Word.Field In topLevelFields
+                    fieldsByPosition.Add(fld.Code.Start - 1, fld)
+                Next
 
-                ' Scan rng.Text for field begin/end and note references.
+                ' Scan the same mapped stream that the serializer will consume.
                 Dim fieldStack As New Stack(Of Integer)
                 Dim processedFields As Integer = 0
                 Dim processedNotes As Integer = 0
@@ -790,24 +824,14 @@ Partial Public Class ThisAddIn
                             Dim startIdx As Integer = fieldStack.Pop()
                             If fieldStack.Count <> 0 Then Continue For ' nested – outer represents it
 
-                            ' Pair this top-level closure with the next top-level Word.Field
-                            ' in document order. Both are deterministically ordered, so an
-                            ' ordinal pairing is robust to position drift.
                             Dim fld As Word.Field = Nothing
-                            If topFieldIdx < topLevelFields.Count Then
-                                fld = topLevelFields(topFieldIdx)
-                                topFieldIdx += 1
+                            If Not fieldsByPosition.TryGetValue(sourceCharacters(startIdx).LiveStart, fld) Then
+                                Throw New System.IO.InvalidDataException("Cannot associate a field marker with its physical source position; extraction stopped.")
                             End If
 
-                            Dim codeText As String = String.Empty
-                            If fld IsNot Nothing Then
-                                Try
-                                    Dim raw As String = fld.Code.Text
-                                    If raw IsNot Nothing Then codeText = raw.Trim()
-                                Catch
-                                    codeText = String.Empty
-                                End Try
-                            End If
+                            ' Only the pre-formatting snapshot may supply native instructions.
+                            ' Encode and checksum it across model/Markdown/HTML transport.
+                            Dim codeText As System.String = EncodeProtectedWordFieldCode(originalFieldCodes(fld))
 
                             Dim token As String
                             If fld IsNot Nothing AndAlso fld.Type = Word.WdFieldType.wdFieldHyperlink Then
@@ -830,8 +854,8 @@ Partial Public Class ThisAddIn
                                                  label:=$"Fields … {processedFields}/{fieldsCount}")
 
                         Case 2 ' footnote/endnote reference
-                            If noteQueue.Count = 0 Then Continue For
-                            Dim n = noteQueue.Dequeue()
+                            Dim n As System.Tuple(Of System.String, System.String) = Nothing
+                            If Not notesByPosition.TryGetValue(sourceCharacters(i).LiveStart, n) Then Continue For
                             placeholders.Add(New PlaceholderInfo With {
                                 .Offset = i,
                                 .Length = 1,
@@ -851,6 +875,7 @@ Partial Public Class ThisAddIn
                 If Cancelled() Then Return BuildPartial(rng, placeholders)
 
                 '──────────── Paragraph placeholders (cached COM accessors) (#4)
+                extractionStage = "paragraph format capture"
                 If PreserveParagraphFormatInline AndAlso rng.Paragraphs.Count > 0 Then
                     Dim paraCountLocal As Integer = rng.Paragraphs.Count
                     ReDim paragraphFormat(paraCountLocal - 1)
@@ -913,50 +938,19 @@ Partial Public Class ThisAddIn
                 ProgressScope.Report(current, max:=newMax, label:="Building result …")
 
                 ' ───── Insert placeholders ────────────────────────────────                
-                Dim sbInline As New System.Text.StringBuilder(fullText.Length + placeholders.Count * 16)
-                Dim lastPos As Integer = 0
-                Dim idx As Integer = 0
-
-                For Each ph As PlaceholderInfo In placeholders
-                    idx += 1
-                    ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:=$"Building … {idx}/{placeholders.Count}")
-
-                    ' (#9) Skip placeholders nested inside a previously emitted outer span.
-                    ' This covers cases like a footnote reference sitting inside a field
-                    ' (e.g. inside a HYPERLINK or REF field result), which would otherwise
-                    ' corrupt the output by duplicating text and dropping lastPos backwards.
-                    If ph.Offset < lastPos Then
-                        If Cancelled() Then
-                            If lastPos < fullText.Length Then sbInline.Append(fullText.Substring(lastPos))
-                            Return sbInline.ToString()
-                        End If
-                        Continue For
-                    End If
-
-                    If ph.Offset > lastPos Then
-                        sbInline.Append(fullText.Substring(lastPos, ph.Offset - lastPos))
-                    End If
-                    sbInline.Append(ph.Token)
-
-                    Dim newLastPos As Integer = ph.Offset + ph.Length
-                    If newLastPos > lastPos Then lastPos = newLastPos
-
-                    If Cancelled() Then
-                        If lastPos < fullText.Length Then sbInline.Append(fullText.Substring(lastPos))
-                        Return sbInline.ToString()
-                    End If
-                Next
-
-                If lastPos < fullText.Length Then
-                    sbInline.Append(fullText.Substring(lastPos))
-                End If
-
+                extractionStage = "protected-element serialization"
+                Dim inlineText As System.String = BuildRevisionAwareInlineText(rng, sourceCharacters, placeholders)
                 ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:="Done")
-                Return sbInline.ToString()
+                Return inlineText
 
+            Catch ex As System.IO.InvalidDataException
+                Throw
             Catch ex As System.Exception
-                Debug.WriteLine("Error in GetTextWithSpecialElementsInline: " & ex.Message)
-                Return workingrange.Text
+                System.Diagnostics.Trace.TraceError(
+                    "Error in GetTextWithSpecialElementsInline (" & extractionStage & "): " & ex.ToString())
+                Throw New System.IO.InvalidDataException(
+                    "Could not safely serialize the selected text and its protected elements; extraction stopped. Stage: " &
+                    extractionStage & ". Cause: " & ex.Message, ex)
             Finally
                 app.Options.CheckSpellingAsYouType = oldSpell
                 app.Options.CheckGrammarAsYouType = oldGrammar
@@ -967,8 +961,32 @@ Partial Public Class ThisAddIn
     End Function
 
     ''' <summary>
-    ''' Generic helper that finds formatted fragments inside a range and wraps them with the provided markers.
+    ''' Restricts a native formatting-search candidate to the still-admitted selection.
     ''' </summary>
+    Private Shared Function TryRestrictFormattingMatch(
+        ByVal matchRange As Microsoft.Office.Interop.Word.Range,
+        ByVal allowedStart As System.Int32,
+        ByVal allowedEnd As System.Int32) As System.Boolean
+
+        If matchRange Is Nothing OrElse allowedEnd <= allowedStart Then Return False
+        Dim matchStart As System.Int32 = matchRange.Start
+        Dim matchEnd As System.Int32 = matchRange.End
+        Dim boundedStart As System.Int32 = System.Math.Max(allowedStart, matchStart)
+        Dim boundedEnd As System.Int32 = System.Math.Min(allowedEnd, matchEnd)
+        If boundedEnd <= boundedStart Then
+            System.Diagnostics.Trace.TraceWarning(
+                $"Word formatting Find returned no selected content: match=[{matchStart},{matchEnd}), allowed=[{allowedStart},{allowedEnd}).")
+            Return False
+        End If
+        If boundedStart <> matchStart OrElse boundedEnd <> matchEnd Then
+            System.Diagnostics.Trace.TraceWarning(
+                $"Word formatting Find restricted to selected content: match=[{matchStart},{matchEnd}), admitted=[{boundedStart},{boundedEnd}).")
+            matchRange.SetRange(Start:=boundedStart, [End]:=boundedEnd)
+        End If
+        Return True
+    End Function
+
+    ''' <summary>Wraps selected formatted fragments with the provided markers.</summary>
     Private Sub ReplaceWithinRange(
     ByVal rng As Microsoft.Office.Interop.Word.Range,
     ByVal configureFind As System.Action(Of Microsoft.Office.Interop.Word.Find),
@@ -1024,17 +1042,23 @@ Partial Public Class ThisAddIn
 
             Dim foundStart As System.Int32 = searchRange.Start
             Dim foundEnd As System.Int32 = searchRange.End
-            Dim foundText As System.String = If(searchRange.Text, System.String.Empty)
-
             If foundEnd <= foundStart Then
                 currentPosition = System.Math.Min(System.Math.Max(foundStart, currentPosition) + 1, allowedEnd)
                 GoTo ContinueLoop
             End If
 
+            ' Find redefines its range. A returned formatting run is only a candidate:
+            ' admit its intersection before reading text or changing any font/content.
+            If Not TryRestrictFormattingMatch(searchRange, currentPosition, allowedEnd) Then Exit Do
+            foundStart = searchRange.Start
+            foundEnd = searchRange.End
+            Dim foundText As System.String = If(searchRange.Text, System.String.Empty)
+
             Dim endsWithCellMark As System.Boolean = foundText.EndsWith(vbCr & ChrW(7), System.StringComparison.Ordinal)
             Dim isCellMarkOnly As System.Boolean = (foundText = ChrW(7))
             Dim isCrOrCellBoundary As System.Boolean = (foundText = vbCr) OrElse (foundText = vbCr & ChrW(7)) OrElse isCellMarkOnly
 
+            Dim insertedMarkerChars As System.Int32 = 0
             If isWildcard Then
                 Dim rep As System.String = replacementText
                 Dim parts = rep.Replace("^13", System.String.Empty).Split(New System.String() {"\1"}, 2, System.StringSplitOptions.None)
@@ -1063,8 +1087,6 @@ Partial Public Class ThisAddIn
                 Dim groupEnd As System.Int32 = foundStart + coreLen
 
                 Dim endsWithParaCr As System.Boolean = (trailingTrim > 0)
-                Dim projectedEnd As System.Int32 = foundEnd + prefixLen + suffixLen
-                If projectedEnd > allowedEnd Then Exit Do
 
                 If tweakReplacement IsNot Nothing AndAlso groupEnd > foundStart Then
                     Dim contentRange As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=foundStart, [End]:=groupEnd)
@@ -1072,17 +1094,20 @@ Partial Public Class ThisAddIn
                 End If
                 If tweakReplacement IsNot Nothing AndAlso endsWithParaCr Then
                     Dim trailingLen As System.Int32 = If(endsWithCellMark, 2, 1)
-                    Dim paraRange As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=groupEnd, [End]:=groupEnd + trailingLen)
+                    Dim paraRange As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=foundEnd - trailingLen, [End]:=foundEnd)
                     tweakReplacement(paraRange.Font)
                 End If
 
                 If prefixLen > 0 AndAlso groupEnd >= foundStart Then
                     Dim groupRange As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=foundStart, [End]:=groupEnd)
                     groupRange.InsertBefore(prefix)
+                    insertedMarkerChars += prefixLen
                 End If
                 If suffixLen > 0 AndAlso groupEnd >= foundStart Then
-                    Dim groupRange As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=foundStart, [End]:=groupEnd)
+                    ' InsertBefore moved the original content end by prefixLen.
+                    Dim groupRange As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=foundStart, [End]:=groupEnd + prefixLen)
                     groupRange.InsertAfter(suffix)
+                    insertedMarkerChars += suffixLen
                 End If
 
                 If tweakReplacement IsNot Nothing Then
@@ -1142,8 +1167,6 @@ Partial Public Class ThisAddIn
                     GoTo ContinueLoop
                 End If
 
-                Dim projectedEnd As System.Int32 = foundEnd + prefixLen + suffixLen
-                If projectedEnd > allowedEnd Then Exit Do
 
                 If tweakReplacement IsNot Nothing Then
                     Dim contentRangeUF As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=contentStart, [End]:=contentEnd)
@@ -1153,6 +1176,7 @@ Partial Public Class ThisAddIn
                 If prefixLen > 0 Then
                     Dim openTokPos As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=contentStart, [End]:=contentStart)
                     openTokPos.InsertBefore(prefix)
+                    insertedMarkerChars += prefixLen
                     contentStart += prefixLen
                     contentEnd += prefixLen
                 End If
@@ -1160,6 +1184,7 @@ Partial Public Class ThisAddIn
                 If suffixLen > 0 Then
                     Dim closeTokPos As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=contentEnd, [End]:=contentEnd)
                     closeTokPos.InsertAfter(suffix)
+                    insertedMarkerChars += suffixLen
                 End If
 
                 If tweakReplacement IsNot Nothing Then
@@ -1176,7 +1201,11 @@ Partial Public Class ThisAddIn
                 currentPosition = foundEnd + prefixLen + suffixLen
             End If
 
-            allowedEnd = rng.End
+            ' Count only markers actually inserted inside the admitted source span.
+            ' Insertion through a separate range at the exact end must not depend on
+            ' whether Word automatically includes that insertion in this range.
+            allowedEnd += insertedMarkerChars
+            rng.SetRange(Start:=originalStart, [End]:=allowedEnd)
 
 ContinueLoop:
             If currentPosition <= prevPosition Then
@@ -2182,6 +2211,7 @@ ContinueLoop:
                 found = searchRng.Duplicate
             End If
 
+            If Not TryRestrictFormattingMatch(found, currentPos, currentDocEnd) Then Exit While
             Dim foundStart As Integer = found.Start
             Dim foundEnd As Integer = found.End
 
@@ -2338,7 +2368,8 @@ ContinueLoop:
             If EndOfDocument Then workingrange.End = doc.Content.End
 
         Catch ex As System.Exception
-            ' Error is handled by the caller's custom-dialog path.
+            System.Diagnostics.Trace.TraceError("RestoreSpecialTextElements failed: " & ex.ToString())
+            Throw
         End Try
 
     End Sub
@@ -2378,6 +2409,12 @@ ContinueLoop:
                 placeholderText.Substring(
                     placeholderPrefix.Length + 2,
                     placeholderText.Length - (placeholderPrefix.Length + 4))
+
+                ' Validate the opaque field payload before deleting its placeholder.
+                If placeholderPrefix = "WFLD:" Then
+                    Dim fieldParts As System.String() = noteText.Split(New System.String() {"|||"}, 2, System.StringSplitOptions.None)
+                    DecodeProtectedWordFieldCode(fieldParts(0).Trim())
+                End If
 
                 workingrange.Text = ""
 
@@ -2427,6 +2464,39 @@ ContinueLoop:
         doc.Endnotes.Add(Range:=insertionRange, Text:=noteText)
     End Sub
 
+    Private Const ProtectedWordFieldCodePrefix As System.String = "RI64V1:"
+
+    ''' <summary>Preserves native instructions as a checked, opaque transport payload.</summary>
+    Private Shared Function EncodeProtectedWordFieldCode(ByVal code As System.String) As System.String
+        If code Is Nothing Then Throw New System.IO.InvalidDataException("A native field code could not be read.")
+        Dim encoding As New System.Text.UTF8Encoding(False, True)
+        Dim bytes As System.Byte() = encoding.GetBytes(code)
+        Using hash As System.Security.Cryptography.SHA256 = System.Security.Cryptography.SHA256.Create()
+            Dim digest As System.String = System.BitConverter.ToString(hash.ComputeHash(bytes)).Replace("-", System.String.Empty)
+            Return ProtectedWordFieldCodePrefix & System.Convert.ToBase64String(bytes) & ":" & digest
+        End Using
+    End Function
+
+    ''' <summary>Checks encoded codes before insertion; existing literal placeholders remain supported.</summary>
+    Private Shared Function DecodeProtectedWordFieldCode(ByVal payload As System.String) As System.String
+        If payload Is Nothing OrElse Not payload.StartsWith(ProtectedWordFieldCodePrefix, System.StringComparison.Ordinal) Then Return payload
+        Try
+            Dim parts As System.String() = payload.Substring(ProtectedWordFieldCodePrefix.Length).Split(":"c)
+            If parts.Length <> 2 Then Throw New System.FormatException("Invalid field-code envelope.")
+            Dim bytes As System.Byte() = System.Convert.FromBase64String(parts(0))
+            Using hash As System.Security.Cryptography.SHA256 = System.Security.Cryptography.SHA256.Create()
+                Dim digest As System.String = System.BitConverter.ToString(hash.ComputeHash(bytes)).Replace("-", System.String.Empty)
+                If Not System.String.Equals(digest, parts(1), System.StringComparison.Ordinal) Then
+                    Throw New System.FormatException("The field-code checksum does not match.")
+                End If
+            End Using
+            Dim encoding As New System.Text.UTF8Encoding(False, True)
+            Return encoding.GetString(bytes)
+        Catch ex As System.Exception
+            Throw New System.IO.InvalidDataException("A protected Word field code was altered; field restoration stopped.", ex)
+        End Try
+    End Function
+
     ''' <summary>
     ''' Inserts a Word field and restores its code plus optional display text.
     ''' </summary>
@@ -2448,6 +2518,8 @@ ContinueLoop:
                 displayText = parts(1)
             End Try
         End If
+
+        fieldCode = DecodeProtectedWordFieldCode(fieldCode)
 
         Try
             Dim fieldRange As Word.Range = insertionRange.Duplicate
@@ -2475,7 +2547,8 @@ ContinueLoop:
             End If
 
         Catch ex As System.Exception
-            Debug.WriteLine("AddField failed: " & ex.ToString())
+            System.Diagnostics.Trace.TraceError("AddField failed: " & ex.ToString())
+            Throw
         End Try
     End Sub
 

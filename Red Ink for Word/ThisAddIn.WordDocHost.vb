@@ -6,6 +6,10 @@
 ' Purpose: Services for agents to interact with Word documents: list, read, search, 
 '       insert, format, comment.
 '
+'
+' KEY ARCHITECTURE
+'   • Surface: ThisAddIn (host partial/UI).
+'   • Entry points/helpers: HasActiveDocument, ListOpenDocuments, GetActiveDocument.
 ' =============================================================================
 
 Option Strict Off
@@ -284,7 +288,7 @@ Partial Public Class ThisAddIn
         If rng Is Nothing Then Return False
         Try
             If trackChanges Then
-                ApplySurgicalReplacement(rng.Text, If(replacement, ""), rng)
+                Return ApplySurgicalReplacement(GetVisibleText(rng), If(replacement, ""), rng, showFailureNotice:=False)
             Else
                 Dim prevTrack As Boolean = d.TrackRevisions
                 Try

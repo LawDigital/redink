@@ -42,6 +42,7 @@ Namespace SharedLibrary
 
         ''' <summary>UI timer used to periodically poll <c>ProgressBarModule</c> and refresh the UI.</summary>
         Private WithEvents uiTimer As System.Windows.Forms.Timer
+        Private _ownedFont As System.Drawing.Font
 
         ''' <summary>
         ''' Initializes a new instance of the progress dialog.
@@ -49,12 +50,23 @@ Namespace SharedLibrary
         ''' <param name="headerText">Text displayed in the header label.</param>
         ''' <param name="initialLabel">Initial text displayed in the status label.</param>
         Public Sub New(headerText As String, initialLabel As String)
+            MyBase.New()
+            Try
+                InitializeView(headerText, initialLabel)
+            Catch
+                Me.Dispose()
+                Throw
+            End Try
+        End Sub
+
+        Private Sub InitializeView(headerText As String, initialLabel As String)
             ' --- Use Font scaling ---
-            Dim standardFont As New System.Drawing.Font(
+            _ownedFont = New System.Drawing.Font(
     "Segoe UI",
     9.0F,
     System.Drawing.FontStyle.Regular,
     System.Drawing.GraphicsUnit.Point)
+            Dim standardFont As System.Drawing.Font = _ownedFont
 
             Me.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font
             Me.Font = standardFont
@@ -69,8 +81,7 @@ Namespace SharedLibrary
             Me.Text = SharedMethods.AN ' headerText
 
             ' --- Set icon ---
-            Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-            Me.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+            SharedMethods.ApplyStandardDialogIcon(Me)
 
             ' --- Header Label ---
             lblHeader = New System.Windows.Forms.Label() With {
@@ -81,7 +92,7 @@ Namespace SharedLibrary
             ' --- ProgressBar ---
             progressBar = New System.Windows.Forms.ProgressBar() With {
     .Minimum = 0,
-    .Maximum = ProgressBarModule.GlobalProgressMax,
+    .Maximum = System.Math.Max(0, ProgressBarModule.GlobalProgressMax),
     .Dock = System.Windows.Forms.DockStyle.Fill
 }
 
@@ -135,18 +146,19 @@ Namespace SharedLibrary
         ''' <param name="e">Event arguments.</param>
         Private Sub Timer_Tick(sender As Object, e As EventArgs)
             Try
+                If ProgressBarModule.CancelOperation Then
+                    Me.DialogResult = System.Windows.Forms.DialogResult.Cancel
+                    Me.Close()
+                    Return
+                End If
+
                 ' Update the progress bar maximum and value.
-                progressBar.Maximum = ProgressBarModule.GlobalProgressMax
-                progressBar.Value = Math.Min(ProgressBarModule.GlobalProgressValue, progressBar.Maximum)
+                progressBar.Maximum = System.Math.Max(0, ProgressBarModule.GlobalProgressMax)
+                progressBar.Value = System.Math.Max(progressBar.Minimum, System.Math.Min(ProgressBarModule.GlobalProgressValue, progressBar.Maximum))
 
                 ' Update the status text.
                 lblStatus.Text = ProgressBarModule.GlobalProgressLabel
 
-                ' If the cancel flag is set, close the form with a Cancel result.
-                If ProgressBarModule.CancelOperation Then
-                    Me.DialogResult = System.Windows.Forms.DialogResult.Cancel
-                    Me.Close()
-                End If
             Catch ex As System.Exception
                 ' Possible exception if the form is closing.
                 System.Diagnostics.Debug.WriteLine("Timer error: " & ex.Message)
@@ -183,8 +195,30 @@ Namespace SharedLibrary
             SharedMethods.AttachForeignForegroundWatchdog(Me)
         End Sub
 
+        Protected Overrides Sub Dispose(disposing As System.Boolean)
+            Try
+                If disposing AndAlso uiTimer IsNot Nothing Then
+                    uiTimer.Stop()
+                    RemoveHandler uiTimer.Tick, AddressOf Timer_Tick
+                    uiTimer.Dispose()
+                    uiTimer = Nothing
+                End If
+            Finally
+                Try
+                    MyBase.Dispose(disposing)
+                Finally
+                    If disposing Then
+                        If _ownedFont IsNot Nothing Then
+                            _ownedFont.Dispose()
+                            _ownedFont = Nothing
+                        End If
+                    End If
+                End Try
+            End Try
+        End Sub
+
         Protected Overrides Sub OnFormClosed(e As System.Windows.Forms.FormClosedEventArgs)
-            uiTimer.Stop()
+            If uiTimer IsNot Nothing Then uiTimer.Stop()
             ProgressBarModule.CancelOperation = True
             MyBase.OnFormClosed(e)
         End Sub

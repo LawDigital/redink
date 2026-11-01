@@ -1,4 +1,5 @@
-﻿' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+﻿' Part of "Red Ink for Word"
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
 ' File: ThisAddIn.CompleteTables.vb
@@ -400,16 +401,20 @@ Partial Public Class ThisAddIn
             Else
                 ShowCustomMessageBox("Table completion failed or was cancelled.", AN & " Complete Tables")
             End If
-        Catch ex As Exception
+        Catch ex As System.Exception When IsWordCommandCancellation(ex)
+            WriteTableCompletionDebug("Cancelled", "Cancelled by user.")
+        Catch ex As System.Exception
             WriteTableCompletionDebug("Unhandled exception", ex.ToString())
-            ShowCustomMessageBox($"Error: {ex.Message}", AN & " Complete Tables")
+            ReportWordCommandFailure("CompleteTables", ex,
+                "Inky could not complete the tables. Please check the document and try again.")
         Finally
             ProgressBarModule.CancelOperation = True
         End Try
     End Sub
 
     Public Async Function CompleteWordDocumentTables(Optional promptOverride As String = Nothing,
-                                                 Optional useSecondAPI As Boolean = False) As System.Threading.Tasks.Task
+                                                 Optional useSecondAPI As Boolean = False,
+                                                 Optional semanticArchivePrepared As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest = Nothing) As System.Threading.Tasks.Task
         Dim selectedPath As String = ""
 
         If INI_AllowLegacyDocFiles Then
@@ -498,14 +503,18 @@ Partial Public Class ThisAddIn
         Try
             StartTableCompletionDebugSession(selectedPath, outputPath, userInstructions)
 
-            Dim success As Boolean = Await ProcessTableCompletion(selectedPath, outputPath, userInstructions, useSecondAPI)
+            Dim retrievalContext As System.String = If(semanticArchivePrepared Is Nothing, System.String.Empty, semanticArchivePrepared.ContextText)
+            Dim success As Boolean = Await ProcessTableCompletion(selectedPath, outputPath, userInstructions, useSecondAPI, retrievalContext)
 
             If success Then
                 ShowCustomMessageBox($"Completed document saved as:{vbCrLf}{outputPath}", AN & " Complete Tables")
             End If
-        Catch ex As Exception
+        Catch ex As System.Exception When IsWordCommandCancellation(ex)
+            WriteTableCompletionDebug("Cancelled", "Cancelled by user.")
+        Catch ex As System.Exception
             WriteTableCompletionDebug("Unhandled exception", ex.ToString())
-            ShowCustomMessageBox($"Error: {ex.Message}", AN & " Complete Tables")
+            ReportWordCommandFailure("CompleteTables", ex,
+                "Inky could not complete the tables. Please check the document and try again.")
         Finally
             ProgressBarModule.CancelOperation = True
         End Try
@@ -514,7 +523,8 @@ Partial Public Class ThisAddIn
     Private Async Function ProcessTableCompletion(inputPath As String,
                                                   outputPath As String,
                                                   userInstructions As String,
-                                                  Optional useSecondAPI As Boolean = False) As Task(Of Boolean)
+                                                  Optional useSecondAPI As Boolean = False,
+                                                  Optional retrievalContext As System.String = Nothing) As System.Threading.Tasks.Task(Of System.Boolean)
         Dim tempDocxPath As String = Nothing
         Dim wordApp As Word.Application = Nothing
         Dim doc As Word.Document = Nothing
@@ -535,7 +545,7 @@ Partial Public Class ThisAddIn
 
             File.Copy(tempDocxPath, outputPath, overwrite:=True)
 
-            Dim success As Boolean = Await ProcessDocxTables(outputPath, userInstructions, useSecondAPI)
+            Dim success As Boolean = Await ProcessDocxTables(outputPath, userInstructions, useSecondAPI, retrievalContext)
             If Not success Then Return False
 
             Dim compareSourcePath As String = tempDocxPath
@@ -563,7 +573,8 @@ Partial Public Class ThisAddIn
 
     Private Async Function ProcessDocxTables(docxPath As String,
                                          userInstructions As String,
-                                         Optional useSecondAPI As Boolean = False) As Task(Of Boolean)
+                                         Optional useSecondAPI As Boolean = False,
+                                         Optional retrievalContext As System.String = Nothing) As System.Threading.Tasks.Task(Of System.Boolean)
 
         Dim tempDir As String = Path.Combine(Path.GetTempPath(), $"{AN2}_tbl_{Guid.NewGuid():N}")
 
@@ -587,6 +598,11 @@ Partial Public Class ThisAddIn
             nsMgr.AddNamespace("w14", W14Ns)
 
             Dim documentContext As String = ExtractDocumentBodyContext(xmlDoc, nsMgr)
+            ' Keep resolved evidence outside persisted/interpolated user instructions and the document text cap.
+            ' This context reaches consistency, table, coverage and body completion calls unchanged.
+            If Not System.String.IsNullOrWhiteSpace(retrievalContext) Then
+                documentContext &= System.Environment.NewLine & retrievalContext
+            End If
             Dim tables As List(Of TableInfo) = ExtractTablesFromXml(xmlDoc, nsMgr)
             Dim bodySections As List(Of BodySectionInfo) = ExtractBodySectionsFromXml(xmlDoc, nsMgr)
 

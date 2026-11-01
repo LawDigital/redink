@@ -68,9 +68,7 @@ Partial Public Class ThisAddIn
         ' Register host-internal tool names in the executor registry (idempotent).
         Agents.HostToolRegistration.RegisterWordInternals()
 
-        iniPath = ExpandEnvironmentVariables(iniPath)
-
-        If String.IsNullOrWhiteSpace(iniPath) OrElse Not File.Exists(iniPath) Then
+        If String.IsNullOrWhiteSpace(iniPath) OrElse Not ConfigurationResourceLoader.CanResolve(iniPath) Then
             Return tools
         End If
 
@@ -175,6 +173,7 @@ Partial Public Class ThisAddIn
         End If
 
         tools.AddRange(GetInternalKnowledgeTools())
+        tools.AddRange(Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.GetTools(_context))
 
         ' python_execute: secure sandboxed Python execution.
         ' Only advertised when INI_PythonAgentPath is set, the exe is available, and
@@ -203,7 +202,7 @@ Partial Public Class ThisAddIn
 
             tools.Add(SharedLibrary.Agents.SkillInvokeTool.Build())
             tools.Add(SharedLibrary.Agents.ToolDescribeTool.Build())
-            tools.Add(SharedLibrary.Agents.ContextExpandTool.Build())
+            tools.Add(SharedLibrary.Agents.ContextExpandTool.Build(_context))
             tools.Add(SharedLibrary.Agents.ContextCompactTool.Build())
             tools.Add(SharedLibrary.Agents.AskUserTool.Build())
 
@@ -552,6 +551,9 @@ Partial Public Class ThisAddIn
             instruction:="Select the advanced tools that may be callable. All available tools are on by default; " &
                          "uncheck any you want to disable. Workspace tools appear here only while a workspace is connected.")
 
+            selector.ConfigureGrouping(Global.SharedLibrary.SharedLibrary.SelectorGroupingStore.ForResourceRoots(
+                _context.INI_AgentResourcesPath, _context.INI_AgentResourcesPathLocal))
+
             Dim __safeDialogOwner542 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
             If If(__safeDialogOwner542 IsNot Nothing, selector.ShowDialog(__safeDialogOwner542), selector.ShowDialog()) = DialogResult.OK Then
                 Return selector.SelectedModels.
@@ -586,6 +588,9 @@ Partial Public Class ThisAddIn
                          "Note: all available tools are on by default (including newly added ones); uncheck any you want to disable. " &
                          "Advanced tools are managed separately through the 'Advanced tools…' button.")
 
+            selector.ConfigureGrouping(Global.SharedLibrary.SharedLibrary.SelectorGroupingStore.ForResourceRoots(
+                _context.INI_AgentResourcesPath, _context.INI_AgentResourcesPathLocal))
+
             selector.AddExtraButton("Advanced tools…",
                 Sub(s, e)
                     Dim advanced = ShowDiscussInkyAdvancedToolSelectionDialog(workingAdvanced)
@@ -600,6 +605,10 @@ Partial Public Class ThisAddIn
                         f.ShowDialog(selector)
                     End Using
                 End Sub)
+
+            If Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.IsConfigured(_context) Then
+                selector.AddExtraButton("Archive scope…", Sub(s, e) SelectSemanticArchiveSources(selector))
+            End If
 
             selector.AddExtraButton("Memory…",
                 Sub(s, e)

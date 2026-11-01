@@ -59,6 +59,8 @@ Imports SLib = SharedLibrary.SharedLibrary.SharedMethods
 
 Partial Public Class ThisAddIn
 
+    Private _wordProcessingCleanupGeneration As System.Int64
+
     ''' <summary>
     ''' P/Invoke to enable or disable a window handle.
     ''' </summary>
@@ -304,7 +306,9 @@ Partial Public Class ThisAddIn
      Optional DoPushback As Boolean = False,
      Optional SelectedTools As List(Of ModelConfig) = Nothing,
      Optional DoChart As Integer = 0,
-     Optional DoShowModel As Boolean = False) As Task(Of String)
+     Optional DoShowModel As Boolean = False,
+     Optional TargetReplyCommentIndex As System.Int32 = 0) As Task(Of String)
+        Await EnsureUIThread()
 
 
         Dim application As Word.Application = Globals.ThisAddIn.Application
@@ -315,78 +319,84 @@ Partial Public Class ThisAddIn
             Return ""
         End If
 
-        ' Route comment-bubble selections to a comment pipeline
+        Try
+            ' Route comment-bubble selections to a comment pipeline
 
-        Dim activeComment As Word.Comment = Nothing
-        If TryResolveActiveComment(selection, activeComment) Then
-            Dim bubbleSel As Word.Range = Nothing
+            Dim activeComment As Word.Comment = Nothing
+            If TryResolveActiveComment(selection, activeComment) Then
+                Dim bubbleSel As Word.Range = Nothing
 
-            Try
-                If selection.StoryType = Word.WdStoryType.wdCommentsStory Then
-                    bubbleSel = selection.Range.Duplicate
-                ElseIf activeComment IsNot Nothing Then
-                    bubbleSel = activeComment.Range.Duplicate
-                End If
-            Catch
-                bubbleSel = Nothing
-            End Try
+                Try
+                    If selection.StoryType = Word.WdStoryType.wdCommentsStory Then
+                        bubbleSel = selection.Range.Duplicate
+                    ElseIf activeComment IsNot Nothing Then
+                        bubbleSel = activeComment.Range.Duplicate
+                    End If
+                Catch
+                    bubbleSel = Nothing
+                End Try
 
-            Return Await ProcessSelectedTextInActiveCommentBubble(
-                    SysCommand,
-                    CheckMaxToken,
-                    bubbleSel,
-                    UseSecondAPI:=UseSecondAPI,
-                    SelectionMandatory:=SelectionMandatory,
-                    FileObject:=FileObject,
-                    DoMarkup:=DoMarkup,
-                    MarkupMethod:=MarkupMethod
-                )
-        End If
-
-
-        'If selection IsNot Nothing AndAlso selection.StoryType = Word.WdStoryType.wdCommentsStory Then
-        'Dim bubbleSel As Word.Range = Nothing
-        'Try
-        'bubbleSel = selection.Range.Duplicate
-        'Catch
-        'bubbleSel = Nothing
-        'End Try
-
-
-        'Return Await ProcessSelectedTextInActiveCommentBubble(
-        'SysCommand,
-        'CheckMaxToken,
-        'bubbleSel,
-        'UseSecondAPI:=UseSecondAPI,
-        'SelectionMandatory:=SelectionMandatory,
-        'FileObject:=FileObject
-        '                   )
-        'End If
-
-        If selection IsNot Nothing AndAlso
-   (selection.StoryType = Word.WdStoryType.wdFootnotesStory OrElse
-    selection.StoryType = Word.WdStoryType.wdEndnotesStory) Then
-
-            Return Await ProcessSelectedTextInActiveFootnote(
+                Dim uiResultAfterAwait336 = Await ProcessSelectedTextInActiveCommentBubble(
                         SysCommand,
                         CheckMaxToken,
-                        UseSecondAPI,
-                        SelectionMandatory,
-                        FileObject
+                        bubbleSel,
+                        UseSecondAPI:=UseSecondAPI,
+                        SelectionMandatory:=SelectionMandatory,
+                        FileObject:=FileObject,
+                        DoMarkup:=DoMarkup,
+                        MarkupMethod:=MarkupMethod
                     )
-        End If
+                Await EnsureUIThread()
+                Return uiResultAfterAwait336
+            End If
 
-        If selection.Type = WdSelectionType.wdSelectionIP And SelectionMandatory Then
-            ShowCustomMessageBox("Please select the text to be processed.")
-            Return ""
-        End If
 
-        Try
+            'If selection IsNot Nothing AndAlso selection.StoryType = Word.WdStoryType.wdCommentsStory Then
+            'Dim bubbleSel As Word.Range = Nothing
+            'Try
+            'bubbleSel = selection.Range.Duplicate
+            'Catch
+            'bubbleSel = Nothing
+            'End Try
+
+
+            'Return Await ProcessSelectedTextInActiveCommentBubble(
+            'SysCommand,
+            'CheckMaxToken,
+            'bubbleSel,
+            'UseSecondAPI:=UseSecondAPI,
+            'SelectionMandatory:=SelectionMandatory,
+            'FileObject:=FileObject
+            '                   )
+            'End If
+
+            If selection IsNot Nothing AndAlso
+       (selection.StoryType = Word.WdStoryType.wdFootnotesStory OrElse
+        selection.StoryType = Word.WdStoryType.wdEndnotesStory) Then
+
+                Dim uiResultAfterAwait372 = Await ProcessSelectedTextInActiveFootnote(
+                            SysCommand,
+                            CheckMaxToken,
+                            UseSecondAPI,
+                            SelectionMandatory,
+                            FileObject
+                        )
+                Await EnsureUIThread()
+                Return uiResultAfterAwait372
+            End If
+
+            If selection.Type = WdSelectionType.wdSelectionIP And SelectionMandatory Then
+                ShowCustomMessageBox("Please select the text to be processed.")
+                Return ""
+            End If
+
             Using New WordUndoScope(application, $"{AN} Changes")
 
                 If selection.Type = WdSelectionType.wdSelectionIP Or selection.Tables.Count = 0 Or PutInClipboard Or PutInBubbles Or DoPushback Then
 
-                    Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, CreatePodcast, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, AddDocs, DoMyStyle, DoBubblesExtract, False, DoPushback, SelectedTools, DoChart, DoShowModel)
+                    Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, CreatePodcast, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, AddDocs, DoMyStyle, DoBubblesExtract, False, DoPushback, SelectedTools, DoChart, DoShowModel,
+                        TargetReplyCommentIndex:=TargetReplyCommentIndex)
+                    Await EnsureUIThread()
 
                 Else
 
@@ -468,12 +478,14 @@ Partial Public Class ThisAddIn
                                             PutInBubbles, SelectionMandatory, UseSecondAPI,
                                             FormattingCap, DoTPMarkup, TPMarkupname, False,
                                             FileObject, DoPane, 0, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True, SelectedTools:=SelectedTools)
+                                        Await EnsureUIThread()
 
                                         ' If the cell was cancelled with Esc, offer to abort the whole process
                                         If ConfirmAbortIfRequested() Then Exit For
 
                                         ' Throttle so Word doesn't lock up
                                         Await System.Threading.Tasks.Task.Delay(50)
+                                        Await EnsureUIThread()
                                     End If
                                 Next
                             Finally
@@ -517,11 +529,13 @@ Partial Public Class ThisAddIn
                                         If textChunk.Start < textChunk.End AndAlso Not String.IsNullOrWhiteSpace(textChunk.Text) Then
                                             textChunk.Select()
                                             Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, False, FileObject, DoPane, ChunkSize * -1, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True, SelectedTools:=SelectedTools)
+                                            Await EnsureUIThread()
                                             If ConfirmAbortIfRequested() Then
                                                 IsExit = True
                                                 Exit For
                                             End If
                                             Await System.Threading.Tasks.Task.Delay(50)
+                                            Await EnsureUIThread()
                                         End If
                                     Else
 
@@ -532,11 +546,13 @@ Partial Public Class ThisAddIn
                                         If textChunk.Tables.Count = 0 AndAlso textChunk.Start < textChunk.End AndAlso Not String.IsNullOrWhiteSpace(textChunk.Text) Then
                                             textChunk.Select()
                                             Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, False, FileObject, DoPane, ChunkSize * -1, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True, SelectedTools:=SelectedTools)
+                                            Await EnsureUIThread()
                                             If ConfirmAbortIfRequested() Then
                                                 IsExit = True
                                                 Exit For
                                             End If
                                             Await System.Threading.Tasks.Task.Delay(50)
+                                            Await EnsureUIThread()
                                         End If
 
                                     End If
@@ -562,11 +578,13 @@ Partial Public Class ThisAddIn
                                         If cellRange.Start < cellRange.End AndAlso Not String.IsNullOrWhiteSpace(cellRange.Text) Then
                                             cellRange.Select()
                                             Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, False, FileObject, DoPane, 0, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True, SelectedTools:=SelectedTools)
+                                            Await EnsureUIThread()
                                             If ConfirmAbortIfRequested() Then
                                                 IsExit = True
                                                 Exit For
                                             End If
                                             Await System.Threading.Tasks.Task.Delay(50)
+                                            Await EnsureUIThread()
                                         End If
                                     Next
 
@@ -590,6 +608,7 @@ Partial Public Class ThisAddIn
                                     finalChunk.Select()
                                     Dim text = selection.Text
                                     Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, False, FileObject, DoPane, ChunkSize * -1, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True, SelectedTools:=SelectedTools)
+                                    Await EnsureUIThread()
                                 Else
                                     Do
                                         finalChunk.Start += 1
@@ -600,6 +619,7 @@ Partial Public Class ThisAddIn
                                     If finalChunk.Tables.Count = 0 AndAlso finalChunk.Start < finalChunk.End Then
                                         finalChunk.Select()
                                         Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, False, FileObject, DoPane, ChunkSize * -1, NoFormatAndFieldSaving, DoNewDoc, "", AddDocs, DoMyStyle, DoBubblesExtract, True, SelectedTools:=SelectedTools)
+                                        Await EnsureUIThread()
                                     End If
                                 End If
                             End If
@@ -610,6 +630,7 @@ Partial Public Class ThisAddIn
                     ElseIf userdialog = 1 Then
 
                         Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, CreatePodcast, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, AddDocs, DoMyStyle, DoBubblesExtract, False, DoPushback, SelectedTools, DoChart, DoShowModel)
+                        Await EnsureUIThread()
 
                     End If
 
@@ -627,8 +648,10 @@ Partial Public Class ThisAddIn
 
             End Using
 
+        Catch ex As System.Exception When IsWordCommandCancellation(ex)
+            LogWordCommandDiagnostic("ProcessSelectedText", "cancelled_by_user")
         Catch ex As System.Exception
-            Debug.WriteLine("Error in Undo: " & ex.Message)
+            ReportWordCommandFailure("ProcessSelectedText", ex)
         End Try
 
         Return ""
@@ -697,7 +720,10 @@ Partial Public Class ThisAddIn
        Optional DoPushback As Boolean = False,
        Optional SelectedTools As List(Of ModelConfig) = Nothing,
        Optional DoChart As Integer = 0,
-       Optional DoShowModel As Boolean = False) As Task(Of String)
+       Optional DoShowModel As Boolean = False,
+       Optional onDocumentWriteback As System.Action(Of Microsoft.Office.Interop.Word.Range) = Nothing,
+       Optional TargetReplyCommentIndex As System.Int32 = 0) As Task(Of String)
+        Await EnsureUIThread()
 
 
         Dim application As Word.Application = Globals.ThisAddIn.Application
@@ -725,6 +751,10 @@ Partial Public Class ThisAddIn
         Dim writebackRestoreSelection As Word.Range = Nothing
         Dim writebackOriginalScreenUpdating As Boolean = True
         Dim writebackFocusLeaseActive As Boolean = False
+        Dim cleanupGeneration As System.Int64 = System.Threading.Interlocked.Increment(_wordProcessingCleanupGeneration)
+        Dim cleanupHostToken As System.Threading.CancellationToken = HostWindowLifetimeToken
+        Dim totalEndBm As Word.Bookmark = Nothing
+        Dim nextStartBm As Word.Bookmark = Nothing
 
         Try
             savedUiWindow = application.ActiveWindow
@@ -881,7 +911,6 @@ Partial Public Class ThisAddIn
 
             Dim effectiveChunk As Integer = If(ChunkSize > 0, ChunkSize, Integer.MaxValue)
 
-            Dim totalEndBm As Word.Bookmark
 
             ' Added for processing footnotes etc. too
             Dim docEnd As Integer = storyRange.End
@@ -905,7 +934,7 @@ Partial Public Class ThisAddIn
             Dim safeRange As Word.Range = selection.Range
             safeRange.Collapse(Direction:=Word.WdCollapseDirection.wdCollapseStart)
 
-            Dim nextStartBm As Word.Bookmark = currentdoc.Bookmarks.Add(
+            nextStartBm = currentdoc.Bookmarks.Add(
                     Name:="NextStart",
                     Range:=safeRange)
 
@@ -1072,7 +1101,15 @@ Partial Public Class ThisAddIn
 
                 Dim BubblesText As String = ""
 
-                If DoBubblesExtract Then BubblesText = BubblesExtract(rng, DoSilent Or InTable)
+                If DoBubblesExtract Then
+                    BubblesText = BubblesExtract(rng, DoSilent Or InTable,
+                        TargetCommentIndex:=TargetReplyCommentIndex,
+                        IncludeOverlappingAnchors:=(DoPushback AndAlso TargetReplyCommentIndex = 0))
+                    If DoPushback AndAlso TargetReplyCommentIndex > 0 AndAlso System.String.IsNullOrWhiteSpace(BubblesText) Then
+                        ShowCustomMessageBox("The active comment could not be extracted. No reply was generated.")
+                        Return ""
+                    End If
+                End If
 
                 ' Capture automatic list/heading numbering (e.g. "I.", "a)", "1.1") as
                 ' READ-ONLY context. These numbers are generated by Word and are not part
@@ -1119,84 +1156,9 @@ Partial Public Class ThisAddIn
                                 SelectedText = GetTextWithSpecialElementsInline(rng, If(NoFormatting, False, ParaFormatInline), False)
                             End If
 
-                            ' ── Universal revision fix ──────────────────────────────
-                            ' GetTextWithSpecialElementsInline reads rng.Text internally,
-                            ' which includes deleted revision text. The placeholders it
-                            ' embedded ({{WFLD:...}}, {{WFNT:...}}, **bold**, etc.) are
-                            ' correct, but the base text between them contains ghost
-                            ' deletions. Fix: re-read just the visible text from the
-                            ' (now Markdown-converted) range and re-inject the placeholders.
-                            If Not DoTPMarkup Then
-                                Try
-                                    Dim revCount As Integer = 0
-                                    Try : revCount = rng.Revisions.Count : Catch : End Try
-                                    If revCount > 0 Then
-                                        ' Extract all placeholders from the processed SelectedText
-                                        Dim placeholderTokens As New List(Of String)
-                                        Dim stripped As String = System.Text.RegularExpressions.Regex.Replace(
-                                            SelectedText, "\{\{(?:WFLD|WFNT|WENT|PFOR):[^}]*\}\}",
-                                            Function(m)
-                                                placeholderTokens.Add(m.Value)
-                                                Return $"[[RVPH{placeholderTokens.Count - 1}]]"
-                                            End Function)
+                            ' Extraction filters existing deletion/move-from revisions using physical
+                            ' source positions before serializing placeholders. No view-switch retry.
 
-                                        ' Get the visible (accepted) text from the same range
-                                        ' — the range has already been Markdown-converted by
-                                        '   GetTextWithSpecialElementsInline, so bold is now
-                                        '   **bold** etc. in the live range too.
-                                        Dim visText As String = GetVisibleText(rng)
-
-                                        If Not String.IsNullOrWhiteSpace(visText) Then
-                                            ' Re-inject placeholders into the visible text at
-                                            ' their original relative positions. Because the
-                                            ' visible text is shorter (no deleted chars), we
-                                            ' can't use absolute offsets. Instead, use the
-                                            ' surrounding context words as anchors.
-                                            '
-                                            ' Simplest viable approach: the visible text is the
-                                            ' correct base. Placeholders mark positions of
-                                            ' footnotes/fields/etc. that exist in the visible
-                                            ' text too (as single reference chars). So just
-                                            ' re-run GetTextWithSpecialElementsInline in Final
-                                            ' view — the function will find the same footnotes/
-                                            ' fields at their (now correct) visible-text offsets.
-
-                                            Dim viewObj = currentdoc.ActiveWindow.View
-                                            Dim savedRevView = viewObj.RevisionsView
-                                            Dim savedShowRevs = viewObj.ShowRevisionsAndComments
-                                            Dim savedSelStart = selection.Start
-                                            Dim savedSelEnd = selection.End
-
-                                            Try
-                                                viewObj.RevisionsView = WdRevisionsView.wdRevisionsViewFinal
-                                                viewObj.ShowRevisionsAndComments = False
-
-                                                ' Re-run extraction in Final view — same range,
-                                                ' same Markdown state, but rng.Text now excludes
-                                                ' deleted revisions. Placeholder offsets will be
-                                                ' correct against the visible character positions.
-                                                SelectedText = GetTextWithSpecialElementsInline(
-                                                    rng,
-                                                    If(NoFormatting, False, ParaFormatInline),
-                                                    False,
-                                                    IncludeMarkdownListPrefixes:=True)  ' Markdown already applied; list markers are virtual placeholders.
-
-                                                Debug.WriteLine($"RevisionFix: re-extracted SelectedText in Final view, len={SelectedText.Length}")
-                                            Finally
-                                                viewObj.RevisionsView = savedRevView
-                                                viewObj.ShowRevisionsAndComments = savedShowRevs
-                                                Try
-                                                    selection.SetRange(savedSelStart, savedSelEnd)
-                                                Catch
-                                                End Try
-                                            End Try
-                                        End If
-                                    End If
-                                Catch ex As Exception
-                                    Debug.WriteLine($"RevisionFix error: {ex.Message}")
-                                End Try
-                            End If
-                            ' ── End revision fix ────────────────────────────────────
                         End If
                         trailingCR = (SelectedText.EndsWith(vbCrLf) Or SelectedText.EndsWith(vbLf) Or SelectedText.EndsWith(vbCr))
                         Dim tempText As String = SelectedText
@@ -1342,13 +1304,20 @@ Partial Public Class ThisAddIn
                             pinnedWordDocumentFullName:=GetSafeWordDocumentFullName(currentdoc),
                             pinnedWordSelectionStart:=If(rng Is Nothing, -1, rng.Start),
                             pinnedWordSelectionEnd:=If(rng Is Nothing, -1, rng.End))
+                        Await EnsureUIThread()
                     Finally
                         If infoBoxShown Then
                             Try
-                                If mainThreadControl IsNot Nothing AndAlso mainThreadControl.InvokeRequired Then
-                                    mainThreadControl.Invoke(New System.Windows.Forms.MethodInvoker(Sub() SLib.InfoBox.ShowInfoBox("", 1)))
-                                Else
-                                    SLib.InfoBox.ShowInfoBox("", 1)
+                                If mainThreadControl IsNot Nothing AndAlso mainThreadControl.IsHandleCreated AndAlso
+                                   Not mainThreadControl.IsDisposed AndAlso Not HostWindowLifetimeToken.IsCancellationRequested Then
+                                    If mainThreadControl.InvokeRequired Then
+                                        mainThreadControl.BeginInvoke(New System.Windows.Forms.MethodInvoker(
+                                            Sub()
+                                                If Not HostWindowLifetimeToken.IsCancellationRequested Then SLib.InfoBox.ShowInfoBox("", 1)
+                                            End Sub))
+                                    Else
+                                        SLib.InfoBox.ShowInfoBox("", 1)
+                                    End If
                                 End If
                             Catch
                             End Try
@@ -1360,7 +1329,8 @@ Partial Public Class ThisAddIn
 
                     If SelectedAlternateModels Is Nothing OrElse SelectedAlternateModels.Count = 0 OrElse DoMarkup OrElse PutInBubbles OrElse DoPushback OrElse SlideInsert <> "" OrElse DoChart > 0 Then
 
-                        LLMResult = Await LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact & MarkdownInstruction)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, "") & If(DoChart > 0, " " & SP_Add_Chart & If(DoChart = 2, " " & SP_Add_Chart_App, ""), ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText & NumberingUser), "", "", 0, UseSecondAPI, False, OtherPromptUnfilled, FileObject)
+                        LLMResult = Await AwaitWordModelRequestAsync(Function() LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact & MarkdownInstruction)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, "") & If(DoChart > 0, " " & SP_Add_Chart & If(DoChart = 2, " " & SP_Add_Chart_App, ""), ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText & NumberingUser), "", "", 0, UseSecondAPI, False, OtherPromptUnfilled, FileObject))
+                        Await EnsureUIThread()
 
                     Else
 
@@ -1368,7 +1338,8 @@ Partial Public Class ThisAddIn
                             Dim err As Boolean = False
                             ApplyModelConfig(_context, mc, err)
 
-                            LLMResult += mc.ModelDescription & ":" & vbCrLf & vbCrLf & Await LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact & MarkdownInstruction)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText & NumberingUser), "", "", 0, UseSecondAPI, False, OtherPromptUnfilled, FileObject) & vbCrLf
+                            LLMResult += mc.ModelDescription & ":" & vbCrLf & vbCrLf & Await AwaitWordModelRequestAsync(Function() LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact & MarkdownInstruction)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText & NumberingUser), "", "", 0, UseSecondAPI, False, OtherPromptUnfilled, FileObject)) & vbCrLf
+                            Await EnsureUIThread()
 
                         Next
 
@@ -1381,7 +1352,26 @@ Partial Public Class ThisAddIn
                 LLMResult = LLMResult.Replace("<TEXTTOPROCESS>", "").Replace("</TEXTTOPROCESS>", "")
 
                 If Not String.IsNullOrEmpty(LLMResult) Then
-                    LLMResult = Await PostCorrection(LLMResult, UseSecondAPI)
+                    LLMResult = Await AwaitWordModelRequestAsync(Function() PostCorrection(LLMResult, UseSecondAPI))
+                    Await EnsureUIThread()
+                End If
+
+                ' Freestyle prose policy is scoped by a runtime marker, not by model/provider.
+                ' Keep intact source lines byte-identical when a chunk is returned unchanged.
+                If SysCommand.IndexOf("RED_INK_FREESTYLE_TYPOGRAPHY_R22", System.StringComparison.Ordinal) >= 0 AndAlso
+                   Not System.String.IsNullOrEmpty(LLMResult) AndAlso
+                   Not DoMarkup AndAlso Not DoTPMarkup AndAlso
+                   System.String.IsNullOrEmpty(SlideDeck) AndAlso DoChart = 0 AndAlso Not CreatePodcast Then
+                    Dim generatedLines As System.String() = System.Text.RegularExpressions.Regex.Split(LLMResult, "(?<=\n)|(?<=\r)(?!\n)")
+                    For lineNumber As Integer = 0 To generatedLines.Length - 1
+                        Dim originalLine As System.String = generatedLines(lineNumber).TrimEnd(ChrW(13), ChrW(10))
+                        If Not System.String.IsNullOrEmpty(originalLine) AndAlso
+                           (System.String.IsNullOrEmpty(SelectedText) OrElse
+                            SelectedText.IndexOf(originalLine, System.StringComparison.Ordinal) < 0) Then
+                            generatedLines(lineNumber) = Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeGeneratedProseTypography(generatedLines(lineNumber))
+                        End If
+                    Next
+                    LLMResult = System.String.Concat(generatedLines)
                 End If
 
                 Debug.WriteLine($"LLMResult 0 = '{LLMResult}'")
@@ -1432,6 +1422,10 @@ Partial Public Class ThisAddIn
                 End If
                 selection = application.Selection
                 rng = selection.Range
+
+                ' The writeback starts at this captured document coordinate, not at the
+                ' live Word cursor after a subsequent focus/selection restoration.
+                Dim writebackStart As System.Int32 = rng.Start
 
                 If Not String.IsNullOrEmpty(LLMResult) Then
 
@@ -1792,7 +1786,8 @@ Partial Public Class ThisAddIn
                             writebackOriginalScreenUpdating,
                             writebackFocusLeaseActive)
 
-                        Dim RegexResult = Await LLM(SP_MarkupRegex, "<ORIGINALTEXT>" & SelectedText & "</ORIGINALTEXT> /n <NEWTEXT>" & LLMResult & "</NEWTEXT>", "", "", 0, False)
+                        Dim RegexResult = Await AwaitWordModelRequestAsync(Function() LLM(SP_MarkupRegex, "<ORIGINALTEXT>" & SelectedText & "</ORIGINALTEXT> /n <NEWTEXT>" & LLMResult & "</NEWTEXT>", "", "", 0, False))
+                        Await EnsureUIThread()
 
                         If Not BeginProcessingFocusLease(
                             application,
@@ -2067,6 +2062,33 @@ Partial Public Class ThisAddIn
 
                     End If
 
+                    ' Notify interested callers while Word still has the genuine
+                    ' post-writeback selection, BEFORE the focus lease is restored.
+                    ' Only document-editing paths invoke the callback. Ordinary
+                    ' processing has no callback and retains its existing behavior.
+                    If onDocumentWriteback IsNot Nothing AndAlso Not (PutInClipboard OrElse DoPane OrElse PutInBubbles OrElse DoNewDoc OrElse NoSelectedText) Then
+                        ' A missing committed range is a command-level failure, not a
+                        ' general document-processing failure. Report it to the caller
+                        ' rather than poisoning unrelated processing/INI state.
+                        Dim committedRange As Microsoft.Office.Interop.Word.Range = Nothing
+                        Try
+                            Dim committedSelection As Microsoft.Office.Interop.Word.Range = application.Selection.Range
+                            If IsSameProcessingDocument(committedSelection.Document, currentdoc) Then
+                                Dim committedEnd As System.Int32 = committedSelection.End
+                                If committedEnd <= writebackStart Then
+                                    committedEnd = rng.End
+                                End If
+                                Dim documentEnd As System.Int32 = currentdoc.Content.End
+                                If committedEnd > writebackStart AndAlso committedEnd <= documentEnd Then
+                                    committedRange = currentdoc.Range(writebackStart, committedEnd)
+                                End If
+                            End If
+                        Catch exCapture As System.Exception
+                            System.Diagnostics.Debug.WriteLine("Could not capture the revised Word range: " & exCapture.ToString())
+                        End Try
+                        onDocumentWriteback(committedRange)
+                    End If
+
                 Else
                     If Not DoSilent Then ShowCustomMessageBox("The LLM did not return any content to process.")
                 End If
@@ -2107,36 +2129,79 @@ Partial Public Class ThisAddIn
 
             Loop
 
+        Catch ex As System.Exception When IsWordCommandCancellation(ex)
+            ' Propagate to the command boundary so no later chunk/cell/model runs.
+            ' Finally still restores focus and removes temporary bookmarks.
+            Throw
+        Catch ex As WordCommandNoticeException
+            ' A diagnosed model-service failure is not an INI/configuration error.
+            LogWordCommandDiagnostic("TrueProcessSelectedText", ex.ToString())
+            Throw
         Catch ex As System.Exception
-
-#If DEBUG Then
-            Debug.WriteLine("Error: " & ex.Message)
-            Debug.WriteLine("Stacktrace: " & ex.StackTrace)
-
-            System.Diagnostics.Debugger.Break()
-#End If
-            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in TrueProcessSelectedText:  " & ex.Message, "Error")
+            LogWordCommandDiagnostic("TrueProcessSelectedText", ex.ToString())
             INIloaded = False
-
+            Throw
         Finally
+            ' A fault/cancellation can bypass the Await that normally restores UI
+            ' affinity. Keep the complete COM cleanup on the captured Office STA.
+            Dim cleanupIsDeferred As System.Boolean = Not SharedMethods.IsOnHostUiThread
+            Dim cleanup As System.Action =
+                Sub()
+                    If cleanupHostToken.IsCancellationRequested OrElse
+                       cleanupGeneration <> System.Threading.Volatile.Read(_wordProcessingCleanupGeneration) Then Return
 
-            EndProcessingFocusLease(
-                application,
-                writebackRestoreWindow,
-                writebackRestoreSelection,
-                writebackOriginalScreenUpdating,
-                writebackFocusLeaseActive)
+                    If Not cleanupIsDeferred Then
+                        EndProcessingFocusLease(
+                            application,
+                            writebackRestoreWindow,
+                            writebackRestoreSelection,
+                            writebackOriginalScreenUpdating,
+                            writebackFocusLeaseActive)
+                    Else
+                        ' A delayed callback must not activate a previous window or
+                        ' select a previous range after the user has moved on.
+                        Try
+                            If writebackFocusLeaseActive Then application.ScreenUpdating = writebackOriginalScreenUpdating
+                        Catch ex As System.Exception
+                            System.Diagnostics.Debug.WriteLine("Deferred processing screen cleanup: " & ex.Message)
+                        Finally
+                            If writebackRestoreSelection IsNot Nothing Then
+                                Try
+                                    System.Runtime.InteropServices.Marshal.ReleaseComObject(writebackRestoreSelection)
+                                Catch ex As System.Exception
+                                    System.Diagnostics.Debug.WriteLine("Deferred processing range cleanup: " & ex.Message)
+                                End Try
+                            End If
+                            writebackRestoreSelection = Nothing
+                            writebackRestoreWindow = Nothing
+                            writebackFocusLeaseActive = False
+                        End Try
+                    End If
 
-            Try
-                ' Aufräumen aller temporären Bookmarks
-                For yi As Integer = currentdoc.Bookmarks.Count To 1 Step -1
-                    Dim bm As Word.Bookmark = currentdoc.Bookmarks(yi)
-                    If bm.Name = "TotalEnd" OrElse bm.Name = "NextStart" Then bm.Delete()
-                Next
-            Catch ex As System.Exception
-                '
-            End Try
+                    ' Use only the bookmarks created by this invocation. Never find
+                    ' similarly named bookmarks in a newer command/active document.
+                    For Each bookmark As Word.Bookmark In New Word.Bookmark() {totalEndBm, nextStartBm}
+                        If bookmark Is Nothing Then Continue For
+                        Try
+                            If System.Object.ReferenceEquals(bookmark.Range.Document, currentdoc) Then bookmark.Delete()
+                        Catch ex As System.Exception
+                            System.Diagnostics.Debug.WriteLine("Processing bookmark cleanup: " & ex.Message)
+                        End Try
+                    Next
+                End Sub
 
+            If SharedMethods.IsOnHostUiThread Then
+                cleanup.Invoke()
+            ElseIf Not cleanupHostToken.IsCancellationRequested Then
+                Dim pendingCleanup As System.Threading.Tasks.Task = SharedMethods.PostToHostUiAsync(cleanup)
+                Dim observeCleanup As System.Threading.Tasks.Task = pendingCleanup.ContinueWith(
+                    Sub(completed As System.Threading.Tasks.Task)
+                        System.Diagnostics.Debug.WriteLine("Deferred processing cleanup: " & completed.Exception.GetBaseException().Message)
+                    End Sub,
+                    System.Threading.CancellationToken.None,
+                    System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted,
+                    System.Threading.Tasks.TaskScheduler.Default)
+            End If
         End Try
 
         Return ""
@@ -2169,6 +2234,7 @@ Partial Public Class ThisAddIn
 ) As Task(Of String)
 
         Try
+            Await EnsureUIThread()
             Dim app As Word.Application = Globals.ThisAddIn.Application
             If app Is Nothing OrElse app.Selection Is Nothing OrElse app.Selection.Range Is Nothing Then Return ""
 
@@ -2267,7 +2333,7 @@ Partial Public Class ThisAddIn
 
             ' 5) Call LLM
             Dim llmResult As String =
-            Await LLM(
+            Await AwaitWordModelRequestAsync(Function() LLM(
                 promptSystem:=sysCommand,
                 promptUser:="<TEXTTOPROCESS>" & inputText & "</TEXTTOPROCESS>",
                 Model:="",
@@ -2277,12 +2343,14 @@ Partial Public Class ThisAddIn
                 Hidesplash:=False,
                 AddUserPrompt:=OtherPromptUnfilled,
                 FileObject:=fileObject
-            )
+            ))
+            Await EnsureUIThread()
 
             llmResult = llmResult.Replace("<TEXTTOPROCESS>", "").Replace("</TEXTTOPROCESS>", "")
 
             If Not String.IsNullOrEmpty(llmResult) Then
-                llmResult = Await PostCorrection(llmResult, useSecondApi)
+                llmResult = Await AwaitWordModelRequestAsync(Function() PostCorrection(llmResult, useSecondApi))
+                Await EnsureUIThread()
             End If
 
             If String.IsNullOrWhiteSpace(llmResult) Then
@@ -2314,9 +2382,10 @@ Partial Public Class ThisAddIn
 
             Return ""
 
-        Catch ex As Exception
-            Debug.WriteLine($"ProcessSelectedTextInActiveFootnote error: {ex.Message}{vbCrLf}{ex.StackTrace}")
-            ShowCustomMessageBox($"Error processing footnote/endnote: {ex.Message}")
+        Catch ex As System.Exception When IsWordCommandCancellation(ex)
+            Throw
+        Catch ex As System.Exception
+            ReportWordCommandFailure("ProcessFootnote", ex, "Inky could not update this footnote or endnote. Please try again.")
             Return ""
         End Try
     End Function
@@ -2528,108 +2597,117 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
+    ' UTF-16 offsets in Text map to actual Word positions, not offsets in Range.Text.
+    ' One native reference occupies an opaque token of any textual length. These tokens
+    ' are transport only; neither the note body nor the displayed number is serialized.
+    Friend NotInheritable Class ChatNoteProjection
+        Friend ReadOnly Boundaries As New System.Collections.Generic.List(Of System.Int32)()
+        Friend ReadOnly Flat As New System.Text.StringBuilder()
+        Friend Text As System.String
+        Friend ReadOnly Starts As New System.Collections.Generic.List(Of System.Int32)()
+        Friend ReadOnly Finishes As New System.Collections.Generic.List(Of System.Int32)()
+        Friend ReadOnly References As New System.Collections.Generic.List(Of (First As System.Int32, Finish As System.Int32, Token As System.String))()
+    End Class
+
+    Friend Shared Function ReadChatNoteProjection(src As Microsoft.Office.Interop.Word.Range) As ChatNoteProjection
+        Dim result As New ChatNoteProjection()
+        If src.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory Then
+            Throw New System.InvalidOperationException("Word note anchors require the main text story.")
+        End If
+        ' Iterate the DOCUMENT collections: numbering restarts and a selection starting
+        ' at the second note must not renumber tokens. Read the actual Reference ranges,
+        ' including custom reference marks; never identify notes by a printed digit.
+        Dim first As System.Int32 = src.Start
+        Dim finish As System.Int32 = src.End
+        If src.Footnotes.Count > 0 Then
+            For Each item As Microsoft.Office.Interop.Word.Footnote In src.Document.Footnotes
+                AddChatNoteReference(result, first, finish, item.Reference, "FN", item.Index)
+            Next
+        End If
+        If src.Endnotes.Count > 0 Then
+            For Each item As Microsoft.Office.Interop.Word.Endnote In src.Document.Endnotes
+                AddChatNoteReference(result, first, finish, item.Reference, "EN", item.Index)
+            Next
+        End If
+        result.References.Sort(Function(a, b) a.First.CompareTo(b.First))
+        result.Text = ReadVisibleProjection(src, result)
+        Return result
+    End Function
+
+    Private Shared Sub AddChatNoteReference(output As ChatNoteProjection, first As System.Int32, finish As System.Int32,
+                                             mark As Microsoft.Office.Interop.Word.Range, kind As System.String, index As System.Int32)
+        Dim a As System.Int32 = mark.Start
+        Dim b As System.Int32 = mark.End
+        If b <= first OrElse a >= finish Then Return
+        If a < first OrElse b > finish OrElse a >= b Then Throw New System.InvalidOperationException("The selection cuts through a native note reference.")
+        output.References.Add((a, b, "[[RI-" & kind & ":" & index.ToString(System.Globalization.CultureInfo.InvariantCulture) & "]]"))
+    End Sub
+
     ''' <summary>
-    ''' Returns the visible text of a range in Final view, excluding deleted revisions.
-    ''' Falls back to raw <see cref="Range.Text"/> when there are no revisions
-    ''' or when the Final-view extraction fails.
+    ''' Returns the final source projection without deleted/move-from revisions or field codes.
+    ''' Uses physical ranges without changing the document's revision view.
+    ''' Mapping failures are surfaced rather than returning ghost deletion text.
     ''' </summary>
     ''' <param name="src">Word range to extract visible text from.</param>
     ''' <returns>Text with deletions omitted and insertions preserved.</returns>
-    Public Function GetVisibleText(ByVal src As Range) As String
-        Try
-            ' 1) Catch null/empty range
-            If src Is Nothing Then Return String.Empty
+    Public Function GetVisibleText(ByVal src As Microsoft.Office.Interop.Word.Range) As System.String
+        Return ReadVisibleProjection(src, Nothing)
+    End Function
 
-            ' 2) Fetch raw text once for fast path
-            Dim raw As String
-            Try
-                raw = src.Text
-                If String.IsNullOrEmpty(raw) Then Return String.Empty
-            Catch
-                Return String.Empty
-            End Try
-
-            ' 3) Fast path: no revisions in this range
-            Try
-                If src.Revisions.Count = 0 Then Return raw
-            Catch
-                Return raw
-            End Try
-
-            ' 4) Use Selection + Final view to read accepted text.
-            '    Switching RevisionsView changes the position space, so a stale Range
-            '    object returns wrong text. The live Selection is re-evaluated by Word.            
-            Try
-                Dim app As Microsoft.Office.Interop.Word.Application = src.Application
-
-                ' ── FIX: Use the window that belongs to the range's own document,
-                '    NOT app.ActiveWindow. When multiple documents are open,
-                '    ActiveWindow may point to a different document, causing the
-                '    view switch and Select() call to operate on the wrong window.
-                Dim srcDoc As Microsoft.Office.Interop.Word.Document = src.Document
-                Dim docWindow As Microsoft.Office.Interop.Word.Window = srcDoc.ActiveWindow
-                Dim view As Microsoft.Office.Interop.Word.View = docWindow.View
-
-                ' Save current view state
-                Dim origRevView As WdRevisionsView = view.RevisionsView
-                Dim origShowRevs As Boolean = view.ShowRevisionsAndComments
-
-                ' Save current selection (in the original view's position space)
-                Dim origSelStart As Integer = app.Selection.Start
-                Dim origSelEnd As Integer = app.Selection.End
-
-                ' Remember which window was active so we can restore it
-                Dim origActiveWindow As Microsoft.Office.Interop.Word.Window = app.ActiveWindow
-
-                Try
-                    ' Activate the range's document window before selecting
-                    If Not Object.ReferenceEquals(origActiveWindow, docWindow) Then
-                        docWindow.Activate()
-                    End If
-
-                    ' Select the target range so Word treats it as the live Selection
-                    src.Select()
-
-                    ' Switch to Final view — Selection.Text now returns accepted text
-                    view.RevisionsView = WdRevisionsView.wdRevisionsViewFinal
-                    view.ShowRevisionsAndComments = False
-
-                    Dim finalText As String = app.Selection.Text
-                    If finalText Is Nothing Then finalText = String.Empty
-                    Return finalText
-                Finally
-                    ' Restore view FIRST (so position space matches the saved selection)
-                    view.RevisionsView = origRevView
-                    view.ShowRevisionsAndComments = origShowRevs
-
-                    ' Restore the original selection
-                    Try
-                        app.Selection.SetRange(origSelStart, origSelEnd)
-                    Catch
-                    End Try
-
-                    ' Restore the previously active window if we switched away
-                    Try
-                        If Not Object.ReferenceEquals(origActiveWindow, docWindow) Then
-                            origActiveWindow.Activate()
-                        End If
-                    Catch
-                    End Try
-                End Try
-
-            Catch ex As Exception
-                Debug.WriteLine($"Selection/Final-view approach failed: {ex.Message}")
-                Return raw
-            End Try
-
-        Catch ex As Exception
-            Debug.WriteLine($"Exception in GetVisibleText: {ex.Message}{vbCrLf}{ex.StackTrace}")
-            Try
-                Return If(src IsNot Nothing, src.Text, String.Empty)
-            Catch
-                Return String.Empty
-            End Try
-        End Try
+    Private Shared Function ReadVisibleProjection(src As Microsoft.Office.Interop.Word.Range, map As ChatNoteProjection) As System.String
+        If src Is Nothing Then Return System.String.Empty
+        ' Use the same physical ranges and revision filtering as surgical insertion.
+        ' Changing the window's revision view cannot establish a reliable source contract.
+        Dim hiddenFieldSpans As New System.Collections.Generic.List(Of SurgicalPositionSpan)()
+        For Each field As Microsoft.Office.Interop.Word.Field In src.Fields
+            hiddenFieldSpans.Add(New SurgicalPositionSpan With {.StartPos = field.Code.Start - 1, .EndPos = field.Result.Start})
+            hiddenFieldSpans.Add(New SurgicalPositionSpan With {.StartPos = field.Result.End, .EndPos = field.Result.End + 1})
+        Next
+        hiddenFieldSpans.Sort(Function(a, b) a.StartPos.CompareTo(b.StartPos))
+        Dim merged As New System.Collections.Generic.List(Of SurgicalPositionSpan)()
+        For Each span As SurgicalPositionSpan In hiddenFieldSpans
+            If merged.Count > 0 AndAlso span.StartPos <= merged(merged.Count - 1).EndPos Then
+                Dim previous As SurgicalPositionSpan = merged(merged.Count - 1)
+                previous.EndPos = System.Math.Max(previous.EndPos, span.EndPos)
+                merged(merged.Count - 1) = previous
+            Else
+                merged.Add(span)
+            End If
+        Next
+        Dim fieldIndex As System.Int32 = 0
+        Dim visible As New System.Text.StringBuilder()
+        Dim noteIndex As System.Int32 = 0
+        Dim emitted As System.Int32 = -1
+        For Each atom As SurgicalLiveCharAtom In BuildSurgicalLiveCharAtoms(src)
+            If atom.IsTrackedDeletion OrElse SurgicalPositionIsInsideSpan(atom.LiveStart, merged, fieldIndex) Then Continue For
+            If map Is Nothing Then
+                visible.Append(atom.Text)
+                Continue For
+            End If
+            While noteIndex < map.References.Count AndAlso map.References(noteIndex).Finish <= atom.LiveStart
+                noteIndex += 1
+            End While
+            Dim text As System.String = atom.Text
+            Dim a As System.Int32 = atom.LiveStart
+            Dim b As System.Int32 = atom.LiveEnd
+            If noteIndex < map.References.Count AndAlso map.References(noteIndex).First <= a Then
+                If emitted = noteIndex Then Continue For
+                emitted = noteIndex
+                text = map.References(noteIndex).Token
+                a = map.References(noteIndex).First
+                b = map.References(noteIndex).Finish
+                map.Boundaries.Add(map.Flat.Length)
+            Else
+                If text.IndexOf(Microsoft.VisualBasic.ChrW(2)) >= 0 Then Throw New System.IO.InvalidDataException("Unmapped native note reference in the Word source.")
+                map.Flat.Append(text)
+            End If
+            visible.Append(text)
+            For charIndex As System.Int32 = 0 To text.Length - 1
+                map.Starts.Add(a)
+                map.Finishes.Add(b)
+            Next
+        Next
+        Return visible.ToString()
     End Function
 
 
@@ -4597,7 +4675,9 @@ Partial Public Class ThisAddIn
             If _uiContext IsNot Nothing Then
                 _uiContext.Post(
                     Sub(state)
-                        ShowDrawioEditor(xmlContent, saveFilePath, disableInternetAfterLoad)
+                        If Not IsHostModelessClosing Then
+                            ShowDrawioEditor(xmlContent, saveFilePath, disableInternetAfterLoad)
+                        End If
                     End Sub, Nothing)
             Else
                 ShowDrawioEditor(xmlContent, saveFilePath, disableInternetAfterLoad)
@@ -4605,6 +4685,7 @@ Partial Public Class ThisAddIn
 
         Catch ex As Exception
             Debug.WriteLine($"OpenDrawioWithWebView2 error: {ex.Message}")
+            If IsHostModelessClosing Then Return
             ShowCustomMessageBox(
                 $"Could not open the diagram editor: {ex.Message}{vbCrLf}{vbCrLf}" &
                 $"Your diagram has been saved to:{vbCrLf}{saveFilePath}")
@@ -4615,17 +4696,29 @@ Partial Public Class ThisAddIn
     ''' Shows the draw.io editor form with WebView2.
     ''' </summary>
     Private Sub ShowDrawioEditor(ByVal xmlContent As String, ByVal saveFilePath As String, ByVal disableInternetAfterLoad As Boolean)
+        If IsHostModelessClosing Then Return
         Try
-            Dim editorForm As New DrawioEditorForm(xmlContent, saveFilePath, disableInternetAfterLoad:=disableInternetAfterLoad)
+            ' Create standalone HWNDs in a consistent context; restore Office immediately.
+            Using dpiScope As System.IDisposable = Global.SharedLibrary.SharedLibrary.WebView2DpiHost.StandaloneWindow()
+                Dim editorForm As New DrawioEditorForm(xmlContent, saveFilePath, disableInternetAfterLoad:=disableInternetAfterLoad)
 
             ' For Custom PDF export on form 
             'AddHandler editorForm.Shown, Sub()            
             '                                editorForm.ExportPdfToDevice()
             '                            End Sub
 
-            editorForm.Show()
-        Catch ex As Exception
+                ' Show via the registry so the validated Office owner is actually
+                ' assigned; registration alone does not establish HWND ownership.
+                Try
+                    ShowHostModelessForm(editorForm)
+                Catch
+                    If Not editorForm.IsDisposed Then editorForm.Dispose()
+                    Throw
+                End Try
+            End Using
+        Catch ex As System.Exception
             Debug.WriteLine($"ShowDrawioEditor error: {ex.Message}")
+            If IsHostModelessClosing Then Return
             ShowCustomMessageBox(
                 $"Could not open the diagram editor: {ex.Message}{vbCrLf}{vbCrLf}" &
                 $"Your diagram has been saved to:{vbCrLf}{saveFilePath}")

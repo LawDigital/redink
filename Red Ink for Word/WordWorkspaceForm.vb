@@ -1,4 +1,5 @@
-﻿' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+﻿' Part of "Red Ink for Word"
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
 ' =============================================================================
 ' File: WordWorkspaceForm.vb
@@ -106,8 +107,7 @@ Public Class WordWorkspaceForm
         Me.Size = Me.MinimumSize
 
         Try
-            Dim bmp As New Bitmap(SharedLibrary.SharedLibrary.SharedMethods.GetLogoBitmap(SharedLibrary.SharedLibrary.SharedMethods.LogoType.Standard))
-            Me.Icon = Icon.FromHandle(bmp.GetHicon())
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(Me)
         Catch
         End Try
 

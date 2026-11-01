@@ -1,0 +1,4 @@
+﻿Name;Email;Organization;Active;Aliases;Location;Attributes;Instruction;MailLanguage;TranslateAttachments;TranslationLanguage;DraftReply;ReplyOnlyWhenAppropriate;WebResearch;TaskInstructions
+Anna Beispiel;anna.beispiel@example.com;Example AG;true;A. Beispiel|Dr. Anna Beispiel;Zurich;Legal|Contracts;Summarize the key points and action items.;German;true;German;true;true;false;"For contractual requests, prepare a reply draft. Include a short draft directly in the email; provide longer drafts as a document."
+Marc Exemple;marc.exemple@example.com;Example SA;true;;Geneva;Finance;;French;false;;false;true;false;
+Sam Example;sam.example@example.com;Example Ltd;true;S. Example;London;Compliance;Keep the summary concise.;English;true;English;true;true;true;When the document raises a regulatory question, research it and include source links. Prepare a reply only when appropriate.

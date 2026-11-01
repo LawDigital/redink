@@ -5,6 +5,10 @@
 ' File: HostToolRegistration.vb
 ' Purpose: Central authority for host-internal tool names, host registration,
 '          deliverable-capable tool classification, and selector display suffixes.
+'
+' KEY ARCHITECTURE
+'   • Surface: HostToolRegistration (VB implementation).
+'   • Entry points/helpers: BuildToolNameSet, BuildAllInternalToolNameSet, RegisterSet.
 ' =============================================================================
 
 Option Explicit On
@@ -24,6 +28,9 @@ Namespace Agents
             "internet_search",
             "web_grounding",
             "knowledge_search",
+            "semantic_archive_list",
+            "semantic_archive_search",
+            "semantic_archive_read",
             ToolLoaderTool.LoaderToolName,
             MemoryTools.ToolPut,
             MemoryTools.ToolGet,
@@ -99,12 +106,13 @@ Namespace Agents
             "summarize_thread",
             "pdf_to_word",
             "create_word_document",
+            "process_word_document",
             "complete_word_tables",
             "create_excel_spreadsheet",
             "create_powerpoint",
             "create_code_file",
             "comment_pdf_document",
-            "extract_data_from_attachments",
+            "extract_data_from_docs",
             "redact_pdf",
             "overlay_pdf",
             "create_audio_file",
@@ -150,7 +158,7 @@ Namespace Agents
             "create_audio_file",
             "comment_pdf_document",
             "redact_pdf",
-            "extract_data_from_attachments",
+            "extract_data_from_docs",
             PythonExecuteTool.ToolName,
             JsRunTool.ToolName,
             "word_doc_read",
@@ -420,6 +428,53 @@ Namespace Agents
         End Function
 
         ''' <summary>
+        ''' Returns whether a tool call is safe and semantically appropriate to expose as
+        ''' an external evidence source in a user-facing "Sources used" footer. Unlike
+        ''' selected_online_sources routing, this is intentionally positive-only: an
+        ''' arbitrary external action tool is not a source unless it declares a source
+        ''' capability. This prevents mutation/file-operation tools from leaking as sources.
+        ''' </summary>
+        Public Function IsSourceEvidenceTool(toolName As String, capabilityTags As String) As Boolean
+            Dim name As String = If(toolName, "").Trim()
+            If name = "" Then Return False
+
+            If HasCapabilityTag(capabilityTags, "source_evidence") OrElse
+               HasCapabilityTag(capabilityTags, "source_retrieval") Then
+                Return True
+            End If
+
+            If name.StartsWith("skill_", System.StringComparison.OrdinalIgnoreCase) OrElse
+               name.StartsWith("agent_", System.StringComparison.OrdinalIgnoreCase) Then
+                Return False
+            End If
+
+            Select Case name.ToLowerInvariant()
+                Case "internet_search",
+                     "web_grounding",
+                     "retrieve_web_content",
+                     "web_content_retriever",
+                     "knowledge_search"
+                    Return True
+            End Select
+
+            ' Dynamically named knowledge-store search tools are evidence retrieval tools.
+            If name.StartsWith("knowledge_search_store_", System.StringComparison.OrdinalIgnoreCase) Then
+                Return True
+            End If
+
+            ' Compatibility fallbacks for built-ins that predate capability tags.
+            ' Keep them retrieval-specific: namespace membership alone must never turn
+            ' future mutation/action tools into user-facing evidence sources.
+            If SharedLibrary.M365ToolService.IsSourceRetrievalToolName(name) Then Return True
+            If String.Equals(name, BrowserTools.BrowserOpenToolName, StringComparison.OrdinalIgnoreCase) OrElse
+               String.Equals(name, BrowserTools.BrowserSnapshotToolName, StringComparison.OrdinalIgnoreCase) Then
+                Return True
+            End If
+
+            Return False
+        End Function
+
+        ''' <summary>
         ''' Classifies a tool for the special <c>selected_online_sources</c> agent/skill alias.
         ''' The caller supplies the authoritative registry for the current run, which is already
         ''' narrowed to tools selected/authorized for that run (including explicit dependencies of
@@ -519,6 +574,35 @@ Namespace Agents
             Dim effectiveMs As Long = baseMs * CLng(multiplier)
             If effectiveMs > System.Int32.MaxValue Then effectiveMs = System.Int32.MaxValue
             Return CInt(System.Math.Max(1L, effectiveMs))
+        End Function
+
+        ' Explicit read-only capability declarations. Unknown tools fail closed; arbitrary names
+        ' containing "read" or "search" are NOT sufficient to grant replay/abandonment privileges.
+        Public Function GetReadOnlyIndependentToolNames(
+            host As ToolingHostKind,
+            Optional resolvedTools As System.Collections.Generic.IEnumerable(Of SharedLibrary.ModelConfig) = Nothing) As System.Collections.Generic.IReadOnlyCollection(Of System.String)
+
+            Dim result As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            Dim nativeNames As System.String() = {
+                TextTools.ToolRead, TextTools.ToolSearch, WordTools.ToolExtract, WordTools.ToolSearch,
+                WordTools.ToolCommentList, ContextExpandTool.ToolName,
+                "retrieve_web_content", "web_content_retriever", "web_grounding", "internet_search", "knowledge_search",
+                "search_in_attachments", "read_attachment", "list_attachments", "extract_pdf_text",
+                "read_word_document_details", "extract_excel_data",
+                "agent_workspace_read", "agent_workspace_list", "agent_workspace_search", "agent_workspace_find_files"
+            }
+            For Each name As System.String In nativeNames
+                If IsSharedInternalToolName(name) OrElse
+                   (host = ToolingHostKind.Outlook AndAlso IsOutlookOnlyInternalToolName(name)) OrElse
+                   (host = ToolingHostKind.Word AndAlso IsWordOnlyInternalToolName(name)) Then result.Add(name)
+            Next
+            If resolvedTools IsNot Nothing Then
+                For Each tool As SharedLibrary.ModelConfig In resolvedTools
+                    If tool Is Nothing OrElse System.String.IsNullOrWhiteSpace(tool.ToolName) Then Continue For
+                    If HasCapabilityTag(tool.CapabilityTags, "read_only_independent") Then result.Add(tool.ToolName.Trim())
+                Next
+            End If
+            Return result.ToList()
         End Function
 
         Public Function GetDeliverableCapableToolNames(host As ToolingHostKind) As IReadOnlyCollection(Of String)

@@ -24,6 +24,10 @@
 '
 '   Each Office add-in adds a small wrapper that translates its host-local
 '   ToolCall / ToolResponse types to the dictionary + result struct below.
+'
+' KEY ARCHITECTURE
+'   • Surface: M365ToolExecutionResult, M365ToolService (VB implementation).
+'   • Entry points/helpers: EnterSearchBudget, IsM365ToolName, IsSourceRetrievalToolName.
 ' =============================================================================
 
 Option Explicit On
@@ -70,6 +74,35 @@ Namespace SharedLibrary
         Public Const DefaultMaxChars As Integer = 200000
         Public Const HardMaxChars As Integer = 1000000
 
+        Private ReadOnly SearchBudgetSlot As New System.Threading.AsyncLocal(Of SearchBudgetScope)()
+
+        Public NotInheritable Class SearchBudgetScope
+            Implements System.IDisposable
+            Friend ReadOnly Context As ISharedContext
+            Friend ReadOnly Sources As M365SearchSources
+            Friend ReadOnly CancellationToken As System.Threading.CancellationToken
+            Friend Remaining As System.Int32
+            Friend ReadOnly Cursors As New System.Collections.Generic.Dictionary(Of System.String, System.Int32)(System.StringComparer.Ordinal)
+            Friend ReadOnly Gate As New System.Threading.SemaphoreSlim(1, 1)
+            Private ReadOnly _previous As SearchBudgetScope
+            Friend Sub New(context As ISharedContext, maximum As System.Int32, sources As M365SearchSources, cancellationToken As System.Threading.CancellationToken)
+                If sources = M365SearchSources.None OrElse (CInt(sources) And (CInt(sources) - 1)) <> 0 Then Throw New System.ArgumentException("A bounded search scope requires exactly one source.", NameOf(sources))
+                Me.Context = context
+                Me.CancellationToken = cancellationToken
+                Me.Sources = sources
+                Remaining = System.Math.Max(1, System.Math.Min(maximum, 2500))
+                _previous = SearchBudgetSlot.Value
+                SearchBudgetSlot.Value = Me
+            End Sub
+            Public Sub Dispose() Implements System.IDisposable.Dispose
+                SearchBudgetSlot.Value = _previous
+            End Sub
+        End Class
+
+        Public Function EnterSearchBudget(context As ISharedContext, maximum As System.Int32, sources As M365SearchSources, Optional cancellationToken As System.Threading.CancellationToken = Nothing) As System.IDisposable
+            Return New SearchBudgetScope(context, maximum, sources, cancellationToken)
+        End Function
+
         Private Const DefaultSuffix As String = ""
 
         ' ════════════════════════════════════════════════════════════════════
@@ -80,6 +113,27 @@ Namespace SharedLibrary
         Public Function IsM365ToolName(toolName As String) As Boolean
             Return Not String.IsNullOrWhiteSpace(toolName) AndAlso
                    toolName.StartsWith(ToolNamePrefix, StringComparison.OrdinalIgnoreCase)
+        End Function
+
+        ''' <summary>
+        ''' Returns True only for the current read/search M365 tools. Keep this
+        ''' explicit instead of treating every future m365_* action as evidence:
+        ''' later mutation/send tools must not become user-facing sources merely
+        ''' because they share the namespace prefix.
+        ''' </summary>
+        Public Function IsSourceRetrievalToolName(toolName As String) As Boolean
+            Dim name As String = If(toolName, "").Trim().ToLowerInvariant()
+            Select Case name
+                Case SearchToolName,
+                     GetMailToolName,
+                     GetMailThreadToolName,
+                     GetFileToolName,
+                     GetEventToolName,
+                     GetChatThreadToolName,
+                     GetOneNotePageToolName
+                    Return True
+            End Select
+            Return False
         End Function
 
         ''' <summary>
@@ -186,7 +240,7 @@ Namespace SharedLibrary
                                             "Defaults to 'all' when omitted."))),
                         New JProperty("max_per_source",
                             New JObject(New JProperty("type", "integer"),
-                                        New JProperty("description", "Default 25, server cap 500."))),
+                                        New JProperty("description", "Default 25. Maximum 2500; mail/event results are paged in blocks of up to 25."))),
                         New JProperty("from_index",
                             New JObject(New JProperty("type", "integer"),
                                         New JProperty("description", "Optional zero-based offset for paging; default 0."))),
@@ -205,6 +259,7 @@ Namespace SharedLibrary
 
             Return New ModelConfig() With {
         .ToolName = SearchToolName,
+        .CapabilityTags = "source_retrieval",
         .ToolDefinition = def.ToString(Formatting.None),
         .ToolInstructionsPrompt =
             "m365_search: Cross-source search of the signed-in user's Microsoft 365 content. " &
@@ -269,12 +324,12 @@ Namespace SharedLibrary
 
             Return New ModelConfig() With {
         .ToolName = GetMailToolName,
+        .CapabilityTags = "source_retrieval",
         .ToolDefinition = def.ToString(Formatting.None),
         .ToolInstructionsPrompt =
-            "m365_get_event: Returns calendar event details. Provide event_id. " &
-            "When the output contains StartLocal or EndLocal, prefer those values for user-facing dates and times. " &
-            "Use StartUtc or EndUtc only when the user explicitly asks for UTC or when a stable UTC reference is required. " &
-            "Copy rendered date/time values exactly.",
+            "m365_get_mail: Returns e-mail details. Provide message_id. " &
+            "When referring to sent/received dates or times, use the rendered date/time values returned by the tool and copy them exactly. " &
+            "Do not reinterpret or relocalize those values.",
         .ModelDescription = "M365: Read e-mail" & suffix,
         .Tool = True,
         .ToolPriority = 995,
@@ -319,6 +374,7 @@ Namespace SharedLibrary
 
             Return New ModelConfig() With {
         .ToolName = GetMailThreadToolName,
+        .CapabilityTags = "source_retrieval",
         .ToolDefinition = def.ToString(Formatting.None),
         .ToolInstructionsPrompt =
             "m365_get_mail_thread: Returns every message in a mail conversation as one transcript. " &
@@ -367,6 +423,7 @@ Namespace SharedLibrary
 
             Return New ModelConfig() With {
                 .ToolName = GetFileToolName,
+        .CapabilityTags = "source_retrieval",
                 .ToolDefinition = def.ToString(Formatting.None),
                 .ToolInstructionsPrompt =
                     "m365_get_file: Returns plain text for a OneDrive/SharePoint file. " &
@@ -400,12 +457,12 @@ Namespace SharedLibrary
 
             Return New ModelConfig() With {
         .ToolName = GetEventToolName,
+        .CapabilityTags = "source_retrieval",
         .ToolDefinition = def.ToString(Formatting.None),
         .ToolInstructionsPrompt =
             "m365_get_event: Returns calendar event details. Provide event_id. " &
-            "If the output contains StartAnchor/StartISO or EndAnchor/EndISO, prefer the *Anchor values " &
-            "when referring to dates or times, and copy them exactly. Do not reinterpret, relocalize or " &
-            "reformat numeric ISO dates.",
+            "For user-facing appointment times, prefer the rendered Start and End local values returned by the tool. " &
+            "Use StartUtc or EndUtc only when UTC is explicitly required. Copy rendered date/time values exactly; do not reinterpret, relocalize, round, or infer them.",
         .ModelDescription = "M365: Read calendar event" & suffix,
         .Tool = True,
         .ToolPriority = 992,
@@ -445,6 +502,7 @@ Namespace SharedLibrary
 
             Return New ModelConfig() With {
         .ToolName = GetChatThreadToolName,
+        .CapabilityTags = "source_retrieval",
         .ToolDefinition = def.ToString(Formatting.None),
         .ToolInstructionsPrompt =
             "m365_get_chat_thread: Returns a Teams conversation as a transcript. Provide either chat_id " &
@@ -477,6 +535,7 @@ Namespace SharedLibrary
 
             Return New ModelConfig() With {
                 .ToolName = GetOneNotePageToolName,
+        .CapabilityTags = "source_retrieval",
                 .ToolDefinition = def.ToString(Formatting.None),
                 .ToolInstructionsPrompt = "m365_get_onenote_page: Returns OneNote page text. Provide page_id.",
                 .ModelDescription = "M365: Read OneNote page" & suffix,
@@ -491,6 +550,42 @@ Namespace SharedLibrary
         ' ════════════════════════════════════════════════════════════════════
 
         Private Async Function Execute_Search(context As ISharedContext,
+                                              args As System.Collections.Generic.Dictionary(Of System.String, System.Object),
+                                              log As System.Action(Of System.String),
+                                              ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of M365ToolExecutionResult)
+            Dim budget = SearchBudgetSlot.Value
+            If budget Is Nothing OrElse Not System.Object.ReferenceEquals(budget.Context, context) Then Return Await Execute_SearchCore(context, args, log, ct).ConfigureAwait(False)
+            If Not ct.CanBeCanceled Then ct = budget.CancellationToken
+            Await budget.Gate.WaitAsync(ct).ConfigureAwait(False)
+            Try
+                If budget.Remaining <= 0 Then
+                    Return New M365ToolExecutionResult() With {.Response = "{""hits"":[],""total"":0,""budget_exhausted"":true}"}
+                End If
+                Dim limited As New System.Collections.Generic.Dictionary(Of System.String, System.Object)(args)
+                limited("max_per_source") = System.Math.Min(budget.Remaining, System.Math.Max(1, GetArgInt(args, "max_per_source", budget.Remaining)))
+                limited("sources") = budget.Sources.ToString()
+                Dim cursorKey = GetArgString(args, "query").Trim() & "|" & GetArgString(args, "from_date") & "|" & GetArgString(args, "to_date") & "|" & GetArgString(args, "kql_extra")
+                Dim nextFrom As System.Int32 = 0
+                budget.Cursors.TryGetValue(cursorKey, nextFrom)
+                limited("from_index") = nextFrom
+                Dim result = Await Execute_SearchCore(context, limited, log, ct).ConfigureAwait(False)
+                If result.Success Then
+                    Dim envelope = Newtonsoft.Json.Linq.JObject.Parse(result.Response)
+                    Dim errors = TryCast(envelope("errors"), Newtonsoft.Json.Linq.JObject)
+                    If errors IsNot Nothing AndAlso errors.HasValues Then
+                        result.Success = False
+                        result.ErrorMessage = "Search coverage failed: " & errors.ToString(Newtonsoft.Json.Formatting.None)
+                    End If
+                    budget.Remaining -= envelope.Value(Of System.Int32)("total")
+                    budget.Cursors(cursorKey) = envelope.Value(Of System.Int32)("next_from_index")
+                End If
+                Return result
+            Finally
+                budget.Gate.Release()
+            End Try
+        End Function
+
+        Private Async Function Execute_SearchCore(context As ISharedContext,
                                               args As Dictionary(Of String, Object),
                                               log As Action(Of String),
                                               ct As CancellationToken) As Task(Of M365ToolExecutionResult)
@@ -502,7 +597,7 @@ Namespace SharedLibrary
             If sources = M365SearchSources.None Then sources = M365SearchSources.All
 
             Dim opts As New M365SearchOptions() With {
-                .MaxPerSource = Math.Max(1, Math.Min(GetArgInt(args, "max_per_source", 25), 500)),
+                .MaxPerSource = Math.Max(1, Math.Min(GetArgInt(args, "max_per_source", 25), 2500)),
                 .FromIndex = Math.Max(0, GetArgInt(args, "from_index", 0)),
                 .From = GetArgDate(args, "from_date"),
                 .To = GetArgDate(args, "to_date"),
@@ -515,7 +610,9 @@ Namespace SharedLibrary
             Dim result As M365SearchResult
             Try
                 result = Await M365Service.SearchAsync(context, query, sources, opts, Nothing, ct).ConfigureAwait(False)
-            Catch ex As Exception
+            Catch ex As System.OperationCanceledException
+                Throw
+            Catch ex As System.Exception
                 r.Success = False : r.ErrorMessage = "M365 search failed: " & ex.Message : Return r
             End Try
 
@@ -544,6 +641,8 @@ Namespace SharedLibrary
                         New JProperty("requested_sources", sources.ToString()),
                         New JProperty("requested_max_per_source", opts.MaxPerSource),
                         New JProperty("requested_from_index", opts.FromIndex),
+                        New JProperty("next_from_index", If(result.NextFromIndexBySource.ContainsKey(M365SearchSources.Mail), result.NextFromIndexBySource(M365SearchSources.Mail), opts.FromIndex + result.Hits.Count)),
+                        New JProperty("exhausted", If(result.ExhaustedBySource.ContainsKey(M365SearchSources.Mail), result.ExhaustedBySource(M365SearchSources.Mail), result.Hits.Count < opts.MaxPerSource)),
                         New JProperty("requested_from_date", requestedFromDate),
                         New JProperty("requested_to_date", requestedToDate),
                         New JProperty("requested_time_zone", System.TimeZoneInfo.Local.Id),

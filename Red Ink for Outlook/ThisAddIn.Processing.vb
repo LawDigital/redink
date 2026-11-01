@@ -588,7 +588,11 @@ Partial Public Class ThisAddIn
             lines(i) = line
         Next
 
-        Return String.Join(newline, lines)
+        ' Move whitespace captured inside Word formatting runs outside Markdown markers.
+        ' E.g. "long-awaited** new Pro model**" -> "long-awaited **new Pro model**".
+        ' The shared HTML insertion path applies the same rule to model output.
+        Return Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownEmphasisWhitespace(
+            String.Join(newline, lines))
     End Function
 
 
@@ -630,9 +634,9 @@ Partial Public Class ThisAddIn
 
             Debug.WriteLine($"Searchrange = '{searchRange.Text}' (after change)")
 
-            ' After replacement, searchRange now points to the match
-            ' Check if this match/replacement went beyond boundary
-            If searchRange.End > originalEnd Then
+            ' Replacement grows the live selection range together with the text.
+            ' Compare against that updated boundary, not the pre-replacement end.
+            If searchRange.Start < currentPosition OrElse searchRange.End > rng.End Then
                 Debug.WriteLine("Went too far!")
                 doc.Undo()
                 Exit Do

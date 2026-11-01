@@ -1,0 +1,1289 @@
+--- a/PromptPicker/Native.vb
++++ b/PromptPicker/Native.vb
+@@ -1,6 +1,9 @@
+ Friend Module Native
+     Public Const WM_HOTKEY As Integer = &H312
+     Public Const WM_REBIND As Integer = &H8000 + &H141
++    Public Const VK_LBUTTON As Integer = &H1
++    Public Const VK_RBUTTON As Integer = &H2
++    Public Const VK_MBUTTON As Integer = &H4
+     Public Const VK_CONTROL As Integer = &H11
+     Public Const VK_MENU As Integer = &H12
+     Public Const VK_SHIFT As Integer = &H10
+@@ -8,6 +11,50 @@
+     Public Const MOD_CONTROL As UInteger = 2UI
+     Public Const MOD_SHIFT As UInteger = 4UI
+     Public Const MOD_NOREPEAT As UInteger = &H4000UI
++    Public Const INPUT_KEYBOARD As UInteger = 1UI
++    Public Const KEYEVENTF_KEYUP As UInteger = &H2UI
++    Public Const VK_V As UShort = &H56US
++
++    ' SendInput is process-independent, unlike SendKeys (which can dispatch to
++    ' a changed active control after the WebView2 dialog closes).
++    <System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)>
++    Public Structure InputRecord
++        Public InputType As UInteger
++        Public Data As InputData
++    End Structure
++
++    <System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit)>
++    Public Structure InputData
++        <System.Runtime.InteropServices.FieldOffset(0)>
++        Public Keyboard As KeyboardRecord
++        ' The native INPUT union is sized by MOUSEINPUT (32 bytes on x64).
++        ' Without it, SendInput rejects the 32-byte keyboard-only record.
++        <System.Runtime.InteropServices.FieldOffset(0)>
++        Public Mouse As MouseRecord
++    End Structure
++
++    <System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)>
++    Public Structure MouseRecord
++        Public Dx As Integer
++        Public Dy As Integer
++        Public MouseData As UInteger
++        Public Flags As UInteger
++        Public Time As UInteger
++        Public ExtraInfo As System.IntPtr
++    End Structure
++
++    <System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)>
++    Public Structure KeyboardRecord
++        Public VirtualKey As UShort
++        Public ScanCode As UShort
++        Public Flags As UInteger
++        Public Time As UInteger
++        Public ExtraInfo As System.IntPtr
++    End Structure
++
++    <System.Runtime.InteropServices.DllImport("user32.dll", SetLastError:=True)>
++    Public Function SendInput(count As UInteger, input As InputRecord(), recordSize As Integer) As UInteger
++    End Function
+ 
+     <System.Runtime.InteropServices.DllImport("user32.dll", SetLastError:=True)>
+     Public Function RegisterHotKey(hwnd As System.IntPtr, id As Integer, modifiers As UInteger, key As UInteger) As Boolean
+--- a/PromptPicker/PickerForm.vb
++++ b/PromptPicker/PickerForm.vb
+@@ -28,12 +28,14 @@
+         config = settings
+         selectedText = If(selection, "")
+         entries = prompts
+-        Text = "Prompt Picker · Red Ink"
+-        ClientSize = New System.Drawing.Size(1000, 660)
+-        MinimumSize = New System.Drawing.Size(720, 480)
++        Text = "Prompt Picker"
++        ClientSize = New System.Drawing.Size(690, 415)
++        MinimumSize = New System.Drawing.Size(525, 320)
+         StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen
+-        BackColor = System.Drawing.Color.FromArgb(247, 248, 250)
+-        Font = New System.Drawing.Font("Segoe UI", 10.0F)
++        AutoScaleMode = System.Windows.Forms.AutoScaleMode.Dpi
++        TopMost = True
++        BackColor = PickerUi.Surface
++        Font = New System.Drawing.Font("Segoe UI", 9.0F)
+         KeyPreview = True
+         Icon = System.Drawing.Icon.ExtractAssociatedIcon(System.Windows.Forms.Application.ExecutablePath)
+         Controls.Add(view)
+@@ -93,8 +95,8 @@
+                System.Uri.TryCreate(args.Request.Uri, System.UriKind.Absolute, resource) AndAlso
+                System.String.Equals(resource.GetLeftPart(System.UriPartial.Authority) & "/", Origin, System.StringComparison.OrdinalIgnoreCase) AndAlso resource.Query = "" Then
+                 Dim name As String = resource.AbsolutePath.TrimStart("/"c)
+-                If name = "picker.html" OrElse name = "picker.css" OrElse name = "picker.js" OrElse name = "logo.png" Then
+-                    Dim path As String = If(name = "logo.png", "PromptPicker.Assets.Red_Ink_Logo.png", "PromptPicker.Web." & name)
++                If name = "picker.html" OrElse name = "picker.css" OrElse name = "picker.js" Then
++                    Dim path As String = "PromptPicker.Web." & name
+                     Using body As System.IO.Stream = System.Reflection.Assembly.GetExecutingAssembly().GetManifestResourceStream(path)
+                         If body IsNot Nothing Then
+                             Using output As New System.IO.MemoryStream()
+@@ -102,7 +104,7 @@
+                                 contents = output.ToArray()
+                             End Using
+                             status = 200
+-                            mime = If(name.EndsWith(".html", System.StringComparison.Ordinal), "text/html; charset=utf-8", If(name.EndsWith(".css", System.StringComparison.Ordinal), "text/css; charset=utf-8", If(name.EndsWith(".js", System.StringComparison.Ordinal), "text/javascript; charset=utf-8", "image/png")))
++                            mime = If(name.EndsWith(".html", System.StringComparison.Ordinal), "text/html; charset=utf-8", If(name.EndsWith(".css", System.StringComparison.Ordinal), "text/css; charset=utf-8", "text/javascript; charset=utf-8"))
+                         End If
+                     End Using
+                 End If
+@@ -139,8 +141,6 @@
+                 .hasSelection = selectedText.Length > 0,
+                 .canSave = selectedText.Length > 0 AndAlso PromptLibraryStore.CanSaveLocal(config),
+                 .hasLocal = config.HasLocal,
+-                .centralPath = config.CentralPath,
+-                .localPath = config.LocalPath,
+                 .selectionLength = selectedText.Length
+             }))
+         Catch ex As System.Exception
+@@ -167,7 +167,16 @@
+                             If idField.TryGetInt32(id) Then CommitSelection(id)
+                         End If
+                     Case "save"
+-                        SaveSelection()
++                        Dim categoryField As System.Text.Json.JsonElement
++                        Dim suggestedCategory As String = ""
++                        If payload.TryGetProperty("category", categoryField) AndAlso categoryField.ValueKind = System.Text.Json.JsonValueKind.String Then
++                            Dim candidate As String = categoryField.GetString()
++                            If candidate IsNot Nothing AndAlso candidate.Length < 256 AndAlso
++                               entries.Any(Function(item As PromptEntry) System.String.Equals(item.Category, candidate, System.StringComparison.OrdinalIgnoreCase)) Then
++                                suggestedCategory = candidate
++                            End If
++                        End If
++                        SaveSelection(suggestedCategory)
+                     Case "close"
+                         DialogResult = System.Windows.Forms.DialogResult.Cancel
+                         Close()
+@@ -185,9 +194,9 @@
+         Close()
+     End Sub
+ 
+-    Private Sub SaveSelection()
++    Private Sub SaveSelection(Optional suggestedCategory As String = "")
+         If selectedText.Length = 0 OrElse Not PromptLibraryStore.CanSaveLocal(config) Then Return
+-        Dim chosenCategory As String = ""
++        Dim chosenCategory As String = suggestedCategory
+         If nativeMode AndAlso fallbackCategory IsNot Nothing AndAlso fallbackCategory.SelectedItem IsNot Nothing Then
+             chosenCategory = fallbackCategory.SelectedItem.ToString()
+         End If
+@@ -217,36 +226,33 @@
+         If nativeMode OrElse IsDisposed Then Return
+         nativeMode = True
+         view.Visible = False
+-        Dim root As New System.Windows.Forms.TableLayoutPanel With {.Dock = System.Windows.Forms.DockStyle.Fill, .Padding = New System.Windows.Forms.Padding(20), .ColumnCount = 2, .RowCount = 5, .BackColor = System.Drawing.Color.FromArgb(247, 248, 250)}
+-        root.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 42))
+-        root.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 58))
+-        root.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 52))
+-        root.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 55))
++        Dim root As New System.Windows.Forms.TableLayoutPanel With {.Dock = System.Windows.Forms.DockStyle.Fill, .Padding = New System.Windows.Forms.Padding(11), .ColumnCount = 2, .RowCount = 4, .BackColor = System.Drawing.Color.FromArgb(248, 248, 249)}
++        root.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 55))
++        root.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 45))
++        root.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 44))
+         root.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 100))
+-        root.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 45))
+-        root.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 54))
+-        root.Controls.Add(New System.Windows.Forms.Label With {.Text = "PROMPT PICKER", .Font = New System.Drawing.Font("Segoe UI Semibold", 20.0F), .Dock = System.Windows.Forms.DockStyle.Fill, .ForeColor = System.Drawing.Color.FromArgb(45, 52, 65)}, 0, 0)
+-        root.Controls.Add(New System.Windows.Forms.Label With {.Text = "Red Ink  ·  Native Oberfläche (WebView2 nicht verfügbar)", .Dock = System.Windows.Forms.DockStyle.Fill, .TextAlign = System.Drawing.ContentAlignment.MiddleRight}, 1, 0)
+-        fallbackSearch = New System.Windows.Forms.TextBox With {.Dock = System.Windows.Forms.DockStyle.Fill, .PlaceholderText = "Prompt suchen …"}
++        root.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 24))
++        root.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 42))
++        fallbackSearch = New System.Windows.Forms.TextBox With {.Dock = System.Windows.Forms.DockStyle.Fill, .PlaceholderText = "Prompts durchsuchen"}
+         fallbackCategory = New System.Windows.Forms.ComboBox With {.Dock = System.Windows.Forms.DockStyle.Fill, .DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList}
+-        root.Controls.Add(fallbackSearch, 0, 1)
+-        root.Controls.Add(fallbackCategory, 1, 1)
++        root.Controls.Add(fallbackSearch, 0, 0)
++        root.Controls.Add(fallbackCategory, 1, 0)
+         fallbackList = New System.Windows.Forms.ListBox With {.Dock = System.Windows.Forms.DockStyle.Fill, .DisplayMember = "Title", .IntegralHeight = False}
+         fallbackPreview = New System.Windows.Forms.TextBox With {.Dock = System.Windows.Forms.DockStyle.Fill, .Multiline = True, .ReadOnly = True, .ScrollBars = System.Windows.Forms.ScrollBars.Vertical}
+-        root.Controls.Add(fallbackList, 0, 2)
+-        root.Controls.Add(fallbackPreview, 1, 2)
++        root.Controls.Add(fallbackList, 0, 1)
++        root.Controls.Add(fallbackPreview, 1, 1)
+         Dim sourceText As String = If(config.HasLocal, "Lokal + Zentral", "Nur zentrale Library") & "  ·  " & entries.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) & " Prompts"
+-        root.Controls.Add(New System.Windows.Forms.Label With {.Text = sourceText, .Dock = System.Windows.Forms.DockStyle.Fill, .TextAlign = System.Drawing.ContentAlignment.MiddleLeft}, 0, 3)
+-        Dim info As New System.Windows.Forms.Label With {.Text = If(config.HasLocal, "Auswahl kann lokal gespeichert werden.", "PromptLibLocal nicht definiert – Speichern deaktiviert."), .Dock = System.Windows.Forms.DockStyle.Fill, .TextAlign = System.Drawing.ContentAlignment.MiddleLeft}
+-        root.Controls.Add(info, 1, 3)
++        root.Controls.Add(New System.Windows.Forms.Label With {.Text = sourceText, .Dock = System.Windows.Forms.DockStyle.Fill, .TextAlign = System.Drawing.ContentAlignment.MiddleLeft}, 0, 2)
++
+         Dim bar As New System.Windows.Forms.FlowLayoutPanel With {.Dock = System.Windows.Forms.DockStyle.Fill, .FlowDirection = System.Windows.Forms.FlowDirection.RightToLeft, .WrapContents = False}
+-        Dim choose As New System.Windows.Forms.Button With {.Text = "Einfügen", .Width = 105, .Height = 33}
+-        Dim close As New System.Windows.Forms.Button With {.Text = "Abbrechen", .Width = 105, .Height = 33}
+-        fallbackSave = New System.Windows.Forms.Button With {.Text = "Markierung speichern", .Width = 173, .Height = 33, .Enabled = selectedText.Length > 0 AndAlso PromptLibraryStore.CanSaveLocal(config)}
++        Dim choose As System.Windows.Forms.Button = PickerUi.ActionButton("Einfügen", "insert", True, 112)
++        Dim close As System.Windows.Forms.Button = PickerUi.ActionButton("Abbrechen", "close", False, 123)
++        fallbackSave = PickerUi.ActionButton("Markierung speichern", "plus", False, 185)
++        fallbackSave.Enabled = selectedText.Length > 0 AndAlso PromptLibraryStore.CanSaveLocal(config)
+         bar.Controls.Add(choose)
+         bar.Controls.Add(close)
+         bar.Controls.Add(fallbackSave)
+-        root.Controls.Add(bar, 0, 4)
++        root.Controls.Add(bar, 0, 3)
+         root.SetColumnSpan(bar, 2)
+         Controls.Add(root)
+         root.BringToFront()
+@@ -256,7 +262,12 @@
+                                                           Dim item As PromptEntry = TryCast(fallbackList.SelectedItem, PromptEntry)
+                                                           fallbackPreview.Text = If(item Is Nothing, "", item.Prompt.Replace("\n", vbCrLf))
+                                                       End Sub
+-        AddHandler fallbackList.DoubleClick, Sub(sender As Object, e As System.EventArgs) ChooseFromFallback()
++        AddHandler fallbackList.MouseDoubleClick, Sub(sender As Object, e As System.Windows.Forms.MouseEventArgs)
++                                                      If fallbackList.IndexFromPoint(e.Location) >= 0 Then
++                                                          fallbackList.SelectedIndex = fallbackList.IndexFromPoint(e.Location)
++                                                          ChooseFromFallback()
++                                                      End If
++                                                  End Sub
+         AddHandler fallbackList.KeyDown, Sub(sender As Object, e As System.Windows.Forms.KeyEventArgs)
+                                              If e.KeyCode = System.Windows.Forms.Keys.Enter Then
+                                                  ChooseFromFallback()
+--- /dev/null
++++ b/PromptPicker/PickerUi.vb
+@@ -0,0 +1,207 @@
++' Small shared desktop control vocabulary for Prompt Picker dialogs and native fallback.
++' The line icons mirror Ask Inky's compact 32px SVG actions without external fonts.
++Friend NotInheritable Class PickerUi
++    Private Sub New()
++    End Sub
++
++    Public Shared ReadOnly Property Surface As System.Drawing.Color
++        Get
++            Return System.Drawing.Color.FromArgb(249, 249, 250)
++        End Get
++    End Property
++
++    Public Shared ReadOnly Property Ink As System.Drawing.Color
++        Get
++            Return System.Drawing.Color.FromArgb(50, 49, 48)
++        End Get
++    End Property
++
++    Public Shared ReadOnly Property Muted As System.Drawing.Color
++        Get
++            Return System.Drawing.Color.FromArgb(102, 99, 96)
++        End Get
++    End Property
++
++    Public Shared Function Caption(value As String) As System.Windows.Forms.Label
++        Return New System.Windows.Forms.Label With {
++            .Text = value,
++            .AutoSize = True,
++            .ForeColor = Muted,
++            .Font = New System.Drawing.Font("Segoe UI", 9.0F),
++            .Margin = New System.Windows.Forms.Padding(0, 0, 0, 5)
++        }
++    End Function
++
++    Public Shared Sub StyleTextBox(value As System.Windows.Forms.TextBox)
++        value.BorderStyle = System.Windows.Forms.BorderStyle.FixedSingle
++        value.BackColor = System.Drawing.Color.White
++        value.ForeColor = Ink
++        value.Font = New System.Drawing.Font("Segoe UI", 9.5F)
++    End Sub
++
++    Public Shared Function ActionButton(caption As String, iconName As String, isPrimary As Boolean, width As Integer) As System.Windows.Forms.Button
++        Dim fore As System.Drawing.Color = If(isPrimary, System.Drawing.Color.White, Ink)
++        Dim control As New RoundedActionButton With {
++            .Text = caption,
++            .Width = width,
++            .Height = 34,
++            .IsPrimary = isPrimary,
++            .Font = New System.Drawing.Font("Segoe UI", 9.0F),
++            .Margin = New System.Windows.Forms.Padding(6, 0, 0, 0),
++            .TabStop = True
++        }
++        control.Image = DrawIcon(iconName, fore)
++        AddHandler control.Disposed, Sub(sender As Object, e As System.EventArgs)
++                                         If control.Image IsNot Nothing Then control.Image.Dispose()
++                                     End Sub
++        Return control
++    End Function
++
++    ' A native Button, not a decorative label: WinForms still provides keyboard
++    ' activation, access keys, AcceptButton, CancelButton and DialogResult.
++    Private NotInheritable Class RoundedActionButton
++        Inherits System.Windows.Forms.Button
++
++        Private hovering As Boolean
++        Private pressing As Boolean
++        Public Property IsPrimary As Boolean
++
++        Public Sub New()
++            SetStyle(System.Windows.Forms.ControlStyles.UserPaint Or
++                     System.Windows.Forms.ControlStyles.AllPaintingInWmPaint Or
++                     System.Windows.Forms.ControlStyles.OptimizedDoubleBuffer Or
++                     System.Windows.Forms.ControlStyles.ResizeRedraw, True)
++            FlatStyle = System.Windows.Forms.FlatStyle.Flat
++            UseVisualStyleBackColor = False
++        End Sub
++
++        Protected Overrides Sub OnMouseEnter(e As System.EventArgs)
++            MyBase.OnMouseEnter(e)
++            hovering = True
++            Invalidate()
++        End Sub
++
++        Protected Overrides Sub OnMouseLeave(e As System.EventArgs)
++            MyBase.OnMouseLeave(e)
++            hovering = False
++            Invalidate()
++        End Sub
++
++        Protected Overrides Sub OnMouseDown(e As System.Windows.Forms.MouseEventArgs)
++            MyBase.OnMouseDown(e)
++            pressing = (e.Button = System.Windows.Forms.MouseButtons.Left)
++            Invalidate()
++        End Sub
++
++        Protected Overrides Sub OnMouseUp(e As System.Windows.Forms.MouseEventArgs)
++            MyBase.OnMouseUp(e)
++            pressing = False
++            Invalidate()
++        End Sub
++
++        Protected Overrides Sub OnGotFocus(e As System.EventArgs)
++            MyBase.OnGotFocus(e)
++            Invalidate()
++        End Sub
++
++        Protected Overrides Sub OnLostFocus(e As System.EventArgs)
++            MyBase.OnLostFocus(e)
++            pressing = False
++            Invalidate()
++        End Sub
++
++        Protected Overrides Sub OnEnabledChanged(e As System.EventArgs)
++            MyBase.OnEnabledChanged(e)
++            Invalidate()
++        End Sub
++
++        Protected Overrides Sub OnPaint(e As System.Windows.Forms.PaintEventArgs)
++            Dim painter As System.Drawing.Graphics = e.Graphics
++            painter.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias
++            painter.Clear(If(Parent Is Nothing, PickerUi.Surface, Parent.BackColor))
++            Dim fill As System.Drawing.Color = If(IsPrimary, System.Drawing.Color.FromArgb(185, 19, 18), System.Drawing.Color.White)
++            Dim edge As System.Drawing.Color = If(IsPrimary, fill, System.Drawing.Color.FromArgb(220, 218, 215))
++            Dim fore As System.Drawing.Color = If(IsPrimary, System.Drawing.Color.White, PickerUi.Ink)
++            If Not Enabled Then
++                fill = System.Drawing.Color.FromArgb(246, 245, 244)
++                edge = System.Drawing.Color.FromArgb(233, 232, 230)
++                fore = System.Drawing.Color.FromArgb(169, 166, 164)
++            ElseIf pressing Then
++                fill = If(IsPrimary, System.Drawing.Color.FromArgb(145, 16, 15), System.Drawing.Color.FromArgb(237, 235, 233))
++            ElseIf hovering Then
++                fill = If(IsPrimary, System.Drawing.Color.FromArgb(157, 16, 15), System.Drawing.Color.FromArgb(247, 245, 243))
++            End If
++            Using shape As New System.Drawing.Drawing2D.GraphicsPath()
++                Dim w As Single = CSng(System.Math.Max(0, Width - 1))
++                Dim h As Single = CSng(System.Math.Max(0, Height - 1))
++                Dim diameter As Single = System.Math.Min(14.0F, System.Math.Min(w, h))
++                shape.AddArc(0.5F, 0.5F, diameter, diameter, 180.0F, 90.0F)
++                shape.AddArc(w - diameter, 0.5F, diameter, diameter, 270.0F, 90.0F)
++                shape.AddArc(w - diameter, h - diameter, diameter, diameter, 0.0F, 90.0F)
++                shape.AddArc(0.5F, h - diameter, diameter, diameter, 90.0F, 90.0F)
++                shape.CloseFigure()
++                Using brush As New System.Drawing.SolidBrush(fill)
++                    painter.FillPath(brush, shape)
++                End Using
++                Using stroke As New System.Drawing.Pen(edge, 1.0F)
++                    painter.DrawPath(stroke, shape)
++                End Using
++            End Using
++            Dim textFlags As System.Windows.Forms.TextFormatFlags = System.Windows.Forms.TextFormatFlags.NoPadding Or
++                System.Windows.Forms.TextFormatFlags.SingleLine Or System.Windows.Forms.TextFormatFlags.NoPrefix
++            Dim textSize As System.Drawing.Size = System.Windows.Forms.TextRenderer.MeasureText(Text, Font, New System.Drawing.Size(2048, Height), textFlags)
++            Dim iconSize As Integer = If(Image Is Nothing, 0, 20)
++            Dim space As Integer = If(iconSize > 0 AndAlso Text.Length > 0, 6, 0)
++            Dim left As Integer = System.Math.Max(5, (Width - textSize.Width - iconSize - space) \ 2)
++            If Image IsNot Nothing Then
++                Using effects As New System.Drawing.Imaging.ImageAttributes()
++                    If Not Enabled Then
++                        Dim matrix As New System.Drawing.Imaging.ColorMatrix()
++                        matrix.Matrix33 = 0.45F
++                        effects.SetColorMatrix(matrix)
++                    End If
++                    painter.DrawImage(Image, New System.Drawing.Rectangle(left, (Height - 20) \ 2, 20, 20), 0, 0, Image.Width, Image.Height, System.Drawing.GraphicsUnit.Pixel, effects)
++                End Using
++            End If
++            Dim labelRect As New System.Drawing.Rectangle(left + iconSize + space, 0, System.Math.Max(0, Width - left - iconSize - space - 4), Height)
++            System.Windows.Forms.TextRenderer.DrawText(painter, Text, Font, labelRect, fore, textFlags Or System.Windows.Forms.TextFormatFlags.VerticalCenter)
++            If Focused AndAlso ShowFocusCues Then
++                Dim focus As New System.Drawing.Rectangle(3, 3, System.Math.Max(0, Width - 7), System.Math.Max(0, Height - 7))
++                System.Windows.Forms.ControlPaint.DrawFocusRectangle(painter, focus, fore, fill)
++            End If
++        End Sub
++    End Class
++
++    Private Shared Function DrawIcon(name As String, inkColor As System.Drawing.Color) As System.Drawing.Bitmap
++        Dim bitmap As New System.Drawing.Bitmap(20, 20)
++        Using graphics As System.Drawing.Graphics = System.Drawing.Graphics.FromImage(bitmap)
++            graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias
++            Using stroke As New System.Drawing.Pen(inkColor, 1.7F)
++                stroke.StartCap = System.Drawing.Drawing2D.LineCap.Round
++                stroke.EndCap = System.Drawing.Drawing2D.LineCap.Round
++                stroke.LineJoin = System.Drawing.Drawing2D.LineJoin.Round
++                Select Case name
++                    Case "check"
++                        graphics.DrawLines(stroke, {New System.Drawing.PointF(3.5F, 10.5F), New System.Drawing.PointF(8.0F, 14.5F), New System.Drawing.PointF(16.5F, 5.5F)})
++                    Case "close"
++                        graphics.DrawLine(stroke, 5.0F, 5.0F, 15.0F, 15.0F)
++                        graphics.DrawLine(stroke, 15.0F, 5.0F, 5.0F, 15.0F)
++                    Case "plus"
++                        graphics.DrawLine(stroke, 10.0F, 4.0F, 10.0F, 16.0F)
++                        graphics.DrawLine(stroke, 4.0F, 10.0F, 16.0F, 10.0F)
++                    Case "insert"
++                        graphics.DrawLine(stroke, 3.5F, 10.0F, 16.0F, 10.0F)
++                        graphics.DrawLine(stroke, 11.0F, 5.0F, 16.0F, 10.0F)
++                        graphics.DrawLine(stroke, 16.0F, 10.0F, 11.0F, 15.0F)
++                    Case "keyboard"
++                        graphics.DrawRectangle(stroke, 2.5F, 5.0F, 15.0F, 10.0F)
++                        graphics.DrawLine(stroke, 6.0F, 12.5F, 14.0F, 12.5F)
++                        graphics.DrawLine(stroke, 5.5F, 8.5F, 6.5F, 8.5F)
++                        graphics.DrawLine(stroke, 9.5F, 8.5F, 10.5F, 8.5F)
++                        graphics.DrawLine(stroke, 13.5F, 8.5F, 14.5F, 8.5F)
++                End Select
++            End Using
++        End Using
++        Return bitmap
++    End Function
++End Class
+--- a/PromptPicker/PromptPicker.vbproj
++++ b/PromptPicker/PromptPicker.vbproj
+@@ -22,7 +22,6 @@
+     <EmbeddedResource Include="Web\picker.html" LogicalName="PromptPicker.Web.picker.html" />
+     <EmbeddedResource Include="Web\picker.css" LogicalName="PromptPicker.Web.picker.css" />
+     <EmbeddedResource Include="Web\picker.js" LogicalName="PromptPicker.Web.picker.js" />
+-    <EmbeddedResource Include="Assets\Red_Ink_Logo.png" LogicalName="PromptPicker.Assets.Red_Ink_Logo.png" />
+     <EmbeddedResource Include="LICENSE.txt" LogicalName="PromptPicker.LICENSE.txt" />
+   </ItemGroup>
+ </Project>
+--- a/PromptPicker/README.md
++++ b/PromptPicker/README.md
+@@ -1,10 +1,10 @@
+ # Prompt Picker – Standalone Tray-App für Red Ink
+ 
+-Eigenständiges **VB.NET / WinForms / .NET 8 (Windows)**-Projekt im Design von Ask Inky. Verwendet denselben WebView2-NuGet-Stand und dasselbe Red-Ink-Icon wie Ask Inky. Es gibt **keine Projekt- oder Laufzeitabhängigkeit von Ask Inky, Office oder der grossen SharedLibrary**. Das Projekt ist in der beiliegenden angepassten `Red Ink.sln` bereits eingetragen; in einer anderen Solution kann `PromptPicker.vbproj` über **Vorhandenes Projekt hinzufügen** eingefügt werden.
++Eigenständiges **VB.NET / WinForms / .NET 8 (Windows)**-Projekt im Design von Ask Inky. Verwendet denselben WebView2-NuGet-Stand und dasselbe Red-Ink-Icon wie Ask Inky. Es gibt **keine Projekt- oder Laufzeitabhängigkeit von Ask Inky, Office oder der grossen SharedLibrary**. Das Projekt ist in der mit der Erstlieferung gelieferten angepassten `Red Ink.sln` bereits eingetragen; in einer anderen Solution kann `PromptPicker.vbproj` über **Vorhandenes Projekt hinzufügen** eingefügt werden. **Folgeupdate UI:** Das Änderungs-ZIP enthält ausschliesslich neue/geänderte Dateien, die über den bisherigen `PromptPicker`-Projektordner kopiert werden. Die Solution und die Red-Ink-/Ask-Inky-Projekte bleiben unverändert.
+ 
+ ## Start
+ 
+-1. Den Ordner `PromptPicker` auf derselben Ebene wie `AskInky` ablegen. Bei Bedarf die beiliegende `Red Ink.sln` ersetzen (es wurden nur Projektverweis und Konfigurationen ergänzt).
++1. Bei Erstinstallation den Ordner `PromptPicker` neben `AskInky` ablegen und bei Bedarf die Solution aus der Erstlieferung verwenden. Bei diesem UI-Update die Dateien aus dem Änderungs-ZIP mit gleicher Verzeichnisstruktur im bestehenden Projekt überschreiben.
+ 2. In **Visual Studio 2022**, mit .NET-8-Windows-Desktop-Workload, `PromptPicker` als Startprojekt setzen und erstellen. NuGet stellt `Microsoft.Web.WebView2` 1.0.2903.40 wieder her.
+ 3. `PromptPicker.exe` starten; die App läuft ausschliesslich im Tray. Standardmässig öffnet **Ctrl+Alt+P** den Picker, separat von den Ask-Inky-Hotkeys Ctrl+Alt+K und Ctrl+Alt+O.
+ 4. Per Rechtsklick auf das Tray-Icon: Picker öffnen, globalen Hotkey anpassen oder beenden. Die Hotkey-Einstellung liegt unter `%AppData%\Red Ink\PromptPicker\settings.json`, nicht in `redink.ini`.
+@@ -30,11 +30,11 @@
+ 
+ **Verbindliche Einschränkung:** Ist `PromptLibLocal` in `redink.ini` **nicht definiert oder leer**, ist die Speicherfunktion deaktiviert. Es wird weder ein Pfad abgefragt, eine lokale Datei angelegt, ein Verzeichnis eingerichtet noch `redink.ini` verändert. Nur wenn ein gültiger lokaler Zielpfad explizit konfiguriert ist, darf die dort bezeichnete Library bei einem vom Benutzer bestätigten Speichervorgang angelegt bzw. ergänzt werden. Niemals wird stattdessen in `PromptLib` gespeichert.
+ 
+-**Einfügen:** Der Zielprozess wird vor dem Öffnen festgehalten. Nach der Auswahl wird genau dieses Fenster aktiviert, sein Vordergrundstatus geprüft und der Text per Unicode-Clipboard und Ctrl+V eingefügt. Die vorherige Zwischenablage wird, soweit Windows sie bereitstellt, zurückgesetzt; falls ein anderes Programm sie zwischenzeitlich geändert hat, wird diese Änderung nicht überschrieben. Der Vorgang kann in erhöhten Anwendungen, geschützten Eingabefeldern, Remote-Desktops oder Anwendungen, die Ctrl+C/Ctrl+V abfangen, eingeschränkt sein. Das Fehlen einer nachweisbaren Selektion deaktiviert lediglich **Speichern**, nicht die Prompt-Auswahl. Beim Tray-Menü-Aufruf ist die Markierungserkennung möglicherweise nicht möglich, wenn Windows den Fokus auf die Taskleiste verschoben hat; der globale Hotkey ist dafür vorgesehen.
++**Einfügen:** Der Zielprozess wird vor dem Öffnen festgehalten. **Doppelklick auf einen Prompt oder Enter** löst die Auswahl aus. Nach dem Loslassen von Tasten/Maustasten und dem Schliessen des Dialogs wird genau dieses Fenster aktiviert, sein Vordergrundstatus geprüft und der Text per Unicode-Clipboard und Win32-`SendInput` (Ctrl+V) eingefügt. Die vorherige Zwischenablage wird, soweit Windows sie bereitstellt, zurückgesetzt; falls ein anderes Programm sie zwischenzeitlich geändert hat, wird diese Änderung nicht überschrieben. Der Vorgang kann in erhöhten Anwendungen, geschützten Eingabefeldern, Remote-Desktops oder Anwendungen, die Ctrl+C/Ctrl+V abfangen, eingeschränkt sein. Das Fehlen einer nachweisbaren Selektion deaktiviert lediglich **Speichern**, nicht die Prompt-Auswahl. Beim Tray-Menü-Aufruf ist die Markierungserkennung möglicherweise nicht möglich, wenn Windows den Fokus auf die Taskleiste verschoben hat; der globale Hotkey ist dafür vorgesehen.
+ 
+ ## Oberfläche und Fallback
+ 
+-WebView2 stellt Filter, Kategorien, Vorschau, lokale/zentrale Herkunft, Doppelklick/Enter und den Speicherknopf dar. Die HTML-/CSS-/JS-Dateien sind eingebettete Ressourcen; es werden keine Webseiten oder Bibliotheksinhalte ans Internet übermittelt. Nachrichten aus der Webansicht werden im WinForms-Host validiert. Fehlt WebView2 oder ist es defekt, öffnet der Picker eine native WinForms-Liste mit denselben Kernfunktionen. Die Auflösung wird bei jedem Aufruf neu gelesen; nach dem Speichern wird die Liste erneut geladen.
++WebView2 stellt eine kompakte, kopfzeilenfreie Ansicht dar: gleich zu Beginn „Prompts durchsuchen“, daneben Kategorien, darunter eine breite Prompt-Liste und eine schmale Vorschau. Die Oberfläche verwendet 32px-SVG-Symbol-Buttons, Doppelklick/Enter und einen Speicherknopf. Der Picker und die beiden Nebenfenster sind TopMost; der native Speichern- und Hotkey-Dialog benutzt skalierungsfreundliche Zeilenlayouts und native Vektorsymbole. Die HTML-/CSS-/JS-Dateien sind eingebettete Ressourcen; es werden keine Webseiten oder Bibliotheksinhalte ans Internet übermittelt. Nachrichten aus der Webansicht werden im WinForms-Host validiert. Fehlt WebView2 oder ist es defekt, öffnet der Picker eine native WinForms-Liste mit denselben Kernfunktionen. Die Auflösung wird bei jedem Aufruf neu gelesen; nach dem Speichern wird die Liste erneut geladen.
+ 
+ ## Architektur / QA
+ 
+@@ -42,7 +42,7 @@
+ - `PromptLibraryStore.vb`: Kategorien, Format, Reihenfolge, lokal begrenztes Schreiben
+ - `SelectionClipboardService.vb`: Markierung lesen, Zielaktivierung und Einfügen
+ - `PickerContext.vb`, `ShortcutService.vb`: Tray, globaler Hotkey, Reconnect, Fokus
+-- `PickerForm.vb`, `SavePromptForm.vb`, `ShortcutSettingsForm.vb`, `Web/*`: Darstellung und Interaktionen
+-- `QA/`: Prüfprotokoll und statische Regressionstests; **kein** Windows-Build wurde hier durchgeführt
++- `PickerForm.vb`, `SavePromptForm.vb`, `ShortcutSettingsForm.vb`, `PickerUi.vb`, `Web/*`: Darstellung, native Vektor-Symbol-Buttons, Interaktionen
++- `QA/`: Prüfprotokoll, statische Regressionstests und Chromium-UI-Test; **kein** Windows-Build und kein echter Notepad-/Office-Einfügetest wurden hier durchgeführt
+ 
+ Quellcodebasis von Red Ink und Ask Inky wurde **nicht verändert**; nur die Solution-Datei wurde um das neue Projekt ergänzt. Es sind keine Änderungen an `SharedMethods.DialogOwner.vb` erforderlich: Es gibt keinen Cross-Process-Dialog-Owner; die WinForms-Dialoge verwenden nur eigene Same-Process-Formulare.
+--- a/PromptPicker/SavePromptForm.vb
++++ b/PromptPicker/SavePromptForm.vb
+@@ -1,3 +1,5 @@
++' Compact, DPI-aware native dialog. Source writes are enforced in PromptLibraryStore;
++' this form never touches configuration and never chooses a destination path.
+ Friend NotInheritable Class SavePromptForm
+     Inherits System.Windows.Forms.Form
+ 
+@@ -10,11 +12,13 @@
+             Return titleInput.Text
+         End Get
+     End Property
++
+     Public ReadOnly Property PromptCategory As String
+         Get
+             Return categoryInput.Text
+         End Get
+     End Property
++
+     Public ReadOnly Property PromptBody As String
+         Get
+             Return promptInput.Text
+@@ -22,63 +26,124 @@
+     End Property
+ 
+     Public Sub New(selection As String, suggestedCategory As String)
+-        Text = "Auswahl als lokalen Prompt speichern"
+-        ClientSize = New System.Drawing.Size(680, 500)
+-        MinimumSize = New System.Drawing.Size(500, 380)
++        Text = "Prompt speichern"
++        ClientSize = New System.Drawing.Size(560, 340)
++        MinimumSize = New System.Drawing.Size(480, 310)
+         StartPosition = System.Windows.Forms.FormStartPosition.CenterParent
+-        BackColor = System.Drawing.Color.FromArgb(247, 248, 250)
+-        Font = New System.Drawing.Font("Segoe UI", 10.0F)
++        AutoScaleMode = System.Windows.Forms.AutoScaleMode.Dpi
++        FormBorderStyle = System.Windows.Forms.FormBorderStyle.Sizable
++        MaximizeBox = False
++        MinimizeBox = False
++        ShowInTaskbar = False
++        TopMost = True
++        BackColor = PickerUi.Surface
++        Font = New System.Drawing.Font("Segoe UI", 9.0F)
+         Icon = System.Drawing.Icon.ExtractAssociatedIcon(System.Windows.Forms.Application.ExecutablePath)
+ 
+-        Dim layout As New System.Windows.Forms.TableLayoutPanel With {.Dock = System.Windows.Forms.DockStyle.Fill, .Padding = New System.Windows.Forms.Padding(22), .ColumnCount = 1, .RowCount = 7}
+-        layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 43))
+-        layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 60))
+-        layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 60))
+-        layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 26))
+-        layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 100))
+-        layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 34))
+-        layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 54))
+-        Controls.Add(layout)
++        ' Auto-size labels and an expanding prompt area avoid the cropped fields
++        ' and one-line footer that failed on Windows with non-default DPI scaling.
++        Dim outer As New System.Windows.Forms.TableLayoutPanel With {
++            .Dock = System.Windows.Forms.DockStyle.Fill,
++            .Padding = New System.Windows.Forms.Padding(16, 15, 16, 13),
++            .ColumnCount = 1, .RowCount = 3,
++            .BackColor = BackColor
++        }
++        outer.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
++        outer.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
++        outer.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
++        outer.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 47.0F))
++        Controls.Add(outer)
+ 
+-        Dim heading As New System.Windows.Forms.Label With {.Text = "PROMPT ZUR LOKALEN BIBLIOTHEK HINZUFÜGEN", .Font = New System.Drawing.Font("Segoe UI Semibold", 12.0F), .AutoSize = True, .ForeColor = System.Drawing.Color.FromArgb(45, 52, 65), .Dock = System.Windows.Forms.DockStyle.Fill}
+-        layout.Controls.Add(heading, 0, 0)
+-        layout.Controls.Add(Labeled("Titel", titleInput), 0, 1)
+-        categoryInput.Text = If(suggestedCategory = "(Uncategorized)", "", suggestedCategory)
+-        layout.Controls.Add(Labeled("Kategorie (optional)", categoryInput), 0, 2)
+-        layout.Controls.Add(New System.Windows.Forms.Label With {.Text = "PROMPT", .Dock = System.Windows.Forms.DockStyle.Fill, .ForeColor = System.Drawing.Color.FromArgb(90, 100, 115)}, 0, 3)
++        Dim fields As New System.Windows.Forms.TableLayoutPanel With {
++            .Dock = System.Windows.Forms.DockStyle.Top,
++            .AutoSize = True, .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
++            .ColumnCount = 2, .RowCount = 2,
++            .Margin = New System.Windows.Forms.Padding(0, 0, 0, 12)
++        }
++        fields.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 58.0F))
++        fields.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 42.0F))
++        fields.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
++        fields.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 34.0F))
++        Dim titleLabel As System.Windows.Forms.Label = PickerUi.Caption("Titel")
++        Dim categoryLabel As System.Windows.Forms.Label = PickerUi.Caption("Kategorie · optional")
++        categoryLabel.Margin = New System.Windows.Forms.Padding(10, 0, 0, 5)
++        fields.Controls.Add(titleLabel, 0, 0)
++        fields.Controls.Add(categoryLabel, 1, 0)
++        PickerUi.StyleTextBox(titleInput)
++        PickerUi.StyleTextBox(categoryInput)
++        titleInput.PlaceholderText = "Bezeichnung des Prompts"
++        categoryInput.PlaceholderText = "Ohne Kategorie"
++        categoryInput.Text = If(suggestedCategory = "(Uncategorized)" OrElse suggestedCategory = "Alle Kategorien", "", suggestedCategory)
++        titleInput.Dock = System.Windows.Forms.DockStyle.Top
++        categoryInput.Dock = System.Windows.Forms.DockStyle.Top
++        titleInput.Margin = New System.Windows.Forms.Padding(0, 1, 0, 0)
++        categoryInput.Margin = New System.Windows.Forms.Padding(10, 1, 0, 0)
++        fields.Controls.Add(titleInput, 0, 1)
++        fields.Controls.Add(categoryInput, 1, 1)
++        outer.Controls.Add(fields, 0, 0)
++
++        Dim promptArea As New System.Windows.Forms.TableLayoutPanel With {
++            .Dock = System.Windows.Forms.DockStyle.Fill,
++            .ColumnCount = 1, .RowCount = 2,
++            .Margin = New System.Windows.Forms.Padding(0)
++        }
++        promptArea.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
++        promptArea.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
++        promptArea.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
++        Dim promptLabel As System.Windows.Forms.Label = PickerUi.Caption("Prompt")
++        promptLabel.Margin = New System.Windows.Forms.Padding(0, 0, 0, 7)
++        promptArea.Controls.Add(promptLabel, 0, 0)
++        PickerUi.StyleTextBox(promptInput)
+         promptInput.Multiline = True
++        promptInput.AcceptsReturn = True
++        promptInput.AcceptsTab = True
+         promptInput.ScrollBars = System.Windows.Forms.ScrollBars.Vertical
+         promptInput.Dock = System.Windows.Forms.DockStyle.Fill
+-        promptInput.Text = selection
+-        layout.Controls.Add(promptInput, 0, 4)
+-        layout.Controls.Add(New System.Windows.Forms.Label With {.Text = "Speichert ausschliesslich in PromptLibLocal. redink.ini und die zentrale Library bleiben unverändert.", .Dock = System.Windows.Forms.DockStyle.Fill, .ForeColor = System.Drawing.Color.FromArgb(90, 100, 115), .AutoEllipsis = True}, 0, 5)
++        promptInput.Text = If(selection, "")
++        promptInput.Margin = New System.Windows.Forms.Padding(0)
++        promptArea.Controls.Add(promptInput, 0, 1)
++        outer.Controls.Add(promptArea, 0, 1)
+ 
+-        Dim buttons As New System.Windows.Forms.FlowLayoutPanel With {.Dock = System.Windows.Forms.DockStyle.Fill, .FlowDirection = System.Windows.Forms.FlowDirection.RightToLeft, .WrapContents = False}
+-        Dim save As New System.Windows.Forms.Button With {.Text = "Speichern", .Size = New System.Drawing.Size(115, 34), .BackColor = System.Drawing.Color.FromArgb(185, 48, 49), .ForeColor = System.Drawing.Color.White, .FlatStyle = System.Windows.Forms.FlatStyle.Flat}
+-        Dim cancel As New System.Windows.Forms.Button With {.Text = "Abbrechen", .Size = New System.Drawing.Size(110, 34), .DialogResult = System.Windows.Forms.DialogResult.Cancel}
+-        AddHandler save.Click, Sub(sender As Object, e As System.EventArgs)
+-                                   If System.String.IsNullOrWhiteSpace(titleInput.Text) OrElse System.String.IsNullOrWhiteSpace(promptInput.Text) Then
+-                                       System.Windows.Forms.MessageBox.Show(Me, "Titel und Prompt dürfen nicht leer sein.", "Prompt Picker", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Warning)
+-                                       Return
+-                                   End If
+-                                   DialogResult = System.Windows.Forms.DialogResult.OK
+-                                   Close()
+-                               End Sub
++        Dim footer As New System.Windows.Forms.TableLayoutPanel With {
++            .Dock = System.Windows.Forms.DockStyle.Fill,
++            .ColumnCount = 2, .RowCount = 1,
++            .Margin = New System.Windows.Forms.Padding(0, 11, 0, 0)
++        }
++        footer.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
++        footer.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.AutoSize))
++        footer.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
++        Dim buttons As New System.Windows.Forms.FlowLayoutPanel With {
++            .AutoSize = True, .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
++            .WrapContents = False,
++            .FlowDirection = System.Windows.Forms.FlowDirection.LeftToRight,
++            .Anchor = System.Windows.Forms.AnchorStyles.Right Or System.Windows.Forms.AnchorStyles.Top,
++            .Margin = New System.Windows.Forms.Padding(0)
++        }
++        Dim cancel As System.Windows.Forms.Button = PickerUi.ActionButton("Abbrechen", "close", False, 120)
++        cancel.DialogResult = System.Windows.Forms.DialogResult.Cancel
++        Dim save As System.Windows.Forms.Button = PickerUi.ActionButton("Speichern", "check", True, 120)
++        AddHandler save.Click, AddressOf SaveClicked
++        buttons.Controls.Add(cancel)
+         buttons.Controls.Add(save)
+-        buttons.Controls.Add(cancel)
+-        layout.Controls.Add(buttons, 0, 6)
++        footer.Controls.Add(buttons, 1, 0)
++        outer.Controls.Add(footer, 0, 2)
+         AcceptButton = save
+         CancelButton = cancel
+         AddHandler Shown, Sub(sender As Object, e As System.EventArgs) titleInput.Focus()
+     End Sub
+ 
+-    Private Shared Function Labeled(name As String, entry As System.Windows.Forms.TextBox) As System.Windows.Forms.Control
+-        Dim panel As New System.Windows.Forms.TableLayoutPanel With {.Dock = System.Windows.Forms.DockStyle.Fill, .ColumnCount = 1, .RowCount = 2}
+-        panel.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 22))
+-        panel.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 100))
+-        panel.Controls.Add(New System.Windows.Forms.Label With {.Text = name.ToUpperInvariant(), .Dock = System.Windows.Forms.DockStyle.Fill, .ForeColor = System.Drawing.Color.FromArgb(90, 100, 115)}, 0, 0)
+-        entry.Dock = System.Windows.Forms.DockStyle.Fill
+-        panel.Controls.Add(entry, 0, 1)
+-        Return panel
+-    End Function
++    Private Sub SaveClicked(sender As Object, e As System.EventArgs)
++        If System.String.IsNullOrWhiteSpace(titleInput.Text) Then
++            System.Windows.Forms.MessageBox.Show(Me, "Bitte einen Titel eingeben.", "Prompt speichern", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Information)
++            titleInput.Focus()
++            Return
++        End If
++        If System.String.IsNullOrWhiteSpace(promptInput.Text) Then
++            System.Windows.Forms.MessageBox.Show(Me, "Bitte einen Prompt eingeben.", "Prompt speichern", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Information)
++            promptInput.Focus()
++            Return
++        End If
++        DialogResult = System.Windows.Forms.DialogResult.OK
++        Close()
++    End Sub
+ End Class
+--- a/PromptPicker/SelectionClipboardService.vb
++++ b/PromptPicker/SelectionClipboardService.vb
+@@ -10,9 +10,15 @@
+                (CInt(Native.GetAsyncKeyState(Native.VK_SHIFT)) And &H8000) <> 0
+     End Function
+ 
+-    Private Shared Async Function WaitUntilReleasedAsync() As System.Threading.Tasks.Task(Of Boolean)
++    Private Shared Function MouseButtonsHeld() As Boolean
++        Return (CInt(Native.GetAsyncKeyState(Native.VK_LBUTTON)) And &H8000) <> 0 OrElse
++               (CInt(Native.GetAsyncKeyState(Native.VK_RBUTTON)) And &H8000) <> 0 OrElse
++               (CInt(Native.GetAsyncKeyState(Native.VK_MBUTTON)) And &H8000) <> 0
++    End Function
++
++    Private Shared Async Function WaitUntilReleasedAsync(Optional includeMouse As Boolean = False) As System.Threading.Tasks.Task(Of Boolean)
+         For i As Integer = 0 To 39
+-            If Not ModifiersHeld() Then Return True
++            If Not ModifiersHeld() AndAlso (Not includeMouse OrElse Not MouseButtonsHeld()) Then Return True
+             Await System.Threading.Tasks.Task.Delay(50)
+         Next
+         Return False
+@@ -59,9 +65,38 @@
+         End Try
+     End Function
+ 
++    Private Shared Function KeyboardEvent(virtualKey As UShort, flags As UInteger) As Native.InputRecord
++        Return New Native.InputRecord With {
++            .InputType = Native.INPUT_KEYBOARD,
++            .Data = New Native.InputData With {
++                .Keyboard = New Native.KeyboardRecord With {.VirtualKey = virtualKey, .Flags = flags}
++            }
++        }
++    End Function
++
++    Private Shared Function SendPaste() As Boolean
++        Dim downControl As Native.InputRecord = KeyboardEvent(CUShort(Native.VK_CONTROL), 0UI)
++        Dim downV As Native.InputRecord = KeyboardEvent(Native.VK_V, 0UI)
++        Dim upV As Native.InputRecord = KeyboardEvent(Native.VK_V, Native.KEYEVENTF_KEYUP)
++        Dim upControl As Native.InputRecord = KeyboardEvent(CUShort(Native.VK_CONTROL), Native.KEYEVENTF_KEYUP)
++        Dim input As Native.InputRecord() = {downControl, downV, upV, upControl}
++        Dim emitted As UInteger = Native.SendInput(CUInt(input.Length), input, System.Runtime.InteropServices.Marshal.SizeOf(Of Native.InputRecord)())
++        If emitted = CUInt(input.Length) Then Return True
++        ' A partial injection must not leave a virtual Ctrl key pressed.
++        Dim releases As Native.InputRecord() = {upV, upControl}
++        Native.SendInput(CUInt(releases.Length), releases, System.Runtime.InteropServices.Marshal.SizeOf(Of Native.InputRecord)())
++        Return False
++    End Function
++
+     Public Shared Async Function InsertAsync(window As System.IntPtr, content As String) As System.Threading.Tasks.Task(Of Boolean)
+         If window = System.IntPtr.Zero OrElse Not Native.IsWindow(window) OrElse System.String.IsNullOrEmpty(content) Then Return False
+-        If Not (Await WaitUntilReleasedAsync()) Then Return False
++        ' A WebView2 double-click can complete selection while the mouse button is
++        ' still held. Do not close the picker and paste under a pending mouse-up:
++        ' Windows may restore the picker focus and swallow Ctrl+V after the click.
++        If Not (Await WaitUntilReleasedAsync(True)) Then
++            AppLog.Write("insertion.aborted.input-not-released")
++            Return False
++        End If
+         ' The picker is already closed. Do not send input unless the original target
+         ' actually has foreground focus. No arbitrary "last window" fallback.
+         Native.SetForegroundWindow(window)
+@@ -74,6 +109,14 @@
+             Return False
+         End If
+ 
++        ' A short settling interval covers Windows focus activation after closing a
++        ' mouse-driven WebView2 dialog. Recheck the exact target before injecting.
++        Await System.Threading.Tasks.Task.Delay(85)
++        If Native.GetForegroundWindow() <> window Then
++            AppLog.Write("insertion.aborted.foreground-lost-after-settle")
++            Return False
++        End If
++
+         Dim original As System.Windows.Forms.IDataObject = Nothing
+         Dim pastedSequence As UInteger = 0UI
+         Dim temporarySet As Boolean = False
+@@ -83,8 +126,14 @@
+             pastedSequence = Native.GetClipboardSequenceNumber()
+             temporarySet = True
+             If Native.GetForegroundWindow() <> window Then Return False
+-            ' Asynchronous Send avoids a UI-thread deadlock in VDI/Office sessions.
+-            System.Windows.Forms.SendKeys.Send("^v")
++            ' Deliver Ctrl+V to the verified foreground window. SendInput is
++            ' independent of which control previously owned the WinForms focus,
++            ' unlike SendKeys.Send, which can silently target the closed picker.
++            ' If Windows/UIPI refuses the injection, return False (not success).
++            If Not SendPaste() Then
++                AppLog.Write("insertion.sendinput.failed " & System.Runtime.InteropServices.Marshal.GetLastWin32Error().ToString(System.Globalization.CultureInfo.InvariantCulture))
++                Return False
++            End If
+             Await System.Threading.Tasks.Task.Delay(750)
+             Return True
+         Catch ex As System.Exception
+--- a/PromptPicker/ShortcutSettingsForm.vb
++++ b/PromptPicker/ShortcutSettingsForm.vb
+@@ -1,70 +1,134 @@
++' Short, coherent native settings dialog with no second branding/header strip.
++' Modifiers and candidate keys retain the original validation/registration flow.
+ Friend NotInheritable Class ShortcutSettingsForm
+     Inherits System.Windows.Forms.Form
++
++    Private NotInheritable Class KeyOption
++        Public ReadOnly Property VirtualKey As Integer
++        Public ReadOnly Property Display As String
++
++        Public Sub New(code As Integer)
++            VirtualKey = code
++            Display = CType(code, System.Windows.Forms.Keys).ToString()
++        End Sub
++
++        Public Overrides Function ToString() As String
++            Return Display
++        End Function
++    End Class
++
+     Private ReadOnly ctrlCheck As New System.Windows.Forms.CheckBox With {.Text = "Ctrl", .Checked = True, .AutoSize = True}
+     Private ReadOnly altBox As New System.Windows.Forms.CheckBox With {.Text = "Alt", .Checked = True, .AutoSize = True}
+-    Private ReadOnly shiftBox As New System.Windows.Forms.CheckBox With {.Text = "Shift", .Checked = False, .AutoSize = True}
+-    Private ReadOnly keyInput As New System.Windows.Forms.ComboBox With {.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList, .Width = 130}
++    Private ReadOnly shiftBox As New System.Windows.Forms.CheckBox With {.Text = "Shift", .AutoSize = True}
++    Private ReadOnly keyInput As New System.Windows.Forms.ComboBox With {.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList}
++
+     Public ReadOnly Property Shortcut As PickerSettings
+         Get
+-            Dim modValue As UInteger = If(ctrlCheck.Checked, Native.MOD_CONTROL, 0UI) Or If(altBox.Checked, Native.MOD_ALT, 0UI) Or If(shiftBox.Checked, Native.MOD_SHIFT, 0UI)
+-            Return New PickerSettings With {.HotkeyModifiers = modValue, .HotkeyKey = CInt(keyInput.SelectedItem)}
++            Dim modifiers As UInteger = If(ctrlCheck.Checked, Native.MOD_CONTROL, 0UI) Or If(altBox.Checked, Native.MOD_ALT, 0UI) Or If(shiftBox.Checked, Native.MOD_SHIFT, 0UI)
++            Dim selected As KeyOption = TryCast(keyInput.SelectedItem, KeyOption)
++            Return New PickerSettings With {.HotkeyModifiers = modifiers, .HotkeyKey = If(selected Is Nothing, CInt(System.Windows.Forms.Keys.P), selected.VirtualKey)}
+         End Get
+     End Property
+ 
+     Public Sub New(current As PickerSettings)
+-        Text = "Prompt Picker – Tastenkombination"
+-        ClientSize = New System.Drawing.Size(420, 215)
++        Text = "Tastenkombination ändern"
++        ClientSize = New System.Drawing.Size(445, 188)
++        AutoScaleMode = System.Windows.Forms.AutoScaleMode.Dpi
+         FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedDialog
+         StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen
+         MaximizeBox = False
+         MinimizeBox = False
+-        BackColor = System.Drawing.Color.FromArgb(247, 248, 250)
+-        Font = New System.Drawing.Font("Segoe UI", 10.0F)
++        ShowInTaskbar = False
++        TopMost = True
++        BackColor = PickerUi.Surface
++        Font = New System.Drawing.Font("Segoe UI", 9.0F)
+         Icon = System.Drawing.Icon.ExtractAssociatedIcon(System.Windows.Forms.Application.ExecutablePath)
+-        Dim layout As New System.Windows.Forms.TableLayoutPanel With {.Dock = System.Windows.Forms.DockStyle.Fill, .Padding = New System.Windows.Forms.Padding(20), .RowCount = 4, .ColumnCount = 1}
+-        layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 39))
+-        layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 54))
+-        layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 46))
+-        layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 100))
+-        layout.Controls.Add(New System.Windows.Forms.Label With {.Text = "GLOBALEN HOTKEY ANPASSEN", .Font = New System.Drawing.Font("Segoe UI Semibold", 12.0F), .AutoSize = True}, 0, 0)
+-        Dim keys As New System.Windows.Forms.FlowLayoutPanel With {.Dock = System.Windows.Forms.DockStyle.Fill, .FlowDirection = System.Windows.Forms.FlowDirection.LeftToRight}
+-        keys.Controls.Add(ctrlCheck)
+-        keys.Controls.Add(altBox)
+-        keys.Controls.Add(shiftBox)
+-        keys.Controls.Add(keyInput)
++
++        Dim layout As New System.Windows.Forms.TableLayoutPanel With {
++            .Dock = System.Windows.Forms.DockStyle.Fill,
++            .Padding = New System.Windows.Forms.Padding(17, 15, 17, 12),
++            .ColumnCount = 1, .RowCount = 4
++        }
++        layout.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
++        layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
++        layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 47.0F))
++        layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
++        layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 45.0F))
++        Controls.Add(layout)
++        layout.Controls.Add(PickerUi.Caption("Tastenkombination"), 0, 0)
++
++        Dim keys As New System.Windows.Forms.TableLayoutPanel With {
++            .Dock = System.Windows.Forms.DockStyle.Fill,
++            .ColumnCount = 4, .RowCount = 1,
++            .Margin = New System.Windows.Forms.Padding(0, 3, 0, 0)
++        }
++        keys.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Absolute, 72.0F))
++        keys.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Absolute, 67.0F))
++        keys.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Absolute, 81.0F))
++        keys.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
++        keys.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
++        For Each toggle As System.Windows.Forms.CheckBox In {ctrlCheck, altBox, shiftBox}
++            toggle.Anchor = System.Windows.Forms.AnchorStyles.Left
++            toggle.Margin = New System.Windows.Forms.Padding(0)
++            toggle.ForeColor = PickerUi.Ink
++        Next
++        keys.Controls.Add(ctrlCheck, 0, 0)
++        keys.Controls.Add(altBox, 1, 0)
++        keys.Controls.Add(shiftBox, 2, 0)
++        keyInput.Dock = System.Windows.Forms.DockStyle.Fill
++        keyInput.Margin = New System.Windows.Forms.Padding(1, 5, 0, 5)
++        keyInput.Font = New System.Drawing.Font("Segoe UI", 9.5F)
++        keyInput.AccessibleName = "Taste"
++        keys.Controls.Add(keyInput, 3, 0)
+         layout.Controls.Add(keys, 0, 1)
+-        layout.Controls.Add(New System.Windows.Forms.Label With {.Text = "Verwende mindestens Ctrl oder Alt. Bereits belegte Kombinationen werden nicht überschrieben.", .AutoSize = True}, 0, 2)
+-        Dim buttons As New System.Windows.Forms.FlowLayoutPanel With {.Dock = System.Windows.Forms.DockStyle.Fill, .FlowDirection = System.Windows.Forms.FlowDirection.RightToLeft}
+-        Dim save As New System.Windows.Forms.Button With {.Text = "Übernehmen", .Width = 116, .Height = 30}
+-        Dim cancel As New System.Windows.Forms.Button With {.Text = "Abbrechen", .Width = 112, .Height = 30, .DialogResult = System.Windows.Forms.DialogResult.Cancel}
+-        buttons.Controls.Add(save)
+-        buttons.Controls.Add(cancel)
+-        layout.Controls.Add(buttons, 0, 3)
+-        Controls.Add(layout)
++
++        Dim hint As New System.Windows.Forms.Label With {
++            .Text = "Mindestens Ctrl oder Alt auswählen.",
++            .AutoSize = True, .ForeColor = PickerUi.Muted,
++            .Margin = New System.Windows.Forms.Padding(0, 7, 0, 0)
++        }
++        layout.Controls.Add(hint, 0, 2)
++
++        Dim buttonRow As New System.Windows.Forms.FlowLayoutPanel With {
++            .Dock = System.Windows.Forms.DockStyle.Fill,
++            .WrapContents = False,
++            .FlowDirection = System.Windows.Forms.FlowDirection.RightToLeft,
++            .Margin = New System.Windows.Forms.Padding(0, 6, 0, 0)
++        }
++        Dim apply As System.Windows.Forms.Button = PickerUi.ActionButton("Übernehmen", "check", True, 133)
++        Dim cancel As System.Windows.Forms.Button = PickerUi.ActionButton("Abbrechen", "close", False, 123)
++        cancel.DialogResult = System.Windows.Forms.DialogResult.Cancel
++        buttonRow.Controls.Add(apply)
++        buttonRow.Controls.Add(cancel)
++        layout.Controls.Add(buttonRow, 0, 3)
++
+         For code As Integer = 65 To 90
+-            keyInput.Items.Add(code)
++            keyInput.Items.Add(New KeyOption(code))
+         Next
+         For code As Integer = 112 To 123
+-            keyInput.Items.Add(code)
++            keyInput.Items.Add(New KeyOption(code))
+         Next
+         ctrlCheck.Checked = (current.HotkeyModifiers And Native.MOD_CONTROL) <> 0UI
+         altBox.Checked = (current.HotkeyModifiers And Native.MOD_ALT) <> 0UI
+         shiftBox.Checked = (current.HotkeyModifiers And Native.MOD_SHIFT) <> 0UI
+-        keyInput.SelectedItem = current.HotkeyKey
++        For i As Integer = 0 To keyInput.Items.Count - 1
++            Dim entry As KeyOption = DirectCast(keyInput.Items(i), KeyOption)
++            If entry.VirtualKey = current.HotkeyKey Then
++                keyInput.SelectedIndex = i
++                Exit For
++            End If
++        Next
+         If keyInput.SelectedIndex < 0 Then keyInput.SelectedIndex = 0
+-        AddHandler keyInput.Format, Sub(sender As Object, e As System.Windows.Forms.ListControlConvertEventArgs)
+-                                        If e.ListItem IsNot Nothing Then e.Value = CType(CInt(e.ListItem), System.Windows.Forms.Keys).ToString()
+-                                    End Sub
+-        keyInput.FormattingEnabled = True
+-        AddHandler save.Click, Sub(sender As Object, e As System.EventArgs)
+-                                   If Not ShortcutService.IsValid(Shortcut.HotkeyModifiers, Shortcut.HotkeyKey) Then
+-                                       System.Windows.Forms.MessageBox.Show(Me, "Mindestens Ctrl oder Alt auswählen.", "Prompt Picker")
+-                                       Return
+-                                   End If
+-                                   DialogResult = System.Windows.Forms.DialogResult.OK
+-                                   Close()
+-                               End Sub
+-        AcceptButton = save
++        AddHandler apply.Click, Sub(sender As Object, e As System.EventArgs)
++                                    Dim requested As PickerSettings = Shortcut
++                                    If Not ShortcutService.IsValid(requested.HotkeyModifiers, requested.HotkeyKey) Then
++                                        System.Windows.Forms.MessageBox.Show(Me, "Mindestens Ctrl oder Alt auswählen.", "Tastenkombination", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Information)
++                                        Return
++                                    End If
++                                    DialogResult = System.Windows.Forms.DialogResult.OK
++                                    Close()
++                                End Sub
++        AcceptButton = apply
+         CancelButton = cancel
+     End Sub
+ End Class
+--- a/PromptPicker/Web/picker.css
++++ b/PromptPicker/Web/picker.css
+@@ -1,62 +1,52 @@
+-:root {color-scheme:light;--ink:#293143;--muted:#7b8595;--stroke:#e5e8ed;--paper:#fff;--bg:#f5f6f8;--accent:#b93030;--accentSoft:#fff0ef;--radius:13px;}
++/* Uses Ask Inky's restrained Office-like surface, 32 px SVG action buttons and
++   compact cards. The list is intentionally given most of the usable space. */
++:root {color-scheme:light;--accent:#b91312;--accentHover:#9a0f0e;--accentSoft:#fff0ef;--ink:#323130;--muted:#6d6a67;--stroke:#edebe9;--surface:#fff;--bg:#f5f5f6;--radius:9px;}
+ * {box-sizing:border-box;}
+-html,body {width:100%;height:100%;overflow:hidden;margin:0;}
+-body {font-family:"Segoe UI",system-ui,sans-serif;font-size:13px;color:var(--ink);background:var(--bg);}
++[hidden] {display:none !important;}
++html,body {width:100%;height:100%;min-width:0;margin:0;overflow:hidden;}
++body {font:13px/1.4 "Segoe UI",system-ui,sans-serif;color:var(--ink);background:var(--bg);}
+ button,input,select {font:inherit;}
+-button {cursor:pointer;}
+-button:disabled {opacity:.47;cursor:default;}
+-.shell {height:100vh;display:flex;flex-direction:column;padding:0 23px 17px;gap:0;min-width:620px;}
+-.header {height:70px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--stroke);flex-shrink:0;}
+-.brand {display:flex;align-items:center;gap:10px;}
+-.brand img {object-fit:contain;}
+-.brandText {display:flex;flex-direction:column;gap:2px;letter-spacing:1.3px;}
+-.product {font-size:12px;font-weight:800;}
+-.caption {font-size:9px;font-weight:750;color:var(--muted);}
+-.headerPill {margin-left:auto;background:#edf0f3;color:#626e7e;border-radius:8px;padding:7px 11px;font-size:10px;font-weight:750;letter-spacing:1px;}
+-.iconButton {border:0;background:transparent;color:#9099a7;font-size:25px;height:36px;width:36px;border-radius:7px;margin-left:4px;}
+-.iconButton:hover {background:#e9ebee;color:var(--ink);}
+-.intro {display:flex;justify-content:space-between;align-items:flex-end;padding:25px 1px 20px;gap:14px;}
+-.eyebrow {color:var(--accent);font-size:10px;font-weight:800;letter-spacing:1.8px;margin:0 0 7px;}
+-h1 {font-size:25px;line-height:1.2;letter-spacing:-.55px;margin:0 0 8px;font-weight:700;}
+-.subline {color:var(--muted);font-size:12px;margin:0;line-height:1.45;}
+-.sourceState {font-size:11px;background:#f0f1f3;color:#677080;padding:8px 11px;border-radius:8px;white-space:nowrap;}
+-.searchArea {display:flex;gap:12px;margin:0 0 16px;flex-shrink:0;}
+-.searchWrap {position:relative;flex:1;}
+-.searchWrap svg {position:absolute;left:13px;top:50%;transform:translateY(-50%);color:#8c96a4;width:19px;height:19px;}
+-.searchWrap input,select {background:#fff;border:1px solid #dfe3e9;border-radius:10px;outline:0;height:45px;color:var(--ink);}
+-.searchWrap input {padding:0 75px 0 43px;width:100%;}
+-.searchWrap input:focus,select:focus {border-color:#bf7371;box-shadow:0 0 0 2px #b9303022;}
+-.searchWrap kbd {position:absolute;right:12px;top:11px;font-size:11px;border-radius:5px;background:#f5f6f8;border:1px solid #e6e8eb;padding:4px;color:#9da6b4;}
+-select {min-width:190px;padding:0 10px;max-width:240px;}
+-.workspace {display:grid;grid-template-columns:42% 58%;background:#fff;border:1px solid var(--stroke);border-radius:var(--radius);min-height:0;flex:1;overflow:hidden;}
+-.listPane,.previewPane {min-height:0;display:flex;flex-direction:column;}
++button {cursor:pointer;touch-action:manipulation;}
++button:disabled {opacity:.42;cursor:default;}
++.shell {height:100vh;min-width:0;display:flex;flex-direction:column;gap:8px;padding:10px;}
++.searchArea {display:flex;align-items:center;gap:8px;flex:none;min-width:0;}
++.searchWrap {position:relative;min-width:0;flex:1;}
++.searchWrap svg {position:absolute;left:11px;top:50%;transform:translateY(-50%);width:17px;height:17px;color:#817d7b;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;pointer-events:none;}
++.searchWrap input,select {height:35px;border:1px solid #d9d8d6;border-radius:7px;background:#fff;color:var(--ink);outline:0;}
++.searchWrap input {width:100%;padding:0 12px 0 35px;}
++.searchWrap input::-webkit-search-cancel-button {cursor:pointer;}
++.searchWrap input:focus,select:focus {border-color:#bc8380;box-shadow:0 0 0 2px #b9131215;}
++select {width:173px;min-width:115px;max-width:35%;padding:0 22px 0 10px;text-overflow:ellipsis;}
++.iconButton {width:33px;height:33px;min-width:33px;display:inline-flex;align-items:center;justify-content:center;padding:7px;color:var(--muted);border:1px solid var(--stroke);background:#fff;border-radius:7px;}
++.iconButton:hover:not(:disabled) {color:var(--accent);background:var(--accentSoft);border-color:#e8cbc8;}
++button svg {width:18px;height:18px;flex:none;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;pointer-events:none;}
++.workspace {min-height:0;flex:1;display:grid;grid-template-columns:minmax(220px,63%) minmax(0,37%);background:var(--surface);border:1px solid var(--stroke);border-radius:var(--radius);overflow:hidden;box-shadow:0 1px 4px #23232608;}
++.listPane,.previewPane {min-width:0;min-height:0;display:flex;flex-direction:column;}
+ .listPane {border-right:1px solid var(--stroke);}
+-.paneHeading {height:47px;min-height:47px;display:flex;align-items:center;justify-content:space-between;padding:0 17px;border-bottom:1px solid var(--stroke);color:#7e8998;font-size:10px;letter-spacing:1.35px;font-weight:800;}
+-.count {background:#f0f2f6;padding:4px 8px;border-radius:8px;color:#767f8e;}
+-.results {overflow-y:auto;flex:1;padding:9px;}
+-.item {padding:13px 15px;display:flex;flex-direction:column;gap:9px;width:100%;text-align:left;background:transparent;border:1px solid transparent;border-radius:9px;color:var(--ink);outline:0;margin:0 0 4px;}
+-.item:hover {background:#f8f8fa;}
+-.item.active {background:var(--accentSoft);border-color:#f0cecc;}
+-.itemTitle {font-weight:700;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+-.itemMeta {display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:10px;color:var(--muted);}
+-.tag {background:#f0f2f5;padding:4px 8px;border-radius:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:75%;}
+-.item.active .tag {background:#fff;color:#9a5656;}
+-.origin {letter-spacing:.2px;white-space:nowrap;}
+-.previewSource {letter-spacing:0;text-transform:none;font-size:10px;}
+-.previewBody {overflow:auto;flex:1;padding:24px 25px 20px;}
+-h2 {font-size:21px;margin:0 0 13px;line-height:1.35;overflow-wrap:anywhere;}
+-.categoryTag {display:inline-flex;padding:5px 8px;border-radius:6px;background:#f2f4f7;color:#738091;font-size:11px;margin-bottom:21px;}
+-pre {font:13px/1.75 "Segoe UI",system-ui,sans-serif;white-space:pre-wrap;overflow-wrap:anywhere;color:#535e6c;margin:0;}
+-.empty {padding:27px 16px;text-align:center;color:var(--muted);}
+-.footer {min-height:79px;display:flex;justify-content:space-between;align-items:center;gap:14px;padding-top:16px;flex-shrink:0;}
+-.selectionArea {display:flex;flex-direction:column;gap:6px;min-width:0;}
+-.footHint {color:var(--muted);font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+-.actions {display:flex;gap:9px;white-space:nowrap;}
+-.secondary,.quiet,.primary {height:39px;border-radius:9px;padding:0 15px;white-space:nowrap;font-weight:650;}
+-.secondary {border:1px solid var(--stroke);background:#fff;color:#475367;}
+-.secondary:hover:not(:disabled) {border-color:#d3a09f;color:var(--accent);}
+-.quiet {border:1px solid var(--stroke);background:#fff;color:#5e6877;}
+-.primary {background:var(--accent);border:1px solid var(--accent);color:#fff;min-width:143px;}
+-.primary:hover:not(:disabled) {background:#a72727;}
+-.primary span,.quiet span {font-weight:400;opacity:.65;font-size:11px;margin-left:9px;}
+-@media(max-width:780px) {.shell{padding:0 14px 10px}.intro{padding:17px 0 15px}.sourceState{display:none}.previewBody{padding:17px}.footer{gap:5px}.footHint{max-width:230px}}
++.paneHeading {height:30px;min-height:30px;padding:0 11px;display:flex;align-items:center;justify-content:space-between;gap:7px;border-bottom:1px solid var(--stroke);font-size:11px;font-weight:600;color:var(--muted);}
++.count {font-variant-numeric:tabular-nums;font-size:11px;color:#857f7c;}
++.results {min-height:0;overflow-y:auto;flex:1;padding:3px;scrollbar-gutter:stable;}
++.item {display:flex;align-items:center;gap:8px;width:100%;min-height:34px;padding:5px 9px;text-align:left;outline:0;color:var(--ink);background:transparent;border:1px solid transparent;border-radius:6px;}
++.item:hover {background:#f7f6f5;}
++.item.active,.item[aria-selected="true"] {background:var(--accentSoft);border-color:#f3d8d5;}
++.item:focus-visible {outline:2px solid #cd8b86;outline-offset:-2px;}
++.itemTitle {min-width:0;flex:1;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
++.itemMeta {max-width:46%;min-width:0;display:flex;align-items:center;gap:7px;font-size:10px;color:#827e7a;}
++.tag {overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;}
++.origin {flex:none;color:#9b9591;}
++.previewSource {font-size:10px;font-weight:400;color:#99918c;white-space:nowrap;}
++.previewBody {flex:1;min-height:0;overflow:auto;padding:12px 13px;}
++.previewHead {display:flex;flex-wrap:wrap;gap:4px 9px;align-items:center;margin-bottom:10px;}
++h2 {min-width:0;max-width:100%;font-size:14px;line-height:1.35;font-weight:600;overflow-wrap:anywhere;margin:0;}
++.categoryTag {font-size:10px;color:#807a75;background:#f4f3f2;border-radius:4px;padding:2px 5px;max-width:100%;overflow-wrap:anywhere;}
++pre {margin:0;font:12.5px/1.55 "Segoe UI",system-ui,sans-serif;white-space:pre-wrap;overflow-wrap:anywhere;color:#514f4c;}
++.empty {padding:16px;text-align:center;color:var(--muted);font-size:12px;}
++.footer {min-height:35px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex:none;}
++.selectionArea {display:flex;align-items:center;gap:7px;flex:1;min-width:0;}
++/* Still announced to assistive technology; unnecessary hint text is not visual ballast. */
++.selectionStatus {position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap;}
++.actions {display:flex;align-items:center;gap:7px;flex:none;}
++.primary {display:inline-flex;align-items:center;justify-content:center;gap:7px;height:33px;padding:0 13px;background:var(--accent);border:1px solid var(--accent);border-radius:7px;color:#fff;font-weight:600;}
++.primary:hover:not(:disabled) {background:var(--accentHover);}
++.primary svg {width:16px;height:16px;}
++@media(max-width:560px) {.workspace{grid-template-columns:minmax(0,61%) minmax(0,39%)}.tag {display:none}.previewBody{padding:9px}.shell{padding:8px;gap:7px}select{width:128px}.selectionStatus {font-size:10px}}
+--- a/PromptPicker/Web/picker.html
++++ b/PromptPicker/Web/picker.html
+@@ -2,7 +2,7 @@
+ <html lang="de">
+ <head>
+   <meta charset="utf-8">
+-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; font-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'">
++  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'none'; connect-src 'none'; font-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'">
+   <meta name="viewport" content="width=device-width, initial-scale=1">
+   <title>Prompt Picker</title>
+   <link rel="stylesheet" href="picker.css">
+@@ -10,24 +10,47 @@
+ </head>
+ <body>
+   <main class="shell">
+-    <header class="header">
+-      <div class="brand">
+-        <img src="logo.png" alt="Red Ink Logo" width="34" height="34">
+-        <div class="brandText"><span class="product">RED INK</span><span class="caption">PROMPT LIBRARY</span></div>
++    <section class="searchArea" aria-label="Prompts filtern">
++      <div class="searchWrap">
++        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.7"/><path d="m16 16 5 5"/></svg>
++        <input id="search" type="search" placeholder="Prompts durchsuchen" autocomplete="off" aria-label="Prompts durchsuchen">
+       </div>
+-      <span class="headerPill">PROMPT PICKER</span>
+-      <button type="button" class="iconButton" id="close" title="Schliessen" aria-label="Schliessen">×</button>
+-    </header>
+-    <section class="intro"><div><p class="eyebrow">DEINE PROMPTS · ÜBERALL</p><h1>Wähle einen Prompt</h1><p class="subline">Suche nach Titel, Inhalt oder Kategorie und füge ihn in die aktuelle Anwendung ein.</p></div><div class="sourceState" id="sourceState">Bibliotheken werden geladen …</div></section>
+-    <section class="searchArea" aria-label="Promptfilter">
+-      <div class="searchWrap"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="m16.4 16.4 4.1 4.1" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg><input id="search" type="search" placeholder="Prompts durchsuchen …" autocomplete="off" aria-label="Prompts durchsuchen"><kbd>Ctrl K</kbd></div>
+-      <select id="category" aria-label="Kategorie"><option>Alle Kategorien</option></select>
++      <select id="category" aria-label="Kategorie"><option value="*">Alle Kategorien</option></select>
++      <button type="button" id="close" class="iconButton" title="Schliessen (Esc)" aria-label="Schliessen">
++        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 5 14 14M19 5 5 19"/></svg>
++      </button>
+     </section>
+     <section class="workspace">
+-      <aside class="listPane"><div class="paneHeading"><span>PROMPTS</span><span class="count" id="count">0</span></div><div class="results" id="results" role="listbox" aria-label="Verfügbare Prompts"></div><div class="empty" id="empty" hidden>Keine passenden Prompts gefunden.</div></aside>
+-      <article class="previewPane"><div class="paneHeading"><span>VORSCHAU</span><span class="previewSource" id="previewSource"></span></div><div class="previewBody"><h2 id="previewTitle">Wähle einen Eintrag</h2><div class="categoryTag" id="previewCategory"></div><pre id="previewText">Wähle links einen Prompt aus, um seinen vollständigen Inhalt zu sehen.</pre></div></article>
++      <div class="listPane">
++        <div class="paneHeading"><span>Prompts</span><span class="count" id="count">0</span></div>
++        <div class="results" id="results" role="listbox" aria-label="Verfügbare Prompts"></div>
++        <div class="empty" id="empty" hidden>Keine passenden Prompts.</div>
++      </div>
++      <div class="previewPane">
++        <div class="paneHeading"><span>Vorschau</span><span class="previewSource" id="previewSource"></span></div>
++        <div class="previewBody">
++          <div class="previewHead"><h2 id="previewTitle">Prompt auswählen</h2><span class="categoryTag" id="previewCategory" hidden></span></div>
++          <pre id="previewText">Links einen Prompt auswählen.</pre>
++        </div>
++      </div>
+     </section>
+-    <footer class="footer"><div class="selectionArea"><button type="button" id="saveSelection" class="secondary" disabled>+ Markierung als Prompt speichern</button><span class="footHint" id="saveHint">Nur bei konfigurierter lokaler Bibliothek</span></div><div class="actions"><button type="button" id="cancel" class="quiet">Abbrechen <span>Esc</span></button><button type="button" id="insert" class="primary" disabled>Prompt einfügen <span>↵</span></button></div></footer>
++    <footer class="footer">
++      <div class="selectionArea">
++        <button type="button" id="saveSelection" class="iconButton saveButton" disabled aria-label="Markierung als Prompt speichern" title="Markierten Text als lokalen Prompt speichern">
++          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
++        </button>
++        <span class="selectionStatus" id="saveHint" role="status" aria-live="polite"></span>
++      </div>
++      <div class="actions">
++        <button type="button" id="cancel" class="iconButton" title="Abbrechen (Esc)" aria-label="Abbrechen">
++          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5 19 19M19 5 5 19"/></svg>
++        </button>
++        <button type="button" id="insert" class="primary" disabled title="Prompt einfügen (Enter)">
++          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5 18 12 11 19M18 12H4"/></svg>
++          <span>Einfügen</span>
++        </button>
++      </div>
++    </footer>
+   </main>
+ </body>
+ </html>
+--- a/PromptPicker/Web/picker.js
++++ b/PromptPicker/Web/picker.js
+@@ -1,9 +1,10 @@
+-/* Red Ink Prompt Picker: no remote scripts, no host objects, all text inserted via textContent. */
++/* Offline, host-validated model. Uses textContent only for untrusted library data. */
+ (() => {
+   "use strict";
+   let prompts = [];
+   let visible = [];
+   let selectedId = null;
++  let committing = false;
+   const el = id => document.getElementById(id);
+   const post = data => window.chrome?.webview?.postMessage(data);
+   const search = el("search");
+@@ -11,31 +12,31 @@
+   const results = el("results");
+   const insert = el("insert");
+   const saveSelection = el("saveSelection");
++  const chosen = () => visible.find(p => p.Id === selectedId) || null;
+ 
+-  const chosen = () => prompts.find(p => p.Id === selectedId) || null;
+   function categories() {
+     const previous = category.value;
+     category.replaceChildren(new Option("Alle Kategorien", "*"));
+-    const categoryNames = new Map();
++    const names = new Map();
+     for (const p of prompts) {
+-      const normalized = p.Category.toLocaleLowerCase();
+-      if (!categoryNames.has(normalized)) categoryNames.set(normalized, p.Category);
++      const label = String(p.Category || "");
++      const key = label.toLocaleLowerCase();
++      if (!names.has(key)) names.set(key, label);
+     }
+-    const all = [...categoryNames.values()].sort((a,b) => a.localeCompare(b));
+-    for (const cat of all) category.add(new Option(cat,cat));
++    for (const name of [...names.values()].sort((a,b) => a.localeCompare(b))) category.add(new Option(name, name));
+     category.value = [...category.options].some(x => x.value === previous) ? previous : "*";
+   }
+   function paintPreview() {
+     const p = chosen();
+-    el("previewTitle").textContent = p?.Title || "Wähle einen Eintrag";
++    el("previewTitle").textContent = p?.Title || "Prompt auswählen";
+     el("previewCategory").textContent = p?.Category || "";
+     el("previewCategory").hidden = !p;
+-    el("previewText").textContent = p ? p.Prompt.replace(/\\n/g,"\n") : "Wähle links einen Prompt aus, um seinen vollständigen Inhalt zu sehen.";
+-    el("previewSource").textContent = p ? (p.Source === "local" ? "LOKALE BIBLIOTHEK" : "ZENTRALE BIBLIOTHEK") : "";
+-    insert.disabled = !p;
++    el("previewText").textContent = p ? p.Prompt.replace(/\\n/g, "\n") : "Links einen Prompt auswählen.";
++    el("previewSource").textContent = p ? (p.Source === "local" ? "Lokal" : "Zentral") : "";
++    insert.disabled = !p || committing;
+   }
+   function choose(id) {
+-    if (!prompts.some(x => x.Id === id)) return;
++    if (!visible.some(x => x.Id === id)) return;
+     selectedId = id;
+     paintPreview();
+     for (const node of results.children) {
+@@ -47,7 +48,9 @@
+   function paint() {
+     const term = search.value.trim().toLocaleLowerCase();
+     const cat = category.value;
+-    visible = prompts.filter(p => (cat === "*" || p.Category.toLocaleLowerCase() === cat.toLocaleLowerCase()) && (!term || [p.Title, p.Prompt, p.Category].some(t => t.toLocaleLowerCase().includes(term))));
++    visible = prompts.filter(p =>
++      (cat === "*" || p.Category.toLocaleLowerCase() === cat.toLocaleLowerCase()) &&
++      (!term || [p.Title, p.Prompt, p.Category].some(t => t.toLocaleLowerCase().includes(term))));
+     if (!visible.some(p => p.Id === selectedId)) selectedId = visible.length ? visible[0].Id : null;
+     const fragment = document.createDocumentFragment();
+     for (const p of visible) {
+@@ -56,21 +59,21 @@
+       item.className = "item";
+       item.dataset.id = String(p.Id);
+       item.setAttribute("role", "option");
++      item.setAttribute("aria-selected", "false");
++      item.title = p.Title;
+       const heading = document.createElement("span");
+       heading.className = "itemTitle";
+       heading.textContent = p.Title;
+       const meta = document.createElement("span");
+       meta.className = "itemMeta";
+-      const label = document.createElement("span");
+-      label.className = "tag";
+-      label.textContent = p.Category;
+-      const source = document.createElement("span");
+-      source.className = "origin";
+-      source.textContent = p.Source === "local" ? "Lokal" : "Zentral";
+-      meta.append(label, source);
+-      item.append(heading,meta);
+-      item.addEventListener("click", () => choose(p.Id));
+-      item.addEventListener("dblclick", () => { choose(p.Id); commit(); });
++      const tag = document.createElement("span");
++      tag.className = "tag";
++      tag.textContent = p.Category === "(Uncategorized)" ? "" : p.Category;
++      const origin = document.createElement("span");
++      origin.className = "origin";
++      origin.textContent = p.Source === "local" ? "Lokal" : "";
++      meta.append(tag, origin);
++      item.append(heading, meta);
+       fragment.appendChild(item);
+     }
+     results.replaceChildren(fragment);
+@@ -79,30 +82,52 @@
+     paintPreview();
+     if (selectedId !== null) choose(selectedId);
+   }
+-  function commit() { if (chosen()) post({type:"select",id:selectedId}); }
++  function commit() {
++    const p = chosen();
++    if (!p || committing) return;
++    committing = true;
++    insert.disabled = true;
++    post({type: "select", id: p.Id});
++  }
++  // Delegation keeps activation bound to the actual clicked row, even after
++  // filtering/re-rendering. click.detail >= 2 handles browsers that fail to
++  // emit dblclick in an embedded host; committing prevents duplicate messages.
++  results.addEventListener("click", e => {
++    const row = e.target.closest(".item");
++    if (!row || !results.contains(row) || committing) return;
++    choose(Number(row.dataset.id));
++    if (e.detail >= 2) commit();
++  });
++  results.addEventListener("dblclick", e => {
++    const row = e.target.closest(".item");
++    if (!row || !results.contains(row) || committing) return;
++    choose(Number(row.dataset.id));
++    commit();
++  });
+   window.chrome?.webview?.addEventListener("message", event => {
+     const model = event.data;
+     if (!model || model.type !== "model" || !Array.isArray(model.items)) return;
+     prompts = model.items;
++    committing = false;
+     if (selectedId === null || !prompts.some(p => p.Id === selectedId)) selectedId = prompts.length ? prompts[0].Id : null;
+-    el("sourceState").textContent = model.hasLocal ? "LOKAL + ZENTRAL" : "ZENTRAL";
+     saveSelection.disabled = !model.canSave;
+-    el("saveHint").textContent = !model.hasLocal ? "PromptLibLocal fehlt – Speichern deaktiviert" : !model.hasSelection ? "Markiere Text vor dem Aufruf, um ihn zu speichern" : model.canSave ? `${model.selectionLength} Zeichen markiert` : "Lokale Library nicht beschreibbar";
++    saveSelection.title = !model.hasLocal ? "Lokales Speichern ist nicht eingerichtet" : !model.hasSelection ? "Zuerst Text in der Zielanwendung markieren" : model.canSave ? "Markierung als Prompt speichern" : "Lokale Bibliothek ist nicht beschreibbar";
++    el("saveHint").textContent = !model.hasLocal ? "Lokales Speichern nicht verfügbar" : !model.hasSelection ? "Text markieren, um einen Prompt zu speichern" : model.canSave ? "Markierung als Prompt speichern" : "Lokales Speichern nicht verfügbar";
+     categories();
+     paint();
+     search.focus();
+   });
+-  search.addEventListener("input",paint);
+-  category.addEventListener("change",paint);
+-  insert.addEventListener("click",commit);
+-  el("cancel").addEventListener("click",()=>post({type:"close"}));
+-  el("close").addEventListener("click",()=>post({type:"close"}));
+-  saveSelection.addEventListener("click",()=>{if(!saveSelection.disabled)post({type:"save"});});
++  search.addEventListener("input", paint);
++  category.addEventListener("change", paint);
++  insert.addEventListener("click", commit);
++  el("cancel").addEventListener("click", () => post({type:"close"}));
++  el("close").addEventListener("click", () => post({type:"close"}));
++  saveSelection.addEventListener("click", () => { if (!saveSelection.disabled) post({type:"save", category:category.value}); });
+   document.addEventListener("keydown", e => {
+-    if (e.key === "Escape") {e.preventDefault();post({type:"close"});}
+-    if (e.ctrlKey && e.key.toLowerCase() === "k") {e.preventDefault();search.focus();search.select();}
+-    if (e.key === "Enter" && !e.shiftKey && document.activeElement !== category) {e.preventDefault();commit();}
+-    if ((e.key === "ArrowDown" || e.key === "ArrowUp") && (document.activeElement === search || document.activeElement === results)) {
++    if (e.key === "Escape") {e.preventDefault(); post({type:"close"});}
++    if (e.ctrlKey && e.key.toLowerCase() === "k") {e.preventDefault(); search.focus(); search.select();}
++    if (e.key === "Enter" && !e.shiftKey && document.activeElement !== category) {e.preventDefault(); commit();}
++    if ((e.key === "ArrowDown" || e.key === "ArrowUp") && (document.activeElement === search || results.contains(document.activeElement))) {
+       e.preventDefault();
+       const position = visible.findIndex(p => p.Id === selectedId);
+       const next = visible[position + (e.key === "ArrowDown" ? 1 : -1)];

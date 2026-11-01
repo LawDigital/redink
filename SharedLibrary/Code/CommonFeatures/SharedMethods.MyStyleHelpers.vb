@@ -20,6 +20,10 @@
 '  - Optional "None" entry (ID 0) returns "NONE".
 '  - Uses SharedMethods.SelectValue to show the picker UI and returns the selected
 '    prompt string; returns "ERROR" on validation/processing errors.
+'
+' KEY ARCHITECTURE
+'   • Surface: SharedMethods, MyStyleHelpers (VB implementation).
+'   • Entry points/helpers: SelectPromptFromMyStyle, NormalizeAppName, MakeUniqueDisplay.
 ' =============================================================================
 
 Option Strict On

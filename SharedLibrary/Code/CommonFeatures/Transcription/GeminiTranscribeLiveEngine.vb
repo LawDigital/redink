@@ -1,4 +1,4 @@
-﻿' Part of "Red Ink for Word"
+﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
@@ -6,6 +6,10 @@
 ' Purpose: Live transcription using Google Gemini 3.5 Transcribe Live over the
 '          documented BidiGenerateContent WebSocket API. Uses only .NET/BCL
 '          networking and the existing Red Ink audio capture contract.
+'
+' KEY ARCHITECTURE
+'   • Surface: GeminiTranscribeLiveEngine (VB implementation).
+'   • Entry points/helpers: StartLiveAsync, PushAudioAsync, StopLiveAsync.
 ' =============================================================================
 
 Option Explicit On

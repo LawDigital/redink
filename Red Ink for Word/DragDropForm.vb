@@ -298,11 +298,7 @@ Public Class DragDropForm
     ''' Sets the form icon from application resources on load.
     ''' </summary>
     Private Sub DragDropForm_Load(sender As Object, e As EventArgs) Handles MyBase.Load
-        Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-        Dim icon As Icon = Icon.FromHandle(bmp.GetHicon())
-        Me.Icon = icon
-        ' Dispose bitmap to release GDI resources
-        bmp.Dispose()
+        Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(Me)
 
         ' Ensure the form appears above TopMost progress bars that may be running
         ' on a separate STA thread (e.g., during multi-trigger file loading).

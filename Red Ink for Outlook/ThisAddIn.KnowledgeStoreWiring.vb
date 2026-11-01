@@ -4,7 +4,7 @@
 ' =============================================================================
 ' File: ThisAddIn.KnowledgeStoreWiring.vb
 ' Purpose:
-'   Wires Knowledge Store services into the Outlook add-in lifecycle.
+'   Composes independent Knowledge Store and Semantic Archive maintenance for Outlook.
 '
 ' Responsibilities:
 '   - Initialize and shut down the shared Knowledge Store idle service.
@@ -33,50 +33,52 @@ Imports SharedLibrary.SharedLibrary.SharedMethods
 Partial Public Class ThisAddIn
 
     Private _ksTimer As System.Windows.Forms.Timer
+    Private _maintenanceCoordinator As BackgroundMaintenanceCoordinator
+    Private _hostIdleSnapshot As Integer = 1
     Private _ksInitializationState As Integer = 0 ' 0=not started, 1=running, 2=initialized
     Private _ksShutdownRequested As Integer = 0
-    Private Const KS_IDLE_INTERVAL_MS As Integer = 60000
+    Private Const KS_IDLE_INTERVAL_MS As Integer = 5000
 
     Public Sub InitializeKnowledgeStoreService()
         Try
-            KnowledgeStoreHostGate.RegisterHostIdleProvider("Outlook", Function() IsOutlookIdle())
-
-            If Not KnowledgeStoreCatalog.IsConfigured(_context) Then Return
+            System.Threading.Interlocked.Exchange(_hostIdleSnapshot, If(IsOutlookIdle(), 1, 0))
+            KnowledgeStoreHostGate.RegisterHostIdleProvider("Outlook", Function() System.Threading.Volatile.Read(_hostIdleSnapshot) = 1)
+            ' Either provider is sufficient. SA-only configuration never requires a Knowledge Store.
+            If Not OfficeMaintenanceService.IsConfigured(_context) Then Return
             If System.Threading.Interlocked.CompareExchange(_ksInitializationState, 1, 0) <> 0 Then Return
-
             System.Threading.Interlocked.Exchange(_ksShutdownRequested, 0)
             Dim capturedContext = _context
-
-            ' KnowledgeStoreIdleService.Initialize can synchronously enumerate configured stores.
-            ' It has no Outlook COM/WinForms dependency, so keep that I/O off Outlook's UI thread.
             System.Threading.Tasks.Task.Run(
                 Sub()
                     Try
-                        KnowledgeStoreIdleService.Initialize(capturedContext)
+                        Dim created = OfficeMaintenanceService.Create(capturedContext)
+                        System.Threading.Interlocked.Exchange(_maintenanceCoordinator, created)
                         System.Threading.Interlocked.Exchange(_ksInitializationState, 2)
-
                         If System.Threading.Volatile.Read(_ksShutdownRequested) <> 0 Then
-                            KnowledgeStoreIdleService.Shutdown()
+                            Dim retired = System.Threading.Interlocked.Exchange(_maintenanceCoordinator, Nothing)
+                            If retired IsNot Nothing Then retired.Dispose()
                             Return
                         End If
-
                         Dim uiControl = mainThreadControl
-                        If uiControl Is Nothing OrElse uiControl.IsDisposed Then Return
-
-                        uiControl.BeginInvoke(
-                            New System.Windows.Forms.MethodInvoker(
-                                Sub()
-                                    If System.Threading.Volatile.Read(_ksShutdownRequested) <> 0 Then Return
-                                    EnsureKnowledgeStoreTimerStarted()
-                                End Sub))
+                        If uiControl Is Nothing OrElse uiControl.IsDisposed Then
+                            Dim retired = System.Threading.Interlocked.Exchange(_maintenanceCoordinator, Nothing)
+                            If retired IsNot Nothing Then retired.Dispose()
+                            Return
+                        End If
+                        uiControl.BeginInvoke(New System.Windows.Forms.MethodInvoker(
+                            Sub()
+                                If System.Threading.Volatile.Read(_ksShutdownRequested) = 0 Then EnsureKnowledgeStoreTimerStarted()
+                            End Sub))
                     Catch ex As System.Exception
+                        Dim failed = System.Threading.Interlocked.Exchange(_maintenanceCoordinator, Nothing)
+                        If failed IsNot Nothing Then failed.Dispose()
                         System.Threading.Interlocked.Exchange(_ksInitializationState, 0)
-                        Debug.WriteLine($"KS Wiring: Background init error: {ex.Message}")
+                        System.Diagnostics.Debug.WriteLine("Office maintenance initialization: " & ex.Message)
                     End Try
                 End Sub)
         Catch ex As System.Exception
             System.Threading.Interlocked.Exchange(_ksInitializationState, 0)
-            Debug.WriteLine($"KS Wiring: Init scheduling error: {ex.Message}")
+            System.Diagnostics.Debug.WriteLine("Office maintenance startup: " & ex.Message)
         End Try
     End Sub
 
@@ -91,7 +93,6 @@ Partial Public Class ThisAddIn
 
     Public Sub ShutdownKnowledgeStoreService()
         System.Threading.Interlocked.Exchange(_ksShutdownRequested, 1)
-
         Try
             If _ksTimer IsNot Nothing Then
                 _ksTimer.Stop()
@@ -99,10 +100,11 @@ Partial Public Class ThisAddIn
                 _ksTimer.Dispose()
                 _ksTimer = Nothing
             End If
-
-            KnowledgeStoreIdleService.Shutdown()
+            Dim retired = System.Threading.Interlocked.Exchange(_maintenanceCoordinator, Nothing)
+            If retired IsNot Nothing Then retired.Dispose()
             System.Threading.Interlocked.Exchange(_ksInitializationState, 0)
-        Catch
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine("Office maintenance shutdown: " & ex.Message)
         Finally
             KnowledgeStoreHostGate.ClearHostIdleProvider()
         End Try
@@ -160,22 +162,15 @@ Partial Public Class ThisAddIn
         Return True
     End Function
 
-    Private Async Sub KsTimer_Tick(sender As Object, e As EventArgs)
+    Private Async Sub KsTimer_Tick(sender As Object, e As System.EventArgs)
         Try
-            If Not KnowledgeStoreIdleService.CanRunNow(_context) Then
-                Debug.WriteLine("KS Wiring: Skipping tick — outside configured Knowledge Store processing window.")
-                Return
-            End If
-
-            If Not IsOutlookIdle() Then
-                Debug.WriteLine("KS Wiring: Skipping tick — Outlook is busy (active AutoPilot work, Chat, or Agent).")
-                Return
-            End If
-
-            Debug.WriteLine("KS Wiring: Timer tick fired (60s).")
-            Await KnowledgeStoreIdleService.OnIdleTickAsync().ConfigureAwait(False)
-        Catch
-            ' Never let timer callbacks crash the host
+            ' This is the only place that reads Office/WinForms activity. Workers see a Boolean snapshot.
+            Dim hostIsIdle = IsOutlookIdle()
+            System.Threading.Interlocked.Exchange(_hostIdleSnapshot, If(hostIsIdle, 1, 0))
+            Dim coordinator = _maintenanceCoordinator
+            If coordinator IsNot Nothing Then Await coordinator.OnTickAsync(hostIsIdle).ConfigureAwait(False)
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine("Office maintenance tick: " & ex.Message)
         End Try
     End Sub
 

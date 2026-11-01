@@ -45,6 +45,9 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public Class ToolExecutionContext
 
+        ''' <summary>Host-authorized archive selection and retained search/read handles; inherited only from the parent run.</summary>
+        Public Property SemanticArchiveScope As Global.SharedLibrary.SharedLibrary.SemanticArchiveRunScope
+
         ''' <summary>Tools selected for this session.</summary>
         Public Property SelectedTools As List(Of ModelConfig)
 
@@ -135,6 +138,9 @@ Partial Public Class ThisAddIn
 
         Public Property PrematureTextRetryCount As Integer = 0
 
+        ''' <summary>Tool-response count already covered by the last host evidence-finalization review; -1 means no review yet.</summary>
+        Public Property EvidenceFinalizationReviewResponseCount As Integer = -1
+
         ''' <summary>Number of full finalization re-planning passes already consumed in this run.</summary>
         Public Property FinalizationRecoveryRestartCount As Integer = 0
         ''' <summary>Number of full tool-path recovery re-planning passes already consumed in this run.</summary>
@@ -161,6 +167,9 @@ Partial Public Class ThisAddIn
         ''' <summary>Bounded number of no-op attempts against the same target before the edit is marked unresolved.</summary>
         Public Const ZeroChangeOperationAbortThreshold As Integer = 3
 
+        ''' <summary>Per-execution coverage and bounded context-management recovery.</summary>
+        Public ReadOnly Property ContextProgress As New SharedLibrary.Agents.ContextProgressPolicy()
+
         ''' <summary>Per-run set of already-expanded (ref + range) keys used to suppress repeated no-progress reads.</summary>
         Public Property ExpandedContextKeys As HashSet(Of String) =
             New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
@@ -179,6 +188,7 @@ Partial Public Class ThisAddIn
 
         Public Property RunId As String
         Public Property SubAgentInvocationCount As Integer
+        Public Property SubAgentInternalRetryCount As Integer
         Public Property SubAgentInvocationCountsByAgent As Dictionary(Of String, Integer)
 
         Public Property AuthoritativeToolRegistrySnapshot As SharedLibrary.Agents.ToolRegistry
@@ -223,6 +233,7 @@ Partial Public Class ThisAddIn
             FinalizationBlockedReason = ""
             RunId = Guid.NewGuid().ToString("N")
             SubAgentInvocationCount = 0
+            SubAgentInternalRetryCount = 0
             SubAgentInvocationCountsByAgent = New Dictionary(Of String, Integer)(StringComparer.OrdinalIgnoreCase)
             AuthoritativeToolRegistry = Nothing
             AuthoritativeToolRegistrySnapshot = Nothing
@@ -304,7 +315,7 @@ Partial Public Class ThisAddIn
         Public Sub Log(message As String, Optional level As String = "step")
             Dim normalizedPrefix As String = If(LogPrefix, "").Trim()
             Dim isSubAgent As Boolean =
-                normalizedPrefix.StartsWith("[subagent]", StringComparison.OrdinalIgnoreCase)
+                IsSubAgentRun OrElse normalizedPrefix.StartsWith("[subagent]", StringComparison.OrdinalIgnoreCase)
             Dim leadingMarker As String = If(isSubAgent, "[subagent]", "")
             Dim humanMessage As String = If(message, "").Trim()
 
@@ -343,7 +354,7 @@ Partial Public Class ThisAddIn
             If normalizedLevel = "diag" Then Return
 
             Dim visibleMessage As String =
-                If(isSubAgent, "  [sub-agent] " & humanMessage, humanMessage)
+                If(isSubAgent, SharedLibrary.Agents.SubAgentLogScope.FormatMessage(humanMessage, subAgentFallback:=True), humanMessage)
 
             ' Keep exactly the same filtered payload that a live dashboard receives.
             ' A dashboard opened mid-run replays this collection rather than the broader

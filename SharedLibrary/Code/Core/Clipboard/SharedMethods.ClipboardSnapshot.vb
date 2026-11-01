@@ -45,7 +45,7 @@ Namespace SharedLibrary
             ''' </summary>
             ''' <returns>
             ''' An <see cref="System.Windows.Forms.IDataObject"/> containing the captured formats.
-            ''' Returns an empty <see cref="System.Windows.Forms.DataObject"/> on failure.
+            ''' Returns an empty <see cref="System.Windows.Forms.DataObject"/> on failure, or Nothing on timeout.
             ''' </returns>
             Public Shared Function Capture() As System.Windows.Forms.IDataObject
                 Dim captured As System.Windows.Forms.IDataObject = Nothing
@@ -104,8 +104,12 @@ Namespace SharedLibrary
                         End Try
                     End Sub)
                 t.SetApartmentState(System.Threading.ApartmentState.STA)
+                t.IsBackground = True
                 t.Start()
-                t.Join()
+                If Not t.Join(5000) Then
+                    System.Diagnostics.Trace.TraceWarning("Red Ink clipboard capture timed out; no snapshot will be restored.")
+                    Return Nothing
+                End If
 
                 Return captured
             End Function
@@ -129,8 +133,11 @@ Namespace SharedLibrary
                         End Try
                     End Sub)
                 t.SetApartmentState(System.Threading.ApartmentState.STA)
+                t.IsBackground = True
                 t.Start()
-                t.Join()
+                If Not t.Join(5000) Then
+                    System.Diagnostics.Trace.TraceWarning("Red Ink clipboard restore timed out; the native call was not retried.")
+                End If
             End Sub
 
             ''' <summary>

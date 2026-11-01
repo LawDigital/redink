@@ -599,7 +599,7 @@ Partial Public Class ThisAddIn
                     Global.SharedLibrary.SharedLibrary.SharedMethods.EditUserDictionaryFile(_context)
                 End Sub)
         End If
-        _quickTranslateWidget.ShowWidget()
+        _quickTranslateWidget.ShowWidget(RegisterHostModelessForm(_quickTranslateWidget))
     End Sub
 
 

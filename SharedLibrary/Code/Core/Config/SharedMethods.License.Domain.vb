@@ -20,7 +20,8 @@
 '     - Detects the special offline-domain key format.
 '     - Verifies the Ed25519 signature using a hardcoded public key.
 '     - Verifies Product ID, expiry date, and whether at least one local network
-'       identifier matches one identifier embedded in the license.
+'       identifier matches an embedded identifier exactly or, for DNS-style
+'       domains, is a true child domain of that identifier.
 '     - Returns a synthetic `LicenseApiResponse` so the existing Pro-license
 '       pipeline can continue to work with minimal changes.
 '  - Generator UI:
@@ -275,12 +276,14 @@ Namespace SharedLibrary
                     Return False
                 End If
 
-                Dim currentCandidates = GetCurrentNetworkDomainCandidates()
+                Dim needsTenant As System.Boolean = allowedDomains.Exists(
+                    Function(value As System.String) value.StartsWith(OfflineTenantIdentifierPrefix, System.StringComparison.OrdinalIgnoreCase))
+                Dim currentCandidates = GetCurrentOfflineLicenseIdentitySnapshot(allowedDomains, includeTenant:=needsTenant).Identifiers
                 Dim matchedDomain As String = ""
 
                 For Each candidate In currentCandidates
                     For Each allowedDomain In allowedDomains
-                        If candidate.Equals(allowedDomain, StringComparison.OrdinalIgnoreCase) Then
+                        If IsOfflineDomainIdentifierMatch(candidate, allowedDomain) Then
                             matchedDomain = candidate
                             Exit For
                         End If
@@ -310,7 +313,7 @@ Namespace SharedLibrary
 
                 Return True
 
-            Catch ex As Exception
+            Catch ex As System.Exception
                 failureReason = $"Failed to parse the offline-domain license: {ex.Message}"
                 Return False
             End Try
@@ -329,6 +332,14 @@ Namespace SharedLibrary
                                   Replace(",", vbLf)
 
             For Each rawEntry In flattened.Split({ControlChars.Lf}, StringSplitOptions.RemoveEmptyEntries)
+                Dim typedInput As System.String = rawEntry.Trim()
+                If typedInput.StartsWith(OfflineTenantIdentifierPrefix, System.StringComparison.OrdinalIgnoreCase) OrElse
+                   typedInput.StartsWith("*." & OfflineTenantIdentifierPrefix, System.StringComparison.OrdinalIgnoreCase) Then
+                    Dim canonicalTenant As System.String = System.String.Empty
+                    If Not TryNormalizeOfflineTenantIdentifier(typedInput, canonicalTenant) Then
+                        Throw New System.FormatException("Tenant IDs must be tenant:<non-empty GUID>, without a wildcard or domain suffix.")
+                    End If
+                End If
                 AddNormalizedDomain(results, rawEntry)
             Next
 
@@ -390,17 +401,58 @@ Namespace SharedLibrary
         End Sub
 
         Private Shared Function NormalizeOfflineDomainIdentifier(value As String) As String
-            If String.IsNullOrWhiteSpace(value) Then
+            If System.String.IsNullOrWhiteSpace(value) Then
                 Return ""
             End If
 
-            Dim normalized = value.Trim().Trim("."c).ToLowerInvariant()
+            Dim normalized As System.String = value.Trim().ToLowerInvariant()
+            If normalized.StartsWith(OfflineTenantIdentifierPrefix, System.StringComparison.Ordinal) Then
+                Dim canonicalTenant As System.String = System.String.Empty
+                If TryNormalizeOfflineTenantIdentifier(normalized, canonicalTenant) Then Return canonicalTenant
+                Return System.String.Empty
+            End If
 
-            If String.IsNullOrWhiteSpace(normalized) Then
+            ' Accept the common wildcard notation as input, but store and compare
+            ' the canonical DNS suffix.  The match boundary is enforced separately.
+            If normalized.StartsWith("*.", System.StringComparison.Ordinal) Then
+                normalized = normalized.Substring(2)
+            End If
+
+            normalized = normalized.Trim("."c)
+
+            If System.String.IsNullOrWhiteSpace(normalized) OrElse normalized.IndexOf("*"c) >= 0 Then
                 Return ""
             End If
 
             Return normalized
+        End Function
+
+        Private Shared Function IsOfflineDomainIdentifierMatch(candidate As System.String,
+                                                                 allowedDomain As System.String) As System.Boolean
+            If System.String.IsNullOrWhiteSpace(candidate) OrElse System.String.IsNullOrWhiteSpace(allowedDomain) Then
+                Return False
+            End If
+
+            ' Typed tenant identities can only match an identical native tenant GUID.
+            ' They never enter the legacy DNS suffix matching path.
+            If candidate.StartsWith(OfflineTenantIdentifierPrefix, System.StringComparison.OrdinalIgnoreCase) OrElse
+               allowedDomain.StartsWith(OfflineTenantIdentifierPrefix, System.StringComparison.OrdinalIgnoreCase) Then
+                Dim canonicalCandidate As System.String = System.String.Empty
+                Dim canonicalAllowed As System.String = System.String.Empty
+                Return TryNormalizeOfflineTenantIdentifier(candidate, canonicalCandidate) AndAlso
+                       TryNormalizeOfflineTenantIdentifier(allowedDomain, canonicalAllowed) AndAlso
+                       System.String.Equals(canonicalCandidate, canonicalAllowed, System.StringComparison.Ordinal)
+            End If
+
+            If candidate.Equals(allowedDomain, System.StringComparison.OrdinalIgnoreCase) Then
+                Return True
+            End If
+
+            ' Every allowed identifier covers itself and true child domains,
+            ' including single-label suffixes such as "abc" in "xy.cd.wa.abc".
+            ' Require a complete trailing label boundary; arbitrary substrings
+            ' such as "notabc" or "abc.example" must not match "abc".
+            Return candidate.EndsWith("." & allowedDomain, System.StringComparison.OrdinalIgnoreCase)
         End Function
 
         Private Shared Function IsOfflineDomainLicensePublicKeyConfigured() As Boolean
@@ -505,27 +557,42 @@ Namespace SharedLibrary
         End Function
 
         Public Shared Sub ShowOfflineDomainLicenseGeneratorDialog()
-            Using form As New Form()
+            If Not IsOnHostUiThread AndAlso Not IsOnHostNeutralSta Then
+                RunOnStaThread(AddressOf ShowOfflineDomainLicenseGeneratorDialog, "Red Ink offline license", alwaysUseWorker:=True)
+                Return
+            End If
+            Using form As New Form(), hints As New System.Windows.Forms.ToolTip() With {
+                .AutoPopDelay = 30000, .InitialDelay = 350, .ReshowDelay = 100, .ShowAlways = True}
                 form.AutoScaleDimensions = New SizeF(96.0F, 96.0F)
                 form.AutoScaleMode = AutoScaleMode.Dpi
 
-                form.Text = $"{AN} - Offline Domain License Generator"
+                form.Text = $"{AN} - Offline License Manager"
                 form.StartPosition = FormStartPosition.CenterScreen
                 form.FormBorderStyle = FormBorderStyle.Sizable
                 form.MaximizeBox = True
                 form.MinimizeBox = False
                 form.ShowInTaskbar = True
                 form.TopMost = True
-                form.MinimumSize = New Size(980, 780)
-                form.Font = New Font("Segoe UI", 9.5F)
+                form.MinimumSize = New System.Drawing.Size(840, 540)
+                form.Size = New System.Drawing.Size(1160, 820)
+                AddHandler form.Load,
+                    Sub()
+                        Dim area As System.Drawing.Rectangle = System.Windows.Forms.Screen.FromControl(form).WorkingArea
+                        form.MinimumSize = New System.Drawing.Size(System.Math.Min(form.MinimumSize.Width, area.Width),
+                                                                  System.Math.Min(form.MinimumSize.Height, area.Height))
+                        form.Size = New System.Drawing.Size(System.Math.Min(form.Width, area.Width),
+                                                           System.Math.Min(form.Height, area.Height))
+                    End Sub
+                form.Font = New System.Drawing.Font("Segoe UI", 9.5F)
+                form.AutoScroll = False
 
                 Try
-                    Dim bmp As New Bitmap(GetLogoBitmap(LogoType.Standard))
-                    form.Icon = Icon.FromHandle(bmp.GetHicon())
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(form)
                 Catch
                 End Try
 
                 Dim mainLayout As New TableLayoutPanel() With {
+                    .AutoScroll = True,
                     .Dock = DockStyle.Fill,
                     .Padding = New Padding(20),
                     .ColumnCount = 2,
@@ -539,10 +606,19 @@ Namespace SharedLibrary
                     mainLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))
                 Next
 
-                form.Controls.Add(mainLayout)
+                ' Keep actions outside the scrollable fields, including on small/high-DPI screens.
+                Dim dialogLayout As New System.Windows.Forms.TableLayoutPanel() With {
+                    .Dock = System.Windows.Forms.DockStyle.Fill,
+                    .ColumnCount = 1, .RowCount = 2, .Margin = New System.Windows.Forms.Padding(0)}
+                dialogLayout.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
+                dialogLayout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
+                dialogLayout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+                mainLayout.Margin = New System.Windows.Forms.Padding(0)
+                dialogLayout.Controls.Add(mainLayout, 0, 0)
+                form.Controls.Add(dialogLayout)
 
                 Dim lblTitle As New Label() With {
-                    .Text = "Generate Offline Domain License",
+                    .Text = "Generate Offline License",
                     .Font = New Font("Segoe UI", 12.0F, FontStyle.Bold),
                     .AutoSize = True,
                     .Margin = New Padding(0, 0, 0, 5)
@@ -551,13 +627,14 @@ Namespace SharedLibrary
                 mainLayout.SetColumnSpan(lblTitle, 2)
 
                 Dim lblDescription As New Label() With {
-                    .Text = "Creates a signed offline-domain license key. Enter one or more allowed network identifiers (one per line). A local machine is accepted when at least one identifier matches exactly.",
+                    .Text = "Domains, computer names and Entra tenant IDs. Hover over fields for details.",
                     .AutoSize = True,
                     .MaximumSize = New Size(820, 0),
                     .Margin = New Padding(0, 0, 0, 15)
                 }
                 mainLayout.Controls.Add(lblDescription, 0, 1)
                 mainLayout.SetColumnSpan(lblDescription, 2)
+                hints.SetToolTip(lblDescription, "Creates a signed offline license for domains, network/host names, computer/client names and Microsoft Entra (Azure AD) tenant IDs. Domain/network IDs retain their existing exact-or-child-domain matching; tenant:<GUID> matches only that exact tenant. At least ONE allowed identifier must match (OR, not AND). A computer/client ID is the Windows computer name, not a hardware UUID.")
 
                 Dim lblProductId As New Label() With {
                     .Text = "Product ID:",
@@ -593,7 +670,7 @@ Namespace SharedLibrary
                 mainLayout.Controls.Add(dtpValidUntil, 1, 3)
 
                 Dim lblDomains As New Label() With {
-                    .Text = "Allowed Domains / Network IDs:",
+                    .Text = "Allowed IDs:",
                     .AutoSize = True,
                     .Anchor = AnchorStyles.Left Or AnchorStyles.Top,
                     .Margin = New Padding(0, 6, 10, 0)
@@ -602,16 +679,30 @@ Namespace SharedLibrary
 
                 Dim txtDomains As New TextBox() With {
                     .Multiline = True,
+                    .AcceptsReturn = True,
                     .ScrollBars = ScrollBars.Vertical,
                     .WordWrap = False,
                     .Anchor = AnchorStyles.Left Or AnchorStyles.Right,
-                    .Height = 110,
+                    .Height = 64,
                     .Margin = New Padding(0, 3, 0, 3)
                 }
-                mainLayout.Controls.Add(txtDomains, 1, 4)
+                Dim allowedIdsPanel As New System.Windows.Forms.TableLayoutPanel() With {
+                    .Dock = System.Windows.Forms.DockStyle.Fill, .AutoSize = True, .ColumnCount = 1, .RowCount = 2}
+                allowedIdsPanel.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
+                allowedIdsPanel.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+                allowedIdsPanel.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+                allowedIdsPanel.Controls.Add(txtDomains, 0, 0)
+                Dim lblAllowedIdsHelp As New System.Windows.Forms.Label() With {
+                    .AutoSize = True, .MaximumSize = New System.Drawing.Size(820, 0),
+                    .Text = "One per line, or separated by ; or , — one matching ID is sufficient (OR)."}
+                hints.SetToolTip(lblAllowedIdsHelp, "Multiple values: one per line, or separated by semicolons or commas. Example: example.org; OFFICE-PC01; tenant:01234567-89ab-cdef-0123-456789abcdef. Only one matching value is required. Remove IDs that should not independently authorize this license.")
+                hints.SetToolTip(txtDomains, "Multiple values: one per line, or separated by semicolons or commas. Example: example.org; OFFICE-PC01; tenant:01234567-89ab-cdef-0123-456789abcdef. Only one matching value is required. Remove IDs that should not independently authorize this license.")
+                hints.SetToolTip(lblDomains, "Multiple values: one per line, or separated by semicolons or commas. Example: example.org; OFFICE-PC01; tenant:01234567-89ab-cdef-0123-456789abcdef. Only one matching value is required. Remove IDs that should not independently authorize this license.")
+                allowedIdsPanel.Controls.Add(lblAllowedIdsHelp, 0, 1)
+                mainLayout.Controls.Add(allowedIdsPanel, 1, 4)
 
                 Dim lblCurrentDomains As New Label() With {
-                    .Text = "Current Local Network IDs:",
+                    .Text = "Detected Local IDs:",
                     .AutoSize = True,
                     .Anchor = AnchorStyles.Left Or AnchorStyles.Top,
                     .Margin = New Padding(0, 6, 10, 0)
@@ -624,10 +715,19 @@ Namespace SharedLibrary
                     .ScrollBars = ScrollBars.Vertical,
                     .WordWrap = False,
                     .Anchor = AnchorStyles.Left Or AnchorStyles.Right,
-                    .Height = 90,
+                    .Height = 64,
                     .Margin = New Padding(0, 3, 0, 3)
                 }
-                mainLayout.Controls.Add(txtCurrentDomains, 1, 5)
+                Dim detectedIdsPanel As New System.Windows.Forms.TableLayoutPanel() With {
+                    .Dock = System.Windows.Forms.DockStyle.Fill, .AutoSize = True, .ColumnCount = 1, .RowCount = 2}
+                detectedIdsPanel.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
+                detectedIdsPanel.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+                detectedIdsPanel.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+                detectedIdsPanel.Controls.Add(txtCurrentDomains, 0, 0)
+                Dim lblDetectedIdsDetails As New System.Windows.Forms.Label() With {
+                    .AutoSize = True, .MaximumSize = New System.Drawing.Size(820, 0)}
+                detectedIdsPanel.Controls.Add(lblDetectedIdsDetails, 0, 1)
+                mainLayout.Controls.Add(detectedIdsPanel, 1, 5)
 
                 Dim lblPrivateKey As New Label() With {
                     .Text = "Private Key (Base64):",
@@ -638,6 +738,7 @@ Namespace SharedLibrary
                 mainLayout.Controls.Add(lblPrivateKey, 0, 6)
 
                 Dim privateKeyPanel As New TableLayoutPanel() With {
+                    .AutoSize = True,
                     .Dock = DockStyle.Fill,
                     .ColumnCount = 1,
                     .RowCount = 3,
@@ -653,7 +754,7 @@ Namespace SharedLibrary
                     .ScrollBars = ScrollBars.Vertical,
                     .WordWrap = False,
                     .Dock = DockStyle.Fill,
-                    .Height = 110,
+                    .Height = 64,
                     .Margin = New Padding(0, 0, 0, 8)
                 }
                 privateKeyPanel.Controls.Add(txtPrivateKey, 0, 0)
@@ -672,7 +773,7 @@ Namespace SharedLibrary
                     .ScrollBars = ScrollBars.Vertical,
                     .WordWrap = False,
                     .Dock = DockStyle.Fill,
-                    .Height = 60
+                    .Height = 32
                 }
                 privateKeyPanel.Controls.Add(txtPublicKey, 0, 2)
 
@@ -687,13 +788,13 @@ Namespace SharedLibrary
                 mainLayout.Controls.Add(lblResult, 0, 7)
 
                 Dim resultPanel As New TableLayoutPanel() With {
+                    .AutoSize = True,
                     .Dock = DockStyle.Fill,
                     .ColumnCount = 1,
-                    .RowCount = 2,
+                    .RowCount = 1,
                     .Margin = New Padding(0, 3, 0, 3)
                 }
                 resultPanel.ColumnStyles.Add(New ColumnStyle(SizeType.Percent, 100.0F))
-                resultPanel.RowStyles.Add(New RowStyle(SizeType.AutoSize))
                 resultPanel.RowStyles.Add(New RowStyle(SizeType.AutoSize))
 
                 Dim txtLicenseKey As New TextBox() With {
@@ -702,7 +803,7 @@ Namespace SharedLibrary
                     .ScrollBars = ScrollBars.Vertical,
                     .WordWrap = False,
                     .Dock = DockStyle.Fill,
-                    .Height = 110,
+                    .Height = 64,
                     .Margin = New Padding(0, 0, 0, 10)
                 }
                 resultPanel.Controls.Add(txtLicenseKey, 0, 0)
@@ -712,7 +813,7 @@ Namespace SharedLibrary
                     .AutoSizeMode = AutoSizeMode.GrowAndShrink,
                     .FlowDirection = FlowDirection.LeftToRight,
                     .Anchor = AnchorStyles.Left,
-                    .WrapContents = False,
+                    .WrapContents = True,
                     .Margin = New Padding(0)
                 }
 
@@ -722,6 +823,11 @@ Namespace SharedLibrary
                     .Margin = New Padding(0, 0, 8, 0)
                 }
                 buttonPanel.Controls.Add(btnUseCurrentDomains)
+
+                Dim btnRefreshIds As New System.Windows.Forms.Button() With {
+                    .Text = "Refresh / Check IDs", .AutoSize = True,
+                    .Margin = New System.Windows.Forms.Padding(0, 0, 8, 0)}
+                buttonPanel.Controls.Add(btnRefreshIds)
 
                 Dim btnGenerate As New Button() With {
                     .Text = "Generate",
@@ -744,11 +850,35 @@ Namespace SharedLibrary
                 }
                 buttonPanel.Controls.Add(btnClose)
 
-                resultPanel.Controls.Add(buttonPanel, 0, 1)
+                buttonPanel.Dock = System.Windows.Forms.DockStyle.Fill
+                buttonPanel.Padding = New System.Windows.Forms.Padding(20, 8, 20, 14)
+                dialogLayout.Controls.Add(buttonPanel, 0, 1)
                 mainLayout.Controls.Add(resultPanel, 1, 7)
 
-                Dim currentDomains = GetCurrentNetworkDomainCandidates()
-                txtCurrentDomains.Text = String.Join(vbCrLf, currentDomains)
+                Dim currentSnapshot As OfflineLicenseIdentitySnapshot = Nothing
+                Dim refreshIds As System.Action =
+                    Sub()
+                        Dim requested As System.Collections.Generic.List(Of System.String) = ParseOfflineDomainList(txtDomains.Text)
+                        currentSnapshot = GetCurrentOfflineLicenseIdentitySnapshot(requested)
+                        txtCurrentDomains.Text = System.String.Join(vbCrLf, currentSnapshot.Identifiers)
+                        lblDetectedIdsDetails.Text = "Detection details: hover here. Check another tenant via Refresh / Check IDs."
+                        Dim details As System.String = System.String.Join(vbCrLf, currentSnapshot.Details) & vbCrLf &
+                            "Windows may return only one default work account. To check another tenant, enter tenant:<GUID> above and click Refresh / Check IDs. Only Windows-confirmed registrations appear as detected IDs; an M365 configuration value alone does not qualify."
+                        hints.SetToolTip(lblDetectedIdsDetails, details)
+                        hints.SetToolTip(txtCurrentDomains, details)
+                        hints.SetToolTip(btnRefreshIds, details)
+                    End Sub
+                refreshIds.Invoke()
+                AddHandler btnRefreshIds.Click,
+                    Sub()
+                        Try
+                            refreshIds.Invoke()
+                        Catch ex As System.Exception
+                            Using PushDialogOwner(form)
+                                ShowCustomMessageBox(ex.Message, $"{AN} - Offline License Manager")
+                            End Using
+                        End Try
+                    End Sub
 
                 If String.IsNullOrWhiteSpace(txtDomains.Text) Then
                     txtDomains.Text = txtCurrentDomains.Text
@@ -756,19 +886,22 @@ Namespace SharedLibrary
 
                 AddHandler btnUseCurrentDomains.Click,
                     Sub()
-                        txtDomains.Text = txtCurrentDomains.Text
+                        txtDomains.Text = System.String.Join(vbCrLf, currentSnapshot.Identifiers)
                     End Sub
 
                 AddHandler btnGenerate.Click,
                     Sub()
                         Try
-                            txtLicenseKey.Text = GenerateOfflineDomainLicenseKey(
+                            Dim normalizedAllowedDomains As System.Collections.Generic.List(Of System.String) = ParseOfflineDomainList(txtDomains.Text)
+                            txtDomains.Text = System.String.Join(vbCrLf, normalizedAllowedDomains)
+
+                            txtLicenseKey.Text = GenerateOfflineDomainLicenseKeyInternal(
                                 txtProductId.Text.Trim(),
-                                txtDomains.Text,
+                                normalizedAllowedDomains,
                                 dtpValidUntil.Value.Date,
                                 txtPrivateKey.Text.Trim())
 
-                        Catch ex As Exception
+                        Catch ex As System.Exception
                             ShowCustomMessageBox($"Failed to generate offline-domain license key: {ex.Message}", $"{AN} - License Generator")
                         End Try
                     End Sub
@@ -782,7 +915,7 @@ Namespace SharedLibrary
 
                         Try
                             Clipboard.SetText(txtLicenseKey.Text)
-                        Catch ex As Exception
+                        Catch ex As System.Exception
                             ShowCustomMessageBox($"Could not copy the license key: {ex.Message}", $"{AN} - License Generator")
                         End Try
                     End Sub

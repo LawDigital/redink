@@ -409,7 +409,11 @@ Namespace SharedLibrary
         ''' <param name="context">Shared execution context.</param>
         ''' <returns><see langword="True"/> when a license flow succeeds; otherwise <see langword="False"/>.</returns>
         Private Shared Function ShowLicenseTypeSelectionDialog(context As ISharedContext) As Boolean
+            If Not IsOnHostUiThread AndAlso Not IsOnHostNeutralSta Then
+                Return RunOnStaThread(Function() ShowLicenseTypeSelectionDialog(context), "Red Ink license confirmation", alwaysUseWorker:=True)
+            End If
 
+            RequireInteractiveExecution("license_selection")
             ' Check if private license is still available for this version
             Dim privateAvailable As Boolean = IsPrivateLicenseAvailable(context)
             Dim DisablePrivateText As String
@@ -432,8 +436,7 @@ Namespace SharedLibrary
                 form.TopMost = True
 
                 Try
-                    Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                    form.Icon = Icon.FromHandle(bmp.GetHicon())
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(form)
                 Catch
                 End Try
 
@@ -706,6 +709,9 @@ Namespace SharedLibrary
         ''' </summary>
         ''' <returns><see langword="True"/> when user confirms; otherwise <see langword="False"/>.</returns>
         Private Shared Function ShowTestingProComplianceConfirmation() As Boolean
+            If Not IsOnHostUiThread AndAlso Not IsOnHostNeutralSta Then
+                Return RunOnStaThread(Function() ShowTestingProComplianceConfirmation(), "Red Ink license confirmation", alwaysUseWorker:=True)
+            End If
             Try
                 Dim msg = TestingProComplianceMessage & vbCrLf & vbCrLf &
                           "Do you confirm that you are using this software in compliance with these license terms?"
@@ -1910,6 +1916,8 @@ Namespace SharedLibrary
         ''' <param name="details">Optional event details; line breaks are indented.</param>
         ''' <param name="alwaysLog">Controls whether the event is recorded regardless of other conditions.</param>
         Private Shared Sub LogLicenseEvent(eventType As String, details As String, Optional alwaysLog As Boolean = False)
+            ' Unattended hosts report status codes, never license API payloads or credentials.
+            If IsHeadlessExecution Then Return
             Try
                 Dim message As String = $"[License] [{eventType}]"
                 If Not String.IsNullOrWhiteSpace(details) Then

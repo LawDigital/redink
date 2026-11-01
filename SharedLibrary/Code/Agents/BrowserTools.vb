@@ -233,6 +233,7 @@ Namespace Agents
         Private Shared Function BuildBrowserOpen() As ModelConfig
             Return New ModelConfig() With {
                 .ToolName = BrowserOpenToolName,
+                .CapabilityTags = "source_retrieval",
                 .Tool = True,
                 .ToolPriority = BrowserOpenPriority,
                 .ToolErrorHandling = "skip",
@@ -250,6 +251,7 @@ Namespace Agents
         Private Shared Function BuildBrowserSnapshot() As ModelConfig
             Return New ModelConfig() With {
                 .ToolName = BrowserSnapshotToolName,
+                .CapabilityTags = "source_retrieval",
                 .Tool = True,
                 .ToolPriority = BrowserSnapshotPriority,
                 .ToolErrorHandling = "skip",

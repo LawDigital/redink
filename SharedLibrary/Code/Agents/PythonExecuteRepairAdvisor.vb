@@ -36,6 +36,7 @@ Namespace Agents
     Public Enum PythonExecuteOutcomeClass
         SUCCESS
         TRANSIENT_FAILURE
+        INFRASTRUCTURE_FAILURE
         CODE_REPAIR_REQUIRED
         DIAGNOSTIC_RUN_REQUIRED
         NON_RECOVERABLE_FAILURE
@@ -45,6 +46,9 @@ Namespace Agents
     ''' <summary>Configurable per-session limits governing automatic continuation.</summary>
     Public NotInheritable Class PythonExecuteRepairLimits
         Public Property MaxTransientRetries As System.Int32 = 2
+        ' Broker/worker/protocol infrastructure failures have their own small budget and never consume
+        ' code-repair budget. One retry after the initial infrastructure failure is permitted.
+        Public Property MaxInfrastructureRetries As System.Int32 = 1
         Public Property MaxCodeRepairs As System.Int32 = 3
         Public Property MaxDiagnosticRuns As System.Int32 = 1
     End Class
@@ -64,6 +68,7 @@ Namespace Agents
         Public ReadOnly Property Limits As New PythonExecuteRepairLimits()
         Public ReadOnly Property Attempts As New System.Collections.Generic.List(Of PythonExecuteAttempt)()
         Public Property TransientRetriesUsed As System.Int32
+        Public Property InfrastructureRetriesUsed As System.Int32
         Public Property CodeRepairsUsed As System.Int32
         Public Property DiagnosticRunsUsed As System.Int32
         Public Property SameFingerprintStreak As System.Int32
@@ -232,6 +237,47 @@ Namespace Agents
                         ReadString(errorObj("missing_symbol"))))
 
                 Dim codeText As System.String = ReadCodeArgument(arguments)
+
+                ' Broker/worker/protocol failures are infrastructure outcomes, not evidence that the submitted
+                ' Python program is wrong. Keep them out of the code-repair lineage entirely: do not compare
+                ' scripts, do not run destructive-repair heuristics, and do not consume code-repair/diagnostic
+                ' budgets. Permit only one bounded infrastructure retry after the initial failure.
+                If IsInfrastructureCode(code) Then
+                    Dim infrastructureTerminal As System.Boolean =
+                        session.InfrastructureRetriesUsed >= session.Limits.MaxInfrastructureRetries
+                    session.LastClassification = PythonExecuteOutcomeClass.INFRASTRUCTURE_FAILURE
+                    errorObj("retryable") = New Newtonsoft.Json.Linq.JValue(Not infrastructureTerminal)
+                    errorObj("repairable") = New Newtonsoft.Json.Linq.JValue(False)
+
+                    Dim infrastructureGuidance As System.String
+                    If infrastructureTerminal Then
+                        infrastructureGuidance =
+                            "The secure Python execution infrastructure failed again after its bounded retry. Do not modify the Python code merely to work around a broker/worker/protocol failure. Stop this Python path and either use a separately authorized execution path when the active workflow permits it, or report the infrastructure block truthfully."
+                        terminalReason =
+                            "python_execute infrastructure retry budget exhausted (code=" & code & ")."
+                    Else
+                        session.InfrastructureRetriesUsed += 1
+                        infrastructureGuidance =
+                            "The secure Python execution infrastructure failed before a trustworthy Python-code outcome was available. Do not change the Python program on account of this failure. Retry the same python_execute request once; if the infrastructure failure persists, stop this Python path rather than entering code-repair iterations."
+                    End If
+
+                    Dim infrastructureAdvisor As New Newtonsoft.Json.Linq.JObject(
+                        New Newtonsoft.Json.Linq.JProperty("classification", PythonExecuteOutcomeClass.INFRASTRUCTURE_FAILURE.ToString()),
+                        New Newtonsoft.Json.Linq.JProperty("worker_outcome_trustworthy", False),
+                        New Newtonsoft.Json.Linq.JProperty("code_repair_applicable", False),
+                        New Newtonsoft.Json.Linq.JProperty("infrastructure_retries_used", session.InfrastructureRetriesUsed),
+                        New Newtonsoft.Json.Linq.JProperty("max_infrastructure_retries", session.Limits.MaxInfrastructureRetries),
+                        New Newtonsoft.Json.Linq.JProperty("code_repairs_used", session.CodeRepairsUsed),
+                        New Newtonsoft.Json.Linq.JProperty("max_code_repairs", session.Limits.MaxCodeRepairs),
+                        New Newtonsoft.Json.Linq.JProperty("guidance", infrastructureGuidance),
+                        New Newtonsoft.Json.Linq.JProperty("attempt_history", BuildHistoryJson(session)))
+                    errorObj("advisor") = infrastructureAdvisor
+                    Return payload.ToString(Newtonsoft.Json.Formatting.None)
+                End If
+
+                ' A trustworthy worker/code outcome breaks any prior infrastructure-failure streak.
+                session.InfrastructureRetriesUsed = 0
+
                 Dim codeHash As System.String = ComputeHash(codeText)
                 Dim expression As System.String = ExtractExpression(codeText, line, symbol)
 
@@ -294,6 +340,8 @@ Namespace Agents
                     New Newtonsoft.Json.Linq.JProperty("max_code_repairs", session.Limits.MaxCodeRepairs),
                     New Newtonsoft.Json.Linq.JProperty("transient_retries_used", session.TransientRetriesUsed),
                     New Newtonsoft.Json.Linq.JProperty("max_transient_retries", session.Limits.MaxTransientRetries),
+                    New Newtonsoft.Json.Linq.JProperty("infrastructure_retries_used", session.InfrastructureRetriesUsed),
+                    New Newtonsoft.Json.Linq.JProperty("max_infrastructure_retries", session.Limits.MaxInfrastructureRetries),
                     New Newtonsoft.Json.Linq.JProperty("diagnostic_runs_used", session.DiagnosticRunsUsed),
                     New Newtonsoft.Json.Linq.JProperty("max_diagnostic_runs", session.Limits.MaxDiagnosticRuns),
                     New Newtonsoft.Json.Linq.JProperty("guidance", BuildGuidance(classification, exceptionType, objectType, symbol, RedactSensitive(rawMessage))),
@@ -673,6 +721,7 @@ Namespace Agents
         Private Shared Sub ResetSession(session As PythonExecuteRepairSession)
             session.Attempts.Clear()
             session.TransientRetriesUsed = 0
+            session.InfrastructureRetriesUsed = 0
             session.CodeRepairsUsed = 0
             session.DiagnosticRunsUsed = 0
             session.SameFingerprintStreak = 0
@@ -827,6 +876,8 @@ Namespace Agents
             Select Case classification
                 Case PythonExecuteOutcomeClass.TRANSIENT_FAILURE
                     Return "Transient failure. The identical request may be executed again unchanged."
+                Case PythonExecuteOutcomeClass.INFRASTRUCTURE_FAILURE
+                    Return "Infrastructure failure. Do not modify the Python program merely because the broker, worker, or protocol failed; use only the bounded infrastructure retry path."
                 Case PythonExecuteOutcomeClass.NON_RECOVERABLE_FAILURE
                     Return "Non-recoverable failure. Do not retry or repair; report the situation instead."
                 Case PythonExecuteOutcomeClass.REPAIR_BUDGET_EXHAUSTED
@@ -877,6 +928,15 @@ Namespace Agents
 
         Private Shared Function IsAttributeLike(code As System.String) As System.Boolean
             Return code = "PYTHON_ATTRIBUTE_ERROR" OrElse code = "PYTHON_TYPE_ERROR"
+        End Function
+
+        Private Shared Function IsInfrastructureCode(code As System.String) As System.Boolean
+            Select Case code
+                Case "INTERNAL_BROKER_ERROR", "BROKER_START_FAILED", "BROKER_EXITED_WITHOUT_RESPONSE", "BROKER_HEARTBEAT_LOST"
+                    Return True
+                Case Else
+                    Return False
+            End Select
         End Function
 
         Private Shared Function IsTransientCode(code As System.String) As System.Boolean

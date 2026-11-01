@@ -88,6 +88,17 @@ Public Class frmAIChat
 
     Const ToolTrigger As String = "(ag)"
 
+    ' English-only host-owned feedback; independent of the selected chat language or model.
+    ' Never expose parser internals or raw exception text in the Word chat UI.
+    Private Const InvalidWordCommandUserMessage As String =
+        "The selected AI model did not provide the instructions in the format required to edit this Word document. " &
+        "No changes were made to the document. Please try sending your request again. " &
+        "If the problem continues, select a different AI model and try again."
+
+    Private Const WordEditFailureUserMessage As String =
+        "Word could not complete the requested document action. " &
+        "Some changes may already have been applied. Please review the document before trying again."
+
     ''' <summary>
     ''' Special Unicode private-use character (U+E000) inserted during text replacement.
     ''' Acts as temporary marker to prevent infinite loops when searching for replaced text.
@@ -138,6 +149,16 @@ Public Class frmAIChat
     ''' Prevents the chat input box from immediately stealing focus back.
     ''' </summary>
     Private _keepFocusOnDocumentAfterCommands As Boolean = False
+    ' Form-lifetime cancellation prevents completed model calls from manipulating
+    ' a disposed chat window or an Office host that has already exited.
+    Private ReadOnly _chatLifetimeCts As New System.Threading.CancellationTokenSource()
+
+    Private ReadOnly Property ChatLifetimeEnded As System.Boolean
+        Get
+            Return _chatLifetimeCts.IsCancellationRequested OrElse Me.IsDisposed OrElse Me.Disposing
+        End Get
+    End Property
+
     Private _dialogOwnerScope As System.IDisposable = Nothing
 
     ' =========================================================================
@@ -400,7 +421,7 @@ Public Class frmAIChat
 
     ''' <summary>
     ''' True when secondary API model is active (either toggled or alternate selected).
-    ''' When true, UpdateDocumentCheckboxesState() disables document/selection/command checkboxes.
+    ''' The active model is tracked independently of document/selection/write-access preferences.
     ''' </summary>
     Private _useSecondApi As Boolean = False
 
@@ -600,7 +621,7 @@ Public Class frmAIChat
         ' Configure form appearance
         Me.Font = New System.Drawing.Font("Segoe UI", 9)
         Me.FormBorderStyle = FormBorderStyle.Sizable
-        Me.Icon = Icon.FromHandle(New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)).GetHicon())
+        Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(Me)
         Me.TopMost = True
         Me.MinimumSize = New Size(830, 521)
 
@@ -630,17 +651,21 @@ Public Class frmAIChat
         AddHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
 
         ' Configure instructions label
-        Dim baseInstructions As String = "Enter your question and Enter (or 'Send'). You can allow the chatbot to do actions on your document (search, replace, delete, insert text and add or reply to comments). It does not see deletions, markups as such or formatting."
+        Dim baseInstructions As String = "Ask a question (Enter/Send). Allow edits if needed. Chat sees visible text."
 
         If _context.INI_PromptLib Then
-            baseInstructions &= " Type '/' at the start of a prompt or after whitespace to insert a prompt from the prompt library."
+            baseInstructions &= " '/' inserts library prompts."
         End If
 
         Dim toolTriggerAvailable As Boolean =
             SharedMethods.HasToolingCapableSpecialTaskModel(_context, _context.INI_AlternateModelPath, "ToolDefaultModel")
 
         If toolTriggerAvailable Then
-            baseInstructions &= $" Type '{ToolTrigger}' in your prompt to use the configured {Globals.ThisAddIn.ToolFriendlyName.ToLower} model for a single request."
+            baseInstructions &= $" '{ToolTrigger}': {Globals.ThisAddIn.ToolFriendlyName.ToLower} model, once."
+        End If
+
+        If Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.IsConfigured(_context) Then
+            baseInstructions &= " SA (no tools needed): (sa) or (sa: archive:""Name"" query)."
         End If
 
         lblInstructions.Text = baseInstructions
@@ -718,6 +743,7 @@ Public Class frmAIChat
         End If
 
         Await RestoreLoadedContextAsync()
+        If ChatLifetimeEnded Then Return
         UpdateLoadContextButtonText()
 
         RestoreAlternateModelFromSettings()
@@ -731,6 +757,7 @@ Public Class frmAIChat
             txtChatHistory.ScrollToCaret()
         Else
             Dim result = Await WelcomeMessage()
+            If ChatLifetimeEnded Then Return
         End If
 
 
@@ -804,7 +831,8 @@ Public Class frmAIChat
     ''' captures the current state, alternate config is applied only for the duration
     ''' of the LLM call, then original config is restored in the Finally block.
     ''' </remarks>
-    Private Async Function CallLlmWithSelectedModelAsync(systemPrompt As String, fullPrompt As String) As Task(Of String)
+    Private Async Function CallLlmWithSelectedModelAsync(systemPrompt As String, fullPrompt As String,
+                                                         Optional cancellationToken As System.Threading.CancellationToken = Nothing) As System.Threading.Tasks.Task(Of String)
         Dim backupConfig As ModelConfig = Nothing
         Dim appliedAlternate As Boolean = False
 
@@ -823,7 +851,7 @@ Public Class frmAIChat
             End If
 
             ' Execute the LLM call with current (possibly modified) config
-            Return Await SharedMethods.LLM(_context, systemPrompt, fullPrompt, "", "", 0, _useSecondApi, True)
+            Return Await SharedMethods.LLM(_context, systemPrompt, fullPrompt, "", "", 0, _useSecondApi, True, cancellationToken:=cancellationToken)
 
         Finally
             ' Always restore the original config so the rest of the add-in sees pristine state
@@ -856,6 +884,7 @@ Public Class frmAIChat
     ''' 10. Report any errors via ReportCommandExecutionError
     ''' </remarks>
     Private Async Sub btnSend_Click(sender As Object, e As EventArgs)
+        If ChatLifetimeEnded Then Return
         Dim userPrompt As String = txtUserInput.Text.Trim()
         If userPrompt = "" Then Return
 
@@ -891,6 +920,9 @@ Public Class frmAIChat
         Dim requestTargetDocumentFullName As String = ""
         Dim requestTargetSelectionStart As Integer = -1
         Dim requestTargetSelectionEnd As Integer = -1
+        Dim pinnedSelection As Microsoft.Office.Interop.Word.Range = Nothing
+        Dim pinnedSource As System.String = Nothing
+        Dim selectionCaptureFailed As System.Boolean = False
 
         Try
             Dim requestDoc As Microsoft.Office.Interop.Word.Document = Globals.ThisAddIn.Application.ActiveDocument
@@ -903,12 +935,57 @@ Public Class frmAIChat
                     If requestSelection IsNot Nothing Then
                         requestTargetSelectionStart = requestSelection.Start
                         requestTargetSelectionEnd = requestSelection.End
+                        If My.Settings.DoCommands AndAlso (chkIncludeselection.Checked OrElse chkIncludeDocText.Checked) AndAlso requestSelection.End > requestSelection.Start Then
+                            pinnedSelection = requestSelection.Range.Duplicate
+                            pinnedSource = ThisAddIn.ReadChatNoteProjection(pinnedSelection).Text
+                        End If
+                    Else
+                        selectionCaptureFailed = True
                     End If
-                Catch
+                Catch ex As System.Exception
+                    selectionCaptureFailed = True
                 End Try
+            Else
+                selectionCaptureFailed = True
             End If
-        Catch
+        Catch ex As System.Exception
+            selectionCaptureFailed = True
         End Try
+        If My.Settings.DoCommands AndAlso (chkIncludeselection.Checked OrElse chkIncludeDocText.Checked) AndAlso selectionCaptureFailed Then
+            ShowCustomMessageBox("Word could not bind the active main-text selection safely. No request was sent. Select the passage in the document body and retry.")
+            Return
+        End If
+        Dim requestAllowsCommands As System.Boolean = My.Settings.DoCommands AndAlso (chkIncludeselection.Checked OrElse chkIncludeDocText.Checked)
+        Dim selectionWriteScope As System.Boolean = chkIncludeselection.Checked OrElse pinnedSelection IsNot Nothing
+
+        ' The checkbox represents a persistent selection-scope preference, not a
+        ' cached range. Never reuse a previous document's selection when the active
+        ' document changes: require a real selection in the current document.
+        If chkIncludeselection.Checked Then
+            Dim hasCurrentSelection As Boolean = False
+            Try
+                Dim currentSelection As Microsoft.Office.Interop.Word.Selection = Globals.ThisAddIn.Application.Selection
+                hasCurrentSelection = currentSelection IsNot Nothing AndAlso
+                    requestTargetSelectionStart >= 0 AndAlso
+                    requestTargetSelectionEnd > requestTargetSelectionStart AndAlso
+                    Not System.String.IsNullOrWhiteSpace(currentSelection.Text)
+            Catch ex As System.Exception
+                hasCurrentSelection = False
+            End Try
+
+            If hasCurrentSelection AndAlso My.Settings.DoCommands Then
+                Dim story As Microsoft.Office.Interop.Word.WdStoryType = Globals.ThisAddIn.Application.Selection.StoryType
+                If story = Microsoft.Office.Interop.Word.WdStoryType.wdFootnotesStory OrElse story = Microsoft.Office.Interop.Word.WdStoryType.wdEndnotesStory Then
+                    ShowCustomMessageBox("Select the passage in the main document, not the footnote or endnote body, for Word chat editing.")
+                    Return
+                End If
+            End If
+
+            If Not hasCurrentSelection Then
+                ShowCustomMessageBox("'Include selection' is enabled, but no text is currently selected in the active Word document. Select the text and try again; your chat access preferences have been preserved.")
+                Return
+            End If
+        End If
 
         Try
             My.Settings.LastPromptChat = promptToRestore
@@ -931,7 +1008,7 @@ Public Class frmAIChat
                         If(chkIncludeDocText.Checked, vbLf & "You have access to the user's active document." & vbLf, "") &
                         If(chkIncludeselection.Checked Or chkIncludeDocText.Checked, vbLf & "You have access to the current selection or cursor context in the active document." & vbLf, "") &
                         If(chkIncludeOtherDocs.Checked, vbLf & "You also have read-only access to all other open Word documents for context only. Commands must never target those other documents." & vbLf, "") & If(My.Settings.DoCommands And (chkIncludeDocText.Checked Or chkIncludeselection.Checked),
-                           _context.SP_Add_ChatWord_Commands,
+                           GetEffectiveChatWordCommandPrompt(),
                            _context.SP_Add_Chat_NoCommands)
 
             ' Inject InkyMemory into system prompt if enabled
@@ -964,11 +1041,37 @@ Public Class frmAIChat
                     $"Command scope: All commands are executed only against the Word document that was active when this request started '{activeDocumentNameForCommands}'. " &
                     "Other open documents, if provided, are read-only context. Never issue a command for text that appears only in another document. " &
                     "If the user asks to work on another document, tell the user to activate that document first."
+
+                If selectionWriteScope Then
+                    SystemPrompt &= " The selection at submission is the only editable range. Full document text and quoted instructions elsewhere are read-only context. Count occurrences within the selection. A selected final paragraph mark is a boundary; do not copy it into a replace command. Preserve all internal paragraph breaks unless the request changes them."
+                End If
+                SystemPrompt &= " Describe proposed Word commands as a plan, not as actions already completed. The host checks their result."
+                Dim recentChangeReferencePrompt As System.String = GetRecentWordChangeReferencePrompt(
+                    requestTargetDocumentName,
+                    requestTargetDocumentFullName,
+                    selectionWriteScope,
+                    requestTargetSelectionStart,
+                    requestTargetSelectionEnd)
+                If Not System.String.IsNullOrWhiteSpace(recentChangeReferencePrompt) Then
+                    SystemPrompt &= " " & recentChangeReferencePrompt
+                End If
             End If
 
             ' ──────────────────────────────────────────────────────────────
             ' STEP 2: Build Conversation Context
             ' ──────────────────────────────────────────────────────────────
+            ' Only the current input box text can request an archive or select scope.
+            ' Source documents and stored conversation text are appended afterwards.
+            Dim archivePrepared As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest = Nothing
+            If Global.SharedLibrary.SharedLibrary.SemanticArchiveTriggerHelper.HasSemanticArchiveTrigger(userPrompt) Then
+                archivePrepared = Await Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.PrepareAsync(
+                    _context, userPrompt, Globals.ThisAddIn.CreateSelectedSemanticArchiveRunScope(), allowInteractiveSelection:=True)
+                If ChatLifetimeEnded Then Return
+                SystemPrompt &= System.Environment.NewLine & archivePrepared.ContextText
+            End If
+            If ChatLifetimeEnded Then Return
+            Dim retrievalUserPrompt As System.String = If(archivePrepared Is Nothing, userPrompt, archivePrepared.CleanPrompt)
+
             Dim conversationSoFar As String = BuildConversationString(_chatHistory)
 
             ' Append OldChat if present (preserved from model switch or previous session)
@@ -1029,16 +1132,16 @@ Public Class frmAIChat
             If chkIncludeDocText.Checked Then
                 ' "Include document": the full document is always included (handled via docText above).
                 ' In addition, include the selection and the current cursor position (if available).
-                selectionText = GetCurrentSelectionText()
+                selectionText = GetCurrentSelectionText(pinnedSelection)
 
-                If sel IsNot Nothing AndAlso sel.Start = sel.End Then
+                If pinnedSelection Is Nothing AndAlso sel IsNot Nothing AndAlso sel.Start = sel.End Then
                     selectionText = GetCursorContext(CursorPositionCount)
                 End If
             ElseIf chkIncludeselection.Checked Then
                 ' "Include selection": include only the selection, nothing more.
                 ' If there is no actual selection (collapsed cursor), include nothing.
-                If sel IsNot Nothing AndAlso sel.Start <> sel.End Then
-                    selectionText = GetCurrentSelectionText()
+                If pinnedSelection IsNot Nothing OrElse (sel IsNot Nothing AndAlso sel.Start <> sel.End) Then
+                    selectionText = GetCurrentSelectionText(pinnedSelection)
                 End If
             End If
 
@@ -1076,7 +1179,7 @@ Public Class frmAIChat
 
             ' Add selection or cursor context if present
             If Not String.IsNullOrEmpty(selectionText) Then
-                If sel IsNot Nothing AndAlso sel.Start = sel.End Then
+                If pinnedSelection Is Nothing AndAlso sel IsNot Nothing AndAlso sel.Start = sel.End Then
                     fullPrompt.AppendLine($"In the user's document '{Globals.ThisAddIn.Application.ActiveDocument.Name}' the cursor is currently positioned in the following context: '{selectionText}'")
                 Else
                     fullPrompt.AppendLine($"In the user's document '{Globals.ThisAddIn.Application.ActiveDocument.Name}' the user has selected the following text: '{selectionText}'")
@@ -1185,7 +1288,7 @@ Public Class frmAIChat
 
                     Await UpdateUIAsync(Sub()
                                             ReportCommandExecutionError(
-                                                $"The {ToolTrigger} trigger was requested, but no model with 'ToolDefaultModel=True' was found in the alternate model configuration. Please add a ToolDefaultModel entry to your configuration file.")
+                                                "No AI model is configured for the requested tools. Please choose a model that supports tools or ask your administrator to check the model settings.")
                                             txtUserInput.Text = promptToRestore
                                         End Sub)
                     Return
@@ -1194,7 +1297,7 @@ Public Class frmAIChat
                 If Not SharedMethods.ModelSupportsTooling(toolTriggerConfig) Then
                     Await UpdateUIAsync(Sub()
                                             ReportCommandExecutionError(
-                                                $"The {ToolTrigger} trigger found a ToolDefaultModel, but it does not support {Globals.ThisAddIn.ToolFriendlyName.ToLower}. Please check the model's APICall_ToolInstructions setting.")
+                                                "The configured AI model cannot use the tools required for this request. Please choose a tool-enabled model or ask your administrator to check the model settings.")
                                             txtUserInput.Text = promptToRestore
                                         End Sub)
                     Return
@@ -1254,7 +1357,7 @@ Public Class frmAIChat
             ' ──────────────────────────────────────────────────────────────
             If HasLoadedIndex() Then
                 Dim indexExcerpt As String = Await BuildIndexExcerptAsync(
-                    userPrompt,
+                    retrievalUserPrompt,
                     conversationSoFar,
                     Sub(status)
                         Try
@@ -1263,6 +1366,7 @@ Public Class frmAIChat
                         End Try
                     End Sub)
 
+                If ChatLifetimeEnded Then Return
                 If Not String.IsNullOrWhiteSpace(indexExcerpt) Then
                     fullPrompt.AppendLine("The user loaded a searchable index. The following are the most relevant original excerpts for this message:")
                     fullPrompt.AppendLine("<INDEX_EXCERPTS>")
@@ -1279,7 +1383,7 @@ Public Class frmAIChat
             End If
 
             ' Finalize the prompt with the current user message and conversation history.
-            fullPrompt.AppendLine("User: " & userPrompt)
+            fullPrompt.AppendLine("User: " & retrievalUserPrompt)
             fullPrompt.AppendLine($"The conversation so far (not including any previously added text document):{vbLf}{conversationSoFar}")
             Debug.WriteLine(fullPrompt.ToString())
 
@@ -1288,6 +1392,7 @@ Public Class frmAIChat
             ' ──────────────────────────────────────────────────────────────
 
 
+            If ChatLifetimeEnded Then Return
             If useTooling AndAlso _selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0 Then
                 ' Apply model config temporarily for the tooling call
                 Dim backupConfig As ModelConfig = Nothing
@@ -1330,7 +1435,9 @@ Public Class frmAIChat
                         pinnedWordDocumentName:=requestTargetDocumentName,
                         pinnedWordDocumentFullName:=requestTargetDocumentFullName,
                         pinnedWordSelectionStart:=requestTargetSelectionStart,
-                        pinnedWordSelectionEnd:=requestTargetSelectionEnd)
+                        pinnedWordSelectionEnd:=requestTargetSelectionEnd,
+                        semanticArchivePrepared:=archivePrepared,
+                        cancellationToken:=_chatLifetimeCts.Token)
                 Finally
                     If appliedOverride AndAlso backupConfig IsNot Nothing Then
                         SharedMethods.RestoreDefaults(_context, backupConfig)
@@ -1343,8 +1450,10 @@ Public Class frmAIChat
                     "Calling LLM (standard, useSecondApi=" &
                     _useSecondApi.ToString(System.Globalization.CultureInfo.InvariantCulture) & ")")
 
-                aiResponseOriginal = Await CallLlmWithSelectedModelAsync(SystemPrompt, fullPrompt.ToString())
+                aiResponseOriginal = Await CallLlmWithSelectedModelAsync(SystemPrompt, fullPrompt.ToString(), _chatLifetimeCts.Token)
             End If
+
+            If ChatLifetimeEnded Then Return
 
             SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb(
                 "WordChat",
@@ -1380,76 +1489,201 @@ Public Class frmAIChat
                     aiResponseOriginal, _context.INI_InkyMemoryCap)
             End If
 
-            ' Keep original Markdown for HTML rendering
+            ' Keep the raw Markdown response as the authoritative source for command parsing.
+            ' JSON must be parsed before Markdown stripping so quotes, backslashes, CR/LF escapes,
+            ' and formatting values reach the protocol validator unchanged.
             Dim aiResponseMd As String = (If(aiResponseOriginal, "")).TrimEnd()
 
-            ' Create plain text version for command parsing and persistence
-            Dim aiResponsePlain As String = aiResponseMd
-            ' Convert Markdown list bullets to Unicode bullet (U+2022)
+            ' ──────────────────────────────────────────────────────────────
+            ' STEP 10: Parse and Remove Hidden Word Commands
+            ' ──────────────────────────────────────────────────────────────
+            Dim parsedCommands As New List(Of ParsedCommand)()
+            Dim commandParseException As System.Exception = Nothing
+            Dim commandHarnessShouldRun As Boolean = False
+            If requestAllowsCommands AndAlso My.Settings.DoCommands AndAlso (chkIncludeselection.Checked OrElse chkIncludeDocText.Checked) Then
+                ' Regression invariant: before the JSON migration the harness was invoked for
+                ' every non-empty command-enabled model response, even when parsing found zero
+                ' commands. Recreate the old pre-removal plain-text test so document/focus side
+                ' effects do not silently change as part of this transport migration.
+                commandHarnessShouldRun = Not String.IsNullOrWhiteSpace(PrepareLegacyCommandParsingText(aiResponseMd))
+
+                Try
+                    parsedCommands = ParseCommands(aiResponseMd)
+                Catch commandParseEx As System.Exception
+                    commandParseException = commandParseEx
+                    SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb(
+                        "WordChat",
+                        "Word command JSON validation failed before execution: " & commandParseEx.Message)
+                End Try
+            End If
+
+            ' Reject overlaps before *any* Word action. Ask the model to repair its
+            ' command plan once (without re-running any tools or prior document actions).
+            ' Reparse and recheck the entire revised response; no unvalidated partial plan
+            ' is ever passed to the Word mutation layer.
+            Dim replacementPlanConflict As System.String = System.String.Empty
+            If commandParseException Is Nothing AndAlso parsedCommands.Count > 0 Then
+                Try
+                    Dim planDocument As Microsoft.Office.Interop.Word.Document =
+                        ResolveChatCommandTargetDocument(requestTargetDocumentName, requestTargetDocumentFullName)
+                    RefreshPinnedChatSelection(pinnedSelection, pinnedSource, planDocument, requestTargetSelectionStart, requestTargetSelectionEnd)
+                    replacementPlanConflict = FindOverlappingWordReplacementPlan(
+                        parsedCommands, planDocument, selectionWriteScope,
+                        requestTargetSelectionStart, requestTargetSelectionEnd)
+                Catch ex As System.Exception
+                    If parsedCommands.Exists(Function(pc) System.String.Equals(pc.Command, "replace", System.StringComparison.OrdinalIgnoreCase)) Then
+                        replacementPlanConflict = "The current Word text snapshot could not be validated: " & ex.GetType().Name
+                    End If
+                End Try
+            End If
+
+            If Not System.String.IsNullOrWhiteSpace(replacementPlanConflict) Then
+                SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb("WordChat", "LLM replacement plan re-planning requested: " & replacementPlanConflict)
+                Dim revisedReply As System.String = System.String.Empty
+                Try
+                    Dim correctionPrompt As System.String =
+                        "Your previous Word-edit command plan cannot be safely executed: " & replacementPlanConflict & vbLf &
+                        "Regenerate your COMPLETE previous answer including ONE valid redInkWordCommands envelope. " &
+                        "Preserve every substantive requested edit and the intended prose. Use short unambiguous, " &
+                        "strictly NON-OVERLAPPING source spans taken from the ORIGINAL document. " &
+                        "Combine truly overlapping edits into one minimal enclosing replacement with the final combined wording. " &
+                        "For native note references, copy the exact original tokens into both search and text, once and in the same order. " &
+                        "Use separate note-free native format commands when formatting is requested. " &
+                        "Do NOT output two commands that modify any one original character. Do not claim changes already occurred. " &
+                        "Do not call tools. The prior response follows:" & vbLf & aiResponseMd
+                    revisedReply = Await CallLlmWithSelectedModelAsync(
+                        SystemPrompt, fullPrompt.ToString() & vbLf & correctionPrompt, _chatLifetimeCts.Token)
+                Catch ex As System.Exception
+                    SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb("WordChat", "Overlap re-plan model call failed: " & ex.GetType().Name & ": " & ex.Message)
+                End Try
+                If ChatLifetimeEnded Then Return
+
+                If Not System.String.IsNullOrWhiteSpace(revisedReply) Then
+                    Try
+                        Dim revisedCommands As System.Collections.Generic.List(Of ParsedCommand) = ParseCommands(revisedReply.TrimEnd())
+                        Dim revisedConflict As System.String = System.String.Empty
+                        If revisedCommands.Count > 0 Then
+                            Dim planDocument As Microsoft.Office.Interop.Word.Document =
+                                ResolveChatCommandTargetDocument(requestTargetDocumentName, requestTargetDocumentFullName)
+                            RefreshPinnedChatSelection(pinnedSelection, pinnedSource, planDocument, requestTargetSelectionStart, requestTargetSelectionEnd)
+                            revisedConflict = FindOverlappingWordReplacementPlan(
+                                revisedCommands, planDocument, selectionWriteScope,
+                                requestTargetSelectionStart, requestTargetSelectionEnd)
+                        End If
+                        If revisedCommands.Count > 0 AndAlso System.String.IsNullOrEmpty(revisedConflict) Then
+                            aiResponseMd = revisedReply.TrimEnd()
+                            parsedCommands = revisedCommands
+                            replacementPlanConflict = System.String.Empty
+                            SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb("WordChat", "LLM replacement plan regenerated and validated")
+                        Else
+                            SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb("WordChat", "LLM replacement plan remained unsafe/empty: " & revisedConflict)
+                        End If
+                    Catch ex As System.Exception
+                        SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb("WordChat", "LLM replacement plan could not be parsed: " & ex.Message)
+                    End Try
+                End If
+            End If
+
+            If Not System.String.IsNullOrWhiteSpace(replacementPlanConflict) Then
+                Await UpdateUIAsync(Sub()
+                                        RemoveLastLineFromChatHistory()
+                                        RemoveAssistantThinking()
+                                        ReportCommandExecutionError("Word could not safely validate the replacement plan: " & replacementPlanConflict & " " &
+                                            "No Word chat replacement command was executed; any earlier tool actions are unaffected. " &
+                                            "Please request smaller independent edits or a single consolidated change.")
+                                        txtUserInput.Text = promptToRestore
+                                    End Sub)
+                Return
+            End If
+
+            ' VB.NET does not permit Await inside Catch/Finally. Keep the caught exception and
+            ' perform the asynchronous UI recovery only after the exception handler has exited.
+            If commandParseException IsNot Nothing Then
+                Await UpdateUIAsync(Sub()
+                                        RemoveLastLineFromChatHistory()
+                                        RemoveAssistantThinking()
+                                        ReportCommandExecutionError(
+                                            InvalidWordCommandUserMessage)
+                                        txtUserInput.Text = promptToRestore
+                                    End Sub)
+                Return
+            End If
+
+            ' Remove only the host command transport from the visible Markdown. Ordinary JSON
+            ' remains visible because RemoveCommands targets only redInkWordCommands (plus the
+            ' temporary legacy [#...#] compatibility syntax).
+            Dim aiResponseMdDisplay As String = RemoveCommands(aiResponseMd)
+            aiResponseMdDisplay = Regex.Replace(aiResponseMdDisplay, "[\r\n\s]+$", "")
+
+            ' Create plain text only AFTER hidden command removal. This prevents Markdown cleanup
+            ' from changing command payloads and ensures command JSON never enters chat history.
+            Dim aiResponsePlain As String = aiResponseMdDisplay
             aiResponsePlain = aiResponsePlain.Replace($"{vbCrLf}* ", vbCrLf & ChrW(8226) & " ")
             aiResponsePlain = aiResponsePlain.Replace($"{vbCr}* ", vbCr & ChrW(8226) & " ")
             aiResponsePlain = aiResponsePlain.Replace($"{vbLf}* ", vbLf & ChrW(8226) & " ")
             aiResponsePlain = aiResponsePlain.Replace($"  *  ", "  " & ChrW(8226) & "  ")
-            ' Strip remaining Markdown formatting
             aiResponsePlain = RemoveMarkdownFormatting(aiResponsePlain)
+            aiResponsePlain = Regex.Replace(aiResponsePlain, "[\r\n\s]+$", "")
 
-            ' ──────────────────────────────────────────────────────────────
-            ' STEP 10: Extract and Remove Bot Commands
-            ' ──────────────────────────────────────────────────────────────
-            Dim CommandsString As String = ""
-            If My.Settings.DoCommands And (chkIncludeselection.Checked Or chkIncludeDocText.Checked) Then
-                CommandsString = aiResponsePlain
-                ' Remove commands from display text
-                aiResponsePlain = RemoveCommands(aiResponsePlain)
-                aiResponsePlain = Regex.Replace(aiResponsePlain, "[\r\n\s]+$", "")
-            End If
-
-            ' Also remove commands from Markdown version for display
-            Dim aiResponseMdDisplay As String = RemoveCommands(aiResponseMd)
-            aiResponseMdDisplay = Regex.Replace(aiResponseMdDisplay, "[\r\n\s]+$", "")
-
-            Debug.WriteLine("AI response: " & CommandsString)
+            Debug.WriteLine($"AI response parsed Word commands: {parsedCommands.Count}")
 
             ' ──────────────────────────────────────────────────────────────
             ' STEP 11: Update UI - Show Assistant Response
             ' ──────────────────────────────────────────────────────────────
+            Dim verifiedForReply As System.Int32 = 0
+            Dim publishModelReply As System.Boolean = True
             Await UpdateUIAsync(Sub()
                                     ' Remove "Thinking..." placeholder from both views
                                     RemoveLastLineFromChatHistory()
                                     RemoveAssistantThinking()
 
-                                    ' Append assistant answer to plain text transcript
-                                    AppendToChatHistory(Environment.NewLine & $"{AN5}: " &
-                                                       aiResponsePlain.TrimStart().TrimEnd().
-                                                       Replace(vbCrLf, Environment.NewLine).
-                                                       Replace(vbLf, Environment.NewLine) &
-                                                       Environment.NewLine)
-
-                                    ' Append assistant answer as Markdown-rendered HTML
-                                    AppendAssistantMarkdown(aiResponseMdDisplay.TrimStart())
-
                                     ' Execute bot commands if present and permitted
                                     _keepFocusOnDocumentAfterCommands = False
 
-                                    If My.Settings.DoCommands And Not String.IsNullOrWhiteSpace(CommandsString) Then
+                                    If My.Settings.DoCommands AndAlso commandHarnessShouldRun Then
                                         Try
                                             SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb(
                                                 "WordChat",
-                                                "ExecuteAnyCommands start (targetDoc=" & requestTargetDocumentName & ")")
+                                                "ExecuteAnyCommands start (targetDoc=" & requestTargetDocumentName &
+                                                "; commandCount=" & parsedCommands.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) & ")")
 
-                                            ExecuteAnyCommands(CommandsString, chkIncludeselection.Checked, requestTargetDocumentName, requestTargetDocumentFullName, requestTargetSelectionStart, requestTargetSelectionEnd)
+                                            RefreshPinnedChatSelection(pinnedSelection, pinnedSource, ResolveChatCommandTargetDocument(requestTargetDocumentName, requestTargetDocumentFullName), requestTargetSelectionStart, requestTargetSelectionEnd)
+                                            ExecuteAnyCommands(parsedCommands, selectionWriteScope, requestTargetDocumentName, requestTargetDocumentFullName, requestTargetSelectionStart, requestTargetSelectionEnd)
+                                            publishModelReply = FailedCommandsList.Count = 0
+                                            If publishModelReply Then verifiedForReply = _verifiedChatBlocksInBatch
 
                                             SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb(
                                                 "WordChat",
                                                 "ExecuteAnyCommands done")
-                                        Catch cmdEx As Exception
+                                        Catch cmdEx As System.Exception
+                                            publishModelReply = False
                                             SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb(
                                                 "WordChat",
                                                 "ExecuteAnyCommands error: " & cmdEx.Message)
 
                                             ' Report command execution error to chat
-                                            ReportCommandExecutionError(cmdEx.Message)
+                                            ReportCommandExecutionError(
+                                                "Word could not finish the requested document actions. " &
+                                                "Some changes may already have been applied. Please review the document before trying again.")
                                         End Try
+                                    End If
+
+                                    If publishModelReply Then
+                                        ' Append assistant answer to plain text transcript
+                                        AppendToChatHistory(Environment.NewLine & $"{AN5}: " &
+                                                           aiResponsePlain.TrimStart().TrimEnd().
+                                                           Replace(vbCrLf, Environment.NewLine).
+                                                           Replace(vbLf, Environment.NewLine) &
+                                                           Environment.NewLine)
+
+                                        ' Append assistant answer as Markdown-rendered HTML
+                                        AppendAssistantMarkdown(aiResponseMdDisplay.TrimStart())
+                                        If verifiedForReply > 0 Then
+                                            Dim receipt As System.String = "Word confirmed: " & verifiedForReply.ToString(System.Globalization.CultureInfo.InvariantCulture) & If(verifiedForReply = 1, " replacement block verified.", " replacement blocks verified.")
+                                            AppendToChatHistory(Environment.NewLine & "System: " & receipt & Environment.NewLine)
+                                            AppendHtml("<div class='msg assistant'><span class='who'>System:</span> <span class='content'>" & HtmlEncode(receipt) & "</span></div>")
+                                            PersistChatHtml()
+                                        End If
                                     End If
 
                                     ' Clear user input and restore focus unless a goto/jump/show/select
@@ -1461,7 +1695,7 @@ Public Class frmAIChat
                                 End Sub)
 
             ' Add to in-memory history
-            _chatHistory.Add(("assistant", aiResponsePlain.TrimEnd()))
+            If publishModelReply Then _chatHistory.Add(("assistant", aiResponsePlain.TrimEnd()))
 
         Catch ex As System.Exception
             ' Capture error without performing async work inside catch block
@@ -1470,13 +1704,18 @@ Public Class frmAIChat
                 "btnSend_Click exception: " & ex.GetType().Name & ": " & ex.Message)
 
             errorOccurred = True
-            errorMessage = $"Error processing request: {ex.Message}"
+            errorMessage =
+                "Your request could not be completed. Please try again. " &
+                "If the issue continues, check your connection or try another AI model. " &
+                "If you requested document changes, review the document before retrying because some changes may already have been applied."
+        Finally
+            ReleaseWordRange(pinnedSelection)
         End Try
 
         ' ──────────────────────────────────────────────────────────────
         ' STEP 12: Handle Errors Outside Try-Catch
         ' ──────────────────────────────────────────────────────────────
-        If errorOccurred Then
+        If errorOccurred AndAlso Not ChatLifetimeEnded Then
             Await UpdateUIAsync(Sub()
                                     ReportCommandExecutionError(errorMessage)
                                     ' Restore user input so they can try again
@@ -1522,6 +1761,19 @@ Public Class frmAIChat
         _chatHistory.Add(("assistant", $"System Error: {errorMessage}"))
     End Sub
 
+    ''' <summary>
+    ''' Shows an English, action-oriented Word-chat error while keeping the original
+    ''' exception type, message and stack in diagnostics. No exception text reaches the UI.
+    ''' </summary>
+    Private Sub ShowWordChatOperationError(operation As String,
+                                           ex As System.Exception,
+                                           userMessage As String)
+        System.Diagnostics.Debug.WriteLine("WordChat " & operation & ": " & ex.ToString())
+        SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb(
+            "WordChat", operation & " failed: " & ex.GetType().FullName & ": " & ex.Message)
+        ShowCustomMessageBox(userMessage)
+    End Sub
+
     ' =========================================================================
     ' Document Context Extraction
     ' =========================================================================
@@ -1562,11 +1814,11 @@ Public Class frmAIChat
 
             ' Extract text before cursor
             Dim beforeRange As Microsoft.Office.Interop.Word.Range = activeDoc.Range(contextStart, cursorPos)
-            Dim textBefore As String = beforeRange.Text
+            Dim textBefore As String = ReadChatSource(beforeRange)
 
             ' Extract text after cursor
             Dim afterRange As Microsoft.Office.Interop.Word.Range = activeDoc.Range(cursorPos, contextEnd)
-            Dim textAfter As String = afterRange.Text
+            Dim textAfter As String = ReadChatSource(afterRange)
 
             ' Combine with cursor position marker
             Dim contextText As String = textBefore & "[cursor is here]" & textAfter
@@ -1587,6 +1839,8 @@ Public Class frmAIChat
 
             Return contextText
 
+        Catch ex As ChatNoteContextException
+            Throw
         Catch ex As Exception
             ' Silently handle any errors; return empty string
             Return ""
@@ -1619,7 +1873,9 @@ Public Class frmAIChat
             ' Request localized greeting from LLM based on time of day
             Dim aiResponseRaw As String = Await CallLlmWithSelectedModelAsync(
                 SystemPrompt,
-                $"Welcome the user in {UserLanguage} by (1) referring to the time of day based on the current time in {UserLanguage}, such as in 'good morning', and (2) asking in {UserLanguage} what you can do, but do not say your name.")
+                $"Welcome the user in {UserLanguage} by (1) referring to the time of day based on the current time in {UserLanguage}, such as in 'good morning', and (2) asking in {UserLanguage} what you can do, but do not say your name.",
+                _chatLifetimeCts.Token)
+            If ChatLifetimeEnded Then Return ""
 
             ' Keep Markdown for HTML display (filter bot-commands if any)
             Dim aiDisplayMd As String = RemoveCommands(If(aiResponseRaw, ""))
@@ -1679,9 +1935,24 @@ Public Class frmAIChat
     ''' If already on UI thread, executes action directly.
     ''' </remarks>
     Private Async Function UpdateUIAsync(action As System.Action) As System.Threading.Tasks.Task
+        If ChatLifetimeEnded Then Return
         If InvokeRequired Then
-            Await System.Threading.Tasks.Task.Run(Sub() Me.Invoke(action))
-        Else
+            Try
+                Await System.Threading.Tasks.Task.Run(
+                    Sub()
+                        If Not ChatLifetimeEnded Then
+                            Me.Invoke(New System.Action(
+                                Sub()
+                                    If Not ChatLifetimeEnded Then action()
+                                End Sub))
+                        End If
+                    End Sub)
+            Catch ex As System.ObjectDisposedException
+                ' The host has already closed the chat while an async operation completed.
+            Catch ex As System.InvalidOperationException When ChatLifetimeEnded
+                ' The form handle was destroyed after the UI work was queued.
+            End Try
+        ElseIf Not ChatLifetimeEnded Then
             action()
         End If
     End Function
@@ -1780,12 +2051,15 @@ Public Class frmAIChat
     ''' Setting persisted to My.Settings.DoCommands.
     ''' </remarks>
     Private Sub chkPermitCommands_Click(sender As Object, e As EventArgs)
-        My.Settings.DoCommands = Not My.Settings.DoCommands
+        ' Persist the actual UI state rather than inverting the last saved value.
+        My.Settings.DoCommands = chkPermitCommands.Checked
 
-        ' Auto-enable document inclusion if commands enabled without context
-        If My.Settings.DoCommands And Not chkIncludeselection.Checked Then
+        ' Commands require an active content scope; preserve the existing
+        ' behavior of choosing the document when selection mode is not active.
+        If chkPermitCommands.Checked AndAlso Not chkIncludeselection.Checked Then
             chkIncludeDocText.Checked = True
-            My.Settings.IncludeDocument = chkIncludeDocText.Checked
+            My.Settings.IncludeDocument = True
+            My.Settings.IncludeSelection = False
         End If
 
         My.Settings.Save()
@@ -1793,31 +2067,28 @@ Public Class frmAIChat
 
     ''' <summary>
     ''' Handles chkIncludeSelection checkbox click. Manages mutual exclusivity with document checkbox.
-    ''' Validates that selection exists before allowing checkbox to remain checked.
+    ''' Selection existence is checked per request, not when choosing the mode.
     ''' </summary>
     ''' <remarks>
     ''' Checkbox state logic:
-    ''' - If selection is empty/whitespace, unchecks itself automatically
+    ''' - Keeps the selected scope mode even when no text is currently selected
+    '''   (an actual selection is validated when sending a request)
     ''' - If document checkbox is checked, unchecks document (mutually exclusive)
     ''' - If neither selection nor document checked, disables commands
     ''' Setting persisted to My.Settings.IncludeSelection.
     ''' </remarks>
     Private Sub chkIncludeselection_Click(sender As Object, e As EventArgs)
-        Dim activeDoc As Microsoft.Office.Interop.Word.Document = Globals.ThisAddIn.Application.ActiveDocument
-        Dim sel As Microsoft.Office.Interop.Word.Selection = activeDoc.Application.Selection
-
-        ' Validate selection exists
-        If String.IsNullOrWhiteSpace(sel.Text) Then
-            chkIncludeselection.Checked = False
-        ElseIf chkIncludeDocText.Checked Then
-            ' Enforce mutual exclusivity
+        ' This is a preference for the scope of future requests. The actual
+        ' Word selection belongs to the current document and is validated on Send.
+        If chkIncludeselection.Checked Then
             chkIncludeDocText.Checked = False
         End If
 
         My.Settings.IncludeSelection = chkIncludeselection.Checked
+        My.Settings.IncludeDocument = chkIncludeDocText.Checked
 
         ' Auto-disable commands if no context available
-        If Not chkIncludeselection.Checked And Not chkIncludeDocText.Checked Then
+        If Not chkIncludeselection.Checked AndAlso Not chkIncludeDocText.Checked Then
             My.Settings.DoCommands = False
             chkPermitCommands.Checked = False
         End If
@@ -1841,9 +2112,10 @@ Public Class frmAIChat
         End If
 
         My.Settings.IncludeDocument = chkIncludeDocText.Checked
+        My.Settings.IncludeSelection = chkIncludeselection.Checked
 
         ' Auto-disable commands if no context available
-        If Not chkIncludeselection.Checked And Not chkIncludeDocText.Checked Then
+        If Not chkIncludeselection.Checked AndAlso Not chkIncludeDocText.Checked Then
             My.Settings.DoCommands = False
             chkPermitCommands.Checked = False
         End If
@@ -2038,9 +2310,10 @@ Public Class frmAIChat
     ''' All model switches trigger:
     '''   - UpdateModelButtonText() to reflect new state
     '''   - UpdateTitle() to show active model in window title
-    '''   - UpdateDocumentCheckboxesState() to disable checkboxes if secondary/alternate active
+    '''   - UpdateDocumentCheckboxesState() to reset access only if the selected model changes
     ''' </remarks>
     Private Sub btnSwitchModel_Click(sender As Object, e As EventArgs)
+        Dim previousModelKey As System.String = GetChatModelSelectionKey()
         If Not String.IsNullOrWhiteSpace(_context.INI_AlternateModelPath) Then
             ' ─────────────────────────────────────────────────────────────
             ' Alternate Model Path Configured
@@ -2054,7 +2327,7 @@ Public Class frmAIChat
                 _useSecondApi = False
                 UpdateModelButtonText()
                 UpdateTitle()
-                UpdateDocumentCheckboxesState()
+                UpdateDocumentCheckboxesState(resetForModelChange:=Not System.String.Equals(previousModelKey, GetChatModelSelectionKey(), System.StringComparison.OrdinalIgnoreCase))
                 PersistAlternateModelToSettings()
                 Return
             End If
@@ -2113,7 +2386,7 @@ Public Class frmAIChat
 
             UpdateModelButtonText()
             UpdateTitle()
-            UpdateDocumentCheckboxesState()
+            UpdateDocumentCheckboxesState(resetForModelChange:=Not System.String.Equals(previousModelKey, GetChatModelSelectionKey(), System.StringComparison.OrdinalIgnoreCase))
             PersistAlternateModelToSettings()
         Else
             ' ─────────────────────────────────────────────────────────────
@@ -2125,7 +2398,7 @@ Public Class frmAIChat
             _alternateModelDisplayName = Nothing
             UpdateModelButtonText()
             UpdateTitle()
-            UpdateDocumentCheckboxesState()
+            UpdateDocumentCheckboxesState(resetForModelChange:=Not System.String.Equals(previousModelKey, GetChatModelSelectionKey(), System.StringComparison.OrdinalIgnoreCase))
             PersistAlternateModelToSettings()
         End If
     End Sub
@@ -2240,42 +2513,44 @@ Public Class frmAIChat
     End Sub
 
     ''' <summary>
-    ''' Updates checkbox states when secondary or alternate API is active.
-    ''' Disables document-related checkboxes for secondary/alternate models.
+    ''' Returns the selected chat model's stable UI identity. This distinguishes
+    ''' an explicit model change from restoring that same model on form load.
     ''' </summary>
-    ''' <remarks>
-    ''' When _useSecondApi = True:
-    ''' - Unchecks and saves: chkIncludeDocText, chkIncludeSelection, 
-    '''   chkPermitCommands, chkIncludeOtherDocs
-    ''' - Updates My.Settings accordingly
-    ''' 
-    ''' When _useSecondApi = False:
-    ''' - Re-enables checkboxes
-    ''' - Does NOT automatically restore previous checked states (commented out)
-    ''' 
-    ''' Rationale: Secondary/alternate models may not support document context features.
-    ''' </remarks>
-    Private Sub UpdateDocumentCheckboxesState()
-        If _useSecondApi Then
-            ' Disable document-related features for secondary/alternate models
+    Private Function GetChatModelSelectionKey() As System.String
+        If _alternateModelSelected Then
+            Return "alternate:" & If(_alternateModelDisplayName, System.String.Empty)
+        End If
+        Return If(_useSecondApi, "secondary", "primary")
+    End Function
+
+    ''' <summary>
+    ''' Synchronizes the document/selection/write-access UI with the selected model.
+    ''' Access preferences survive form reopening and active-document changes, even
+    ''' for alternate models. Only a real user-initiated model change clears them.
+    ''' </summary>
+    Private Sub UpdateDocumentCheckboxesState(Optional resetForModelChange As System.Boolean = False)
+        If resetForModelChange Then
+            ' Do not implicitly carry content or write authorization to another
+            ' model. Restore of the SAME saved alternate model never enters here.
             chkIncludeDocText.Checked = False
             chkIncludeselection.Checked = False
             chkPermitCommands.Checked = False
             chkIncludeOtherDocs.Checked = False
 
-            ' Persist disabled state
             My.Settings.IncludeDocument = False
             My.Settings.IncludeSelection = False
             My.Settings.DoCommands = False
+            My.Settings.ChatIncludeOtherOpenWordDocs = False
             My.Settings.Save()
-        Else
-            ' Re-enable checkboxes when switching back to primary model
-            chkIncludeDocText.Enabled = True
-            chkIncludeselection.Enabled = True
-            chkPermitCommands.Enabled = True
         End If
 
-        ' Update tooling controls based on new model
+        ' Both primary and alternate models use the same Word-chat context and
+        ' command contract. Capability checks remain in the existing send/tool paths.
+        chkIncludeDocText.Enabled = True
+        chkIncludeselection.Enabled = True
+        chkPermitCommands.Enabled = True
+        chkIncludeOtherDocs.Enabled = True
+
         UpdateToolingControlsState()
     End Sub
 
@@ -2307,6 +2582,7 @@ Public Class frmAIChat
         My.Settings.Save()
 
         ClearChatHtml()
+        ClearRecentWordChangeHistory()
 
         Await WelcomeMessage()
     End Sub
@@ -2380,6 +2656,11 @@ Public Class frmAIChat
     ''' RestoreBounds ensures correct position/size restored when user maximized/minimized.
     ''' </remarks>
     Private Sub frmAIChat_FormClosing(sender As Object, e As FormClosingEventArgs) Handles Me.FormClosing
+        Try
+        If Not _chatLifetimeCts.IsCancellationRequested Then _chatLifetimeCts.Cancel()
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine("Form lifetime cancellation failed: " & ex.Message)
+        End Try
 
         Try
             RemoveHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
@@ -2405,6 +2686,7 @@ Public Class frmAIChat
 
         PersistChatHtml()
         My.Settings.Save()
+        ClearRecentWordChangeHistory()
     End Sub
 
     ' =========================================================================
@@ -2538,7 +2820,9 @@ Public Class frmAIChat
             ' without the switch it still returns the full document content).
             Dim baseText As String = ""
             Try
-                baseText = doc.Content.Text
+                baseText = ReadChatSource(doc.Content)
+            Catch ex As ChatNoteContextException
+                Throw
             Catch
                 baseText = ""
             End Try
@@ -2581,7 +2865,7 @@ Public Class frmAIChat
     ''' <returns>Selection text with optional comments, or empty string if no selection or error</returns>
     ''' <remarks>
     ''' Behavior:
-    ''' - If selection is empty/null: unchecks chkIncludeSelection and returns empty string
+    ''' - If selection is empty/null: returns empty text without changing scope preferences
     ''' - If selection exists: extracts text in Final view mode (no deletions)
     ''' - Attempts to extract comments/bubbles from selection range
     ''' - Appends bubbles inline (space-separated) if available
@@ -2589,15 +2873,14 @@ Public Class frmAIChat
     ''' View management identical to GetActiveDocumentText (save/restore pattern).
     ''' All exceptions caught and return empty string.
     ''' </remarks>
-    Private Function GetCurrentSelectionText() As String
+    Private Function GetCurrentSelectionText(Optional pinned As Microsoft.Office.Interop.Word.Range = Nothing) As String
         Try
             Dim activeDoc As Microsoft.Office.Interop.Word.Document = Globals.ThisAddIn.Application.ActiveDocument
             Dim wordApp As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
             Dim sel As Microsoft.Office.Interop.Word.Selection = activeDoc.Application.Selection
 
             ' Validate selection exists
-            If String.IsNullOrEmpty(sel.Text) Then
-                chkIncludeselection.Checked = False
+            If pinned Is Nothing AndAlso (sel Is Nothing OrElse System.String.IsNullOrEmpty(sel.Text)) Then
                 Return ""
             Else
                 ' Capture the specific window we modify so the Finally restore targets the SAME
@@ -2616,12 +2899,14 @@ Public Class frmAIChat
                     End With
 
                     ' Extract selection text
-                    Dim baseText As String = sel.Text
+                    Dim sourceRange As Microsoft.Office.Interop.Word.Range = If(pinned, sel.Range)
+                    Dim baseText As String = If(pinned Is Nothing, ReadChatSource(sourceRange), ThisAddIn.ReadChatNoteProjection(sourceRange).Text)
+                    If pinned IsNot Nothing AndAlso baseText.EndsWith(vbCr, System.StringComparison.Ordinal) Then baseText = baseText.Substring(0, baseText.Length - 1)
 
                     ' Attempt to extract comments/bubbles from selection
                     Dim bubbles As String = ""
                     Try
-                        bubbles = ThisAddIn.BubblesExtract(sel.Range, True) ' Silent=True
+                        bubbles = ThisAddIn.BubblesExtract(sourceRange, True) ' Silent=True
                     Catch
                         ' Silently ignore errors
                     End Try
@@ -2645,8 +2930,11 @@ Public Class frmAIChat
                     End Try
                 End Try
             End If
-        Catch ex As Exception
-            ' Silently handle all errors
+        Catch ex As ChatNoteContextException
+            Throw
+        Catch ex As System.Exception
+            If pinned IsNot Nothing Then Throw New ChatNoteContextException(ex)
+            ' Preserve read-only legacy chat behaviour
             Return ""
         End Try
     End Function
@@ -2804,140 +3092,1874 @@ Public Class frmAIChat
         Return Regex.Replace(arg, "^[ \t]+|[ \t]+$", "")
     End Function
 
-
-    ' =========================================================================
-    ' Bot Command Parsing
-    ' =========================================================================
-
     ''' <summary>
-    ''' Nested class representing a parsed bot command with verb and arguments.
+    ''' Normalizes a string that Newtonsoft.Json has already decoded. Unlike CleanArgument,
+    ''' this function MUST NOT reinterpret literal backslash-r/backslash-n text sequences:
+    ''' JSON newline escapes have already become real control characters, while escaped
+    ''' backslashes intentionally mean visible backslash text. This distinction preserves
+    ''' standard JSON string semantics.
     ''' </summary>
-    ''' <remarks>
-    ''' Properties:
-    ''' - Command: Verb (e.g., "replace", "insert", "find")
-    ''' - Argument1: First argument (e.g., search term for replace)
-    ''' - Argument2: Second argument (optional, e.g., replacement text)
-    ''' 
-    ''' Second argument may be empty for delete operations (replace with nothing).
-    ''' </remarks>
-    Public Class ParsedCommand
-        Public Property Command As String
-        Public Property Argument1 As String
-        Public Property Argument2 As String
-    End Class
+    Private Function CleanJsonArgument(arg As String, Optional preserveOuterWhitespace As Boolean = False) As String
+        If arg Is Nothing Then Return ""
 
-    ''' <summary>
-    ''' Parses embedded bot commands from LLM response using pattern: [#verb: @@arg1@@ §§arg2§§ #]
-    ''' Supports tempered-greedy matching: single @ or § allowed inside args, only @@ or §§ terminate.
-    ''' Second argument is optional (defaults to empty string for delete operations).
-    ''' </summary>
-    ''' <param name="input">Text potentially containing command blocks</param>
-    ''' <returns>List of parsed commands with verb and arguments</returns>
-    ''' <remarks>
-    ''' Regex Pattern Explanation:
-    ''' 
-    ''' Pattern: \[#(?&lt;cmd&gt;[^:]+):\s*@@(?&lt;arg1&gt;(?:[^@]|@(?!@))*?)@@\s*(?:§§(?&lt;arg2&gt;(?:[^§]|§(?!§))*?)§§)?\s*#\]
-    ''' 
-    ''' Breakdown (left to right):
-    ''' 
-    ''' \[#                          - Literal "[#" opens command block
-    ''' (?&lt;cmd&gt;[^:]+)                 - Named group "cmd": one or more chars except ":"
-    '''                                 Ends at first colon
-    ''' :\s*@@                       - Literal ":" + whitespace + exactly two @
-    ''' (?&lt;arg1&gt;(?:[^@]|@(?!@))*?)  - Named group "arg1" with tempered greedy token:
-    '''                                 (?:[^@]|@(?!@))* matches any char except @,
-    '''                                 OR single @ not followed by another @
-    '''                                 Stops only at @@
-    ''' @@\s*                        - End delimiter for arg1
-    ''' (?:§§(?&lt;arg2&gt;...)§§)?        - Optional arg2 block (same tempered greedy logic)
-    ''' \s*#\]                       - Close delimiter
-    ''' 
-    ''' Tempered Greedy Token Pattern:
-    ''' The pattern (?:[^@]|@(?!@))*? allows:
-    ''' - Any character except @
-    ''' - Single @ if NOT followed by another @ (negative lookahead (?!@))
-    ''' This permits email addresses (user@domain) inside arguments while still
-    ''' treating @@ as the terminator.
-    ''' 
-    ''' Duplicate Detection:
-    ''' Results.Any check prevents duplicate commands with identical verb and arguments.
-    ''' 
-    ''' Error Handling:
-    ''' MsgBox shown on regex errors (shouldn't happen with valid pattern).
-    ''' </remarks>
-    Private Function ParseCommands(input As String) As List(Of ParsedCommand)
-        Dim results As New List(Of ParsedCommand)
-        Try
-            ' Tempered-greedy regex pattern for command parsing
-            ' See function remarks for detailed explanation.
-            ' Fault-tolerant additions (safe, no side effects):
-            '  - arg2 may open AND close with either §§ or @@ (tolerates swapped delimiters)
-            '  - the final # before ] is optional (tolerates a missing closing #)
-            ' arg1 stays strict (@@ ... @@) because it is the verbatim document anchor.
-            Dim pattern As String = "\[#(?<cmd>[^:]+):\s*@@(?<arg1>(?:[^@]|@(?!@))*?)@@\s*(?:(?:§§|@@)(?<arg2>(?:[^@§]|@(?!@)|§(?!§))*?)(?:§§|@@))?\s*#?\]"
-            Dim regex As New Regex(pattern, RegexOptions.Singleline)
+        ' Newtonsoft.Json already decoded JSON newline escapes. Normalize only actual
+        ' control characters and the pre-existing Word Find paragraph tokens.
+        arg = arg.Replace(vbCrLf, vbCr).Replace(vbLf, vbCr)
+        arg = Regex.Replace(arg, "\^p", vbCr, RegexOptions.IgnoreCase)
+        arg = Regex.Replace(arg, "\^0*13", vbCr, RegexOptions.IgnoreCase)
 
-            For Each m As Match In regex.Matches(input)
-                Dim pc As New ParsedCommand()
-                pc.Command = m.Groups("cmd").Value.Trim()
-
-                ' Extract raw arguments
-                Dim raw1 As String = m.Groups("arg1").Value
-                Dim raw2 As String = If(m.Groups("arg2") IsNot Nothing, m.Groups("arg2").Value, "")
-
-                ' Clean arguments (normalize paragraphs, trim spaces)
-                pc.Argument1 = CleanArgument(raw1)
-                pc.Argument2 = CleanArgument(raw2)
-
-                ' Add if not duplicate
-                If Not results.Any(Function(x) x.Command.Equals(pc.Command, StringComparison.OrdinalIgnoreCase) _
-                                        AndAlso x.Argument1 = pc.Argument1 AndAlso x.Argument2 = pc.Argument2) Then
-                    results.Add(pc)
-                End If
-            Next
-        Catch ex As Exception
-            ShowCustomMessageBox("Error in ParseCommands: " & ex.Message)
-        End Try
-        Return results
+        ' Never pass a cell-end marker as inserted text: it is structural Word metadata.
+        arg = arg.TrimStart(ChrW(7)).TrimEnd(ChrW(7))
+        ' JSON text values are document content; their outer spaces/tabs are significant.
+        ' Search and control arguments retain the established tolerant cleanup.
+        If preserveOuterWhitespace Then Return arg
+        Return Regex.Replace(arg, "^[ \t]+|[ \t]+$", "")
     End Function
 
 
+    ''' <summary>
+    '' User-facing typography for newly authored Word-chat prose only. Never normalize
+    '' search anchors, existing Word ranges, or the JSON envelope itself.
+    ''' </summary>
+    Private Shared Function NormalizeGeneratedWordProse(value As System.String) As System.String
+        Return Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeGeneratedProseTypography(value)
+    End Function
+
+    ''' <summary>Clean a JSON document-content field without changing whitespace semantics.</summary>
+    Private Function CleanJsonGeneratedWordText(value As System.String) As System.String
+        Return NormalizeGeneratedWordProse(CleanJsonArgument(value, preserveOuterWhitespace:=True))
+    End Function
+
     ' =========================================================================
-    ' Command Removal and Execution
+    ' Word Chat Command Parsing
+    ' =========================================================================
+
+    Private Const WordCommandJsonRoot As String = "redInkWordCommands"
+    Private Const WordCommandJsonVersion As Integer = 1
+
+    ''' <summary>
+    ''' Optional formatting payload for a JSON Word chat command.
+    ''' All properties are nullable/optional so omitted properties preserve the
+    ''' document's existing native formatting.
+    ''' </summary>
+    Public Class ParsedCommandFormat
+        Public Property StyleName As System.String
+        Public Property BuiltinStyle As System.String
+        Public Property FontName As System.String
+        Public Property Bold As System.Nullable(Of Boolean)
+        Public Property Italic As System.Nullable(Of Boolean)
+        Public Property Underline As System.Nullable(Of Boolean)
+        Public Property FontSizePt As System.Nullable(Of Single)
+        Public Property FontColor As System.String
+        Public Property Highlight As System.String
+        Public Property Alignment As System.String
+        Public Property SpaceBeforePt As System.Nullable(Of Single)
+        Public Property SpaceAfterPt As System.Nullable(Of Single)
+        Public Property KeepWithNext As System.Nullable(Of Boolean)
+        Public Property KeepTogether As System.Nullable(Of Boolean)
+        Public Property PageBreakBefore As System.Nullable(Of Boolean)
+        Public Property ListType As System.String
+
+        Public Function HasAnySetting() As Boolean
+            Return Not System.String.IsNullOrWhiteSpace(StyleName) OrElse
+                   Not System.String.IsNullOrWhiteSpace(BuiltinStyle) OrElse
+                   Not System.String.IsNullOrWhiteSpace(FontName) OrElse
+                   Bold.HasValue OrElse
+                   Italic.HasValue OrElse
+                   Underline.HasValue OrElse
+                   FontSizePt.HasValue OrElse
+                   Not System.String.IsNullOrWhiteSpace(FontColor) OrElse
+                   Not System.String.IsNullOrWhiteSpace(Highlight) OrElse
+                   Not System.String.IsNullOrWhiteSpace(Alignment) OrElse
+                   SpaceBeforePt.HasValue OrElse
+                   SpaceAfterPt.HasValue OrElse
+                   KeepWithNext.HasValue OrElse
+                   KeepTogether.HasValue OrElse
+                   PageBreakBefore.HasValue OrElse
+                   Not System.String.IsNullOrWhiteSpace(ListType)
+        End Function
+
+        Public Function GetDuplicateKey() As System.String
+            Return System.String.Join("|", {
+                If(StyleName, ""),
+                If(BuiltinStyle, ""),
+                If(FontName, ""),
+                If(Bold.HasValue, Bold.Value.ToString(System.Globalization.CultureInfo.InvariantCulture), ""),
+                If(Italic.HasValue, Italic.Value.ToString(System.Globalization.CultureInfo.InvariantCulture), ""),
+                If(Underline.HasValue, Underline.Value.ToString(System.Globalization.CultureInfo.InvariantCulture), ""),
+                If(FontSizePt.HasValue, FontSizePt.Value.ToString(System.Globalization.CultureInfo.InvariantCulture), ""),
+                If(FontColor, ""),
+                If(Highlight, ""),
+                If(Alignment, ""),
+                If(SpaceBeforePt.HasValue, SpaceBeforePt.Value.ToString(System.Globalization.CultureInfo.InvariantCulture), ""),
+                If(SpaceAfterPt.HasValue, SpaceAfterPt.Value.ToString(System.Globalization.CultureInfo.InvariantCulture), ""),
+                If(KeepWithNext.HasValue, KeepWithNext.Value.ToString(System.Globalization.CultureInfo.InvariantCulture), ""),
+                If(KeepTogether.HasValue, KeepTogether.Value.ToString(System.Globalization.CultureInfo.InvariantCulture), ""),
+                If(PageBreakBefore.HasValue, PageBreakBefore.Value.ToString(System.Globalization.CultureInfo.InvariantCulture), ""),
+                If(ListType, "")})
+        End Function
+    End Class
+
+    ''' <summary>
+    ''' Optional 1-based match selector for JSON commands that search document text.
+    ''' When neither property is set, every operation keeps its pre-selector behavior.
+    ''' If Occurrence is set without MaxMatches, exactly that one eligible occurrence is targeted.
+    ''' If MaxMatches is set without Occurrence, targeting starts at the first eligible occurrence.
+    ''' If both are set, at most MaxMatches eligible occurrences are targeted starting at Occurrence.
+    ''' </summary>
+    Public Class ParsedCommandMatchSpec
+        Public Property Occurrence As System.Nullable(Of Integer)
+        Public Property MaxMatches As System.Nullable(Of Integer)
+
+        Public Function HasAnySetting() As Boolean
+            Return Occurrence.HasValue OrElse MaxMatches.HasValue
+        End Function
+
+        Public Function GetStartOccurrence() As Integer
+            Return If(Occurrence.HasValue, Occurrence.Value, 1)
+        End Function
+
+        Public Function GetEffectiveMaxMatches(defaultMaxMatches As Integer) As Integer
+            If MaxMatches.HasValue Then Return MaxMatches.Value
+            If Occurrence.HasValue Then Return 1
+            Return defaultMaxMatches
+        End Function
+
+        Public Function GetDuplicateKey() As System.String
+            Return System.String.Join("|", {
+                If(Occurrence.HasValue, Occurrence.Value.ToString(System.Globalization.CultureInfo.InvariantCulture), ""),
+                If(MaxMatches.HasValue, MaxMatches.Value.ToString(System.Globalization.CultureInfo.InvariantCulture), "")})
+        End Function
+    End Class
+
+    ''' <summary>
+    ''' Normalized host command. Both the JSON protocol and the temporary legacy
+    ''' parser map into this type so transport handling stays separate from Word execution.
+    ''' JSON-only selector/format metadata is additive and leaves legacy defaults intact.
+    ''' </summary>
+    Public Class ParsedCommand
+        Public Property Command As System.String
+        Public Property Argument1 As System.String
+        Public Property Argument2 As System.String
+        Public Property Target As System.String
+        Public Property FormatSpec As ParsedCommandFormat
+        Public Property MatchFormatSpec As ParsedCommandFormat
+        Public Property MatchSpec As ParsedCommandMatchSpec
+        ' Optional insertion-boundary intent. Nothing keeps the original verbatim behavior.
+        Public Property JoinBefore As System.String
+        Public Property JoinAfter As System.String
+        ' Only insert_table uses these structured, prevalidated native Word table cells.
+        Public Property TableRows As System.Collections.Generic.List(Of System.Collections.Generic.List(Of System.String))
+        Public Property TableHeaderRow As System.Boolean
+        Public Property TablePosition As System.String
+        ' Transport compatibility belongs at parsing, not in shared navigation logic.
+        ' Old bracket-protocol find commands retain their historic document highlight.
+        Public Property IsLegacyCommand As Boolean
+
+        ' Host-side compatibility normalization only. A value >= 2 means that this
+        ' command represents that many identical occurrence=1 replace/delete commands
+        ' emitted by the model and merged before Word execution.
+        Friend Property RepeatedOccurrenceOneMergeCount As System.Int32
+    End Class
+
+    ''' <summary>
+    ''' Builds the effective Word-command prompt without rewriting a user's stored INI value.
+    ''' New/default prompts already contain the current guidance-revision marker. Persisted/custom
+    ''' prompts from an older legacy or JSON-v1 revision are preserved verbatim and receive the
+    ''' latest authoritative one-line JSON guidance as an in-memory suffix for this request only.
+    ''' </summary>
+    Private Function GetEffectiveChatWordCommandPrompt() As String
+        Return GetConfiguredChatWordCommandPrompt() & " " & WordChatNoteGuidance
+    End Function
+
+    Private Const WordChatNoteGuidance As System.String = "NATIVE WORD NOTE ANCHORS: In the editable text [[RI-FN:n]] and [[RI-EN:n]] stand for existing native footnote and endnote references, not printable text. For independent edits prefer short disjoint exact anchors on either side. For a block rewrite use ONE replace whose exact search and plain replacement both contain every enclosed token verbatim, exactly once, in the original order and attached to the relevant revised claim. Never invent a number, infer a new citation, delete or move a reference to a different claim, include the trailing paragraph mark, or pass these tokens to other commands. Use separate note-free native format commands for requested formatting. If the intended attribution is ambiguous, ask rather than guessing."
+
+    Private Function GetConfiguredChatWordCommandPrompt() As System.String
+        Dim configuredPrompt As String = If(_context.SP_Add_ChatWord_Commands, "")
+
+        ' The transport version (JSON v1) is intentionally stable, while the guidance can
+        ' evolve additively. Check the guidance-revision marker so a persisted/custom prompt
+        ' from an older JSON-v1 release receives the latest one-line capabilities at runtime.
+        If configuredPrompt.IndexOf(
+            SharedMethods.ChatWordCommandGuidanceRevisionMarker,
+            System.StringComparison.OrdinalIgnoreCase) >= 0 Then
+            Return configuredPrompt
+        End If
+
+        ' Existing R22 INI prompts already contain the full JSON v1 contract.
+        ' Append only the new planning rule instead of duplicating that very long contract.
+        If configuredPrompt.IndexOf("RED_INK_WORD_COMMAND_GUIDANCE_R22", System.StringComparison.OrdinalIgnoreCase) >= 0 Then
+            Return configuredPrompt & " " & SharedMethods.ChatWordCommandGuidanceRevisionMarker &
+                   SharedMethods.ChatWordNonOverlappingEditGuidance
+        End If
+
+        If String.IsNullOrWhiteSpace(configuredPrompt) Then
+            Return SharedMethods.Default_SP_Add_ChatWord_JsonProtocol
+        End If
+
+        Return configuredPrompt & " " &
+               SharedMethods.Default_SP_Add_ChatWord_JsonProtocol
+    End Function
+
+    Private Sub RefreshPinnedChatSelection(pinned As Microsoft.Office.Interop.Word.Range, original As System.String,
+                                          doc As Microsoft.Office.Interop.Word.Document, ByRef first As System.Int32, ByRef finish As System.Int32)
+        If pinned Is Nothing Then Return
+        If doc Is Nothing OrElse Not IsSameChatWordDocument(pinned.Document, doc) OrElse pinned.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory OrElse pinned.Start >= pinned.End OrElse
+           Not System.String.Equals(ThisAddIn.ReadChatNoteProjection(pinned).Text, original, System.StringComparison.Ordinal) Then
+            Throw New System.InvalidOperationException("The original selection changed while the request was running. No chat command was executed.")
+        End If
+        first = pinned.Start
+        finish = pinned.End
+    End Sub
+
+    ''' <summary>
+    ''' Identifies *provable* overlapping replacements on the original visible Word text.
+    ''' This is intentionally a read-only preflight, independent of model/provider and of
+    ''' Word's revision-dependent physical character offsets. A formatting-filtered or
+    ''' non-literal match cannot be proved here and is left to the existing live guards.
+    ''' </summary>
+    Private Function FindOverlappingWordReplacementPlan(
+        commands As System.Collections.Generic.List(Of ParsedCommand),
+        doc As Microsoft.Office.Interop.Word.Document,
+        onlySelection As System.Boolean,
+        selectionStart As System.Int32,
+        selectionEnd As System.Int32) As System.String
+
+        If commands Is Nothing OrElse commands.Count = 0 Then Return System.String.Empty
+        For Each command As ParsedCommand In commands
+            Dim invalid As System.String = ValidateNoteSyntax(command)
+            If invalid.Length > 0 Then Return invalid
+        Next
+        If Not commands.Exists(Function(item) System.String.Equals(item.Command, "replace", System.StringComparison.OrdinalIgnoreCase)) Then Return System.String.Empty
+        If doc Is Nothing Then Return "The pinned Word document is no longer available."
+        Dim includesNativePlan As System.Boolean = commands.Exists(Function(item) HasNoteSyntax(item.Argument1))
+        Dim candidates As New System.Collections.Generic.List(Of (Ordinal As System.Int32, Command As ParsedCommand))()
+        Dim replaceCount As System.Int32 = 0
+        For i As System.Int32 = 0 To commands.Count - 1
+            Dim kind As System.String = If(commands(i).Command, System.String.Empty).ToLowerInvariant()
+            If (kind = "replace" OrElse kind = "insertbefore" OrElse kind = "insertafter") AndAlso
+               Not System.String.IsNullOrEmpty(commands(i).Argument1) AndAlso
+               (commands(i).MatchFormatSpec Is Nothing OrElse includesNativePlan) Then
+                candidates.Add((i + 1, commands(i)))
+                If kind = "replace" Then replaceCount += 1
+            End If
+        Next
+        Dim checkOverlap As System.Boolean = candidates.Count >= 2 AndAlso replaceCount > 0
+
+        Dim scope As Microsoft.Office.Interop.Word.Range = Nothing
+        Try
+            If onlySelection Then
+                If selectionStart >= 0 AndAlso selectionEnd > selectionStart Then
+                    scope = doc.Range(selectionStart, selectionEnd)
+                Else
+                    scope = doc.Application.Selection.Range.Duplicate
+                    If scope.Start = scope.End OrElse scope.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory Then Return "No editable main-story selection is available."
+                End If
+            Else
+                scope = doc.StoryRanges(Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory)
+            End If
+            If onlySelection AndAlso scope.End > scope.Start AndAlso doc.Range(scope.End - 1, scope.End).Text = vbCr Then
+                ' A model can echo the structural CR for the WHOLE selected block.
+                ' Normalize only this proved case; never TrimEnd a multi-paragraph payload.
+                Dim fullSource As System.String = ThisAddIn.ReadChatNoteProjection(scope).Text
+                For Each item As ParsedCommand In commands
+                    If Not System.String.Equals(item.Command, "replace", System.StringComparison.OrdinalIgnoreCase) Then Continue For
+                    Dim needle As System.String = NormalizeWordReplacementPlanText(item.Argument1)
+                    If needle.Length > 1 AndAlso needle.EndsWith(vbCr, System.StringComparison.Ordinal) AndAlso System.String.Equals(needle, fullSource, System.StringComparison.Ordinal) Then
+                        item.Argument1 = needle.Substring(0, needle.Length - 1)
+                        Dim replacement As System.String = NormalizeWordReplacementPlanText(item.Argument2)
+                        If replacement.EndsWith(vbCr, System.StringComparison.Ordinal) Then replacement = replacement.Substring(0, replacement.Length - 1)
+                        item.Argument2 = replacement
+                    End If
+                Next
+            End If
+            Dim originalVisibleText As System.String = System.String.Empty
+            If includesNativePlan OrElse HasNativeNote(scope) Then
+                Dim map As ThisAddIn.ChatNoteProjection = ThisAddIn.ReadChatNoteProjection(scope)
+                originalVisibleText = map.Text
+                Dim flat As System.String = map.Flat.ToString()
+                For Each item As ParsedCommand In commands
+                    If Not System.String.Equals(item.Command, "replace", System.StringComparison.OrdinalIgnoreCase) Then Continue For
+                    If HasNoteSyntax(item.Argument1) Then
+                        Dim bound As Microsoft.Office.Interop.Word.Range = ResolveNoteTarget(doc, map, item)
+                        If bound Is Nothing Then Return "An exact native-note target could not be verified. Use exact source text or smaller disjoint anchors on each side of the reference."
+                        ReleaseWordRange(bound)
+                    ElseIf OmitsInteriorNote(flat, map.Boundaries, item) Then
+                        Return "A replacement crosses a native note but omits its token. Copy its tokens verbatim or use disjoint note-free replacements."
+                    End If
+                Next
+            ElseIf checkOverlap Then
+                originalVisibleText = Globals.ThisAddIn.GetVisibleText(scope)
+            End If
+            If Not checkOverlap Then Return System.String.Empty
+            If System.String.IsNullOrEmpty(originalVisibleText) Then Return System.String.Empty
+            Dim source As System.String = NormalizeWordReplacementPlanText(originalVisibleText)
+            Dim prior As New System.Collections.Generic.List(Of (Start As System.Int32, Finish As System.Int32, Ordinal As System.Int32, IsReplace As System.Boolean))()
+
+            For Each candidate In candidates
+                Dim needle As System.String = NormalizeWordReplacementPlanText(candidate.Command.Argument1)
+                If needle.Length = 0 Then Continue For
+                Dim occurrence As System.Int32 = 0
+                Dim chosen As System.Int32 = 0
+                Dim firstOccurrence As System.Int32 = If(candidate.Command.MatchSpec Is Nothing, 1, candidate.Command.MatchSpec.GetStartOccurrence())
+                Dim maximum As System.Int32 = If(candidate.Command.MatchSpec Is Nothing,
+                    System.Int32.MaxValue,
+                    candidate.Command.MatchSpec.GetEffectiveMaxMatches(System.Int32.MaxValue))
+                If includesNativePlan AndAlso candidate.Command.MatchFormatSpec IsNot Nothing Then
+                    firstOccurrence = 1
+                    maximum = System.Int32.MaxValue
+                End If
+                Dim searchFrom As System.Int32 = 0
+
+                Do While chosen < maximum AndAlso searchFrom <= source.Length - needle.Length
+                    Dim startPos As System.Int32 = source.IndexOf(needle, searchFrom, System.StringComparison.OrdinalIgnoreCase)
+                    If startPos < 0 Then Exit Do
+                    occurrence += 1
+                    If occurrence >= firstOccurrence Then
+                        Dim finishPos As System.Int32 = startPos + needle.Length
+                        For Each previous In prior
+                            If (System.String.Equals(candidate.Command.Command, "replace", System.StringComparison.OrdinalIgnoreCase) OrElse previous.IsReplace) AndAlso
+                               startPos < previous.Finish AndAlso previous.Start < finishPos Then
+                                Return "Word editing commands #" & previous.Ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                       " and #" & candidate.Ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                       " target overlapping original text (at visible-text offsets " &
+                                       startPos.ToString(System.Globalization.CultureInfo.InvariantCulture) & ".." &
+                                       finishPos.ToString(System.Globalization.CultureInfo.InvariantCulture) & ")."
+                            End If
+                        Next
+                        prior.Add((startPos, finishPos, candidate.Ordinal,
+                            System.String.Equals(candidate.Command.Command, "replace", System.StringComparison.OrdinalIgnoreCase)))
+                        chosen += 1
+                    End If
+                    ' Word's replacement scanner advances beyond the preceding match.
+                    searchFrom = startPos + needle.Length
+                Loop
+            Next
+            Return System.String.Empty
+        Finally
+            If scope IsNot Nothing Then ReleaseWordRange(scope)
+        End Try
+    End Function
+
+    Private Shared ReadOnly ChatNoteToken As System.Text.RegularExpressions.Regex = ThisAddIn.ChatNativeReferencePattern
+
+    Private Shared Function HasNoteSyntax(value As System.String) As System.Boolean
+        Return value IsNot Nothing AndAlso (value.IndexOf("[[RI-FN", System.StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+            value.IndexOf("[[RI-EN", System.StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+            value.IndexOf(Microsoft.VisualBasic.ChrW(2)) >= 0)
+    End Function
+
+    Private Shared Function HasNativeNote(r As Microsoft.Office.Interop.Word.Range) As System.Boolean
+        If r.Start >= r.End Then Return False
+        For Each item As Microsoft.Office.Interop.Word.Footnote In r.Footnotes
+            Dim mark As Microsoft.Office.Interop.Word.Range = item.Reference
+            If mark.Start < r.End AndAlso r.Start < mark.End Then Return True
+        Next
+        For Each item As Microsoft.Office.Interop.Word.Endnote In r.Endnotes
+            Dim mark As Microsoft.Office.Interop.Word.Range = item.Reference
+            If mark.Start < r.End AndAlso r.Start < mark.End Then Return True
+        Next
+        Return False
+    End Function
+
+    ' Preserve the historical fast text/bubble path for ordinary context. A projection
+    ' failure for editable text must never silently turn into an unprotected snapshot.
+    Private NotInheritable Class ChatNoteContextException
+        Inherits System.InvalidOperationException
+        Friend Sub New(cause As System.Exception)
+            MyBase.New("Word could not read the native note references safely. Select a smaller main-text passage and retry.", cause)
+        End Sub
+    End Class
+
+    Private Function ReadChatSource(r As Microsoft.Office.Interop.Word.Range) As System.String
+        If My.Settings.DoCommands AndAlso r.StoryType = Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory AndAlso HasNativeNote(r) Then
+            Try
+                Return ThisAddIn.ReadChatNoteProjection(r).Text
+            Catch ex As System.Exception
+                SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb("WordChat", "Note context unavailable: " & ex.ToString())
+                Throw New ChatNoteContextException(ex)
+            End Try
+        End If
+        Return r.Text
+    End Function
+
+    Private Function IsPlainChatReplacement(value As System.String) As System.Boolean
+        ' A single literal paragraph, with no Markdown escapes/entities etc., renders
+        ' exactly as supplied. More complex content keeps the existing Markdown path.
+        Dim tree As Markdig.Syntax.MarkdownDocument = Markdig.Markdown.Parse(value, _mdPipeline)
+        If tree.Count <> 1 Then Return False
+        Dim paragraph As Markdig.Syntax.ParagraphBlock = TryCast(tree(0), Markdig.Syntax.ParagraphBlock)
+        If paragraph Is Nothing OrElse paragraph.Inline Is Nothing Then Return False
+        Dim literal As Markdig.Syntax.Inlines.LiteralInline = TryCast(paragraph.Inline.FirstChild, Markdig.Syntax.Inlines.LiteralInline)
+        Return literal IsNot Nothing AndAlso literal.NextSibling Is Nothing AndAlso System.String.Equals(literal.Content.ToString(), value, System.StringComparison.Ordinal)
+    End Function
+
+    Private Function ValidateNoteSyntax(pc As ParsedCommand) As System.String
+        Dim oldValue As System.String = If(pc.Argument1, System.String.Empty)
+        Dim newValue As System.String = If(pc.Argument2, System.String.Empty)
+        If pc.TableRows IsNot Nothing AndAlso pc.TableRows.Exists(Function(row) row.Exists(Function(cell) HasNoteSyntax(cell))) Then
+            Return "Native note tokens cannot be inserted into table cells."
+        End If
+        If Not HasNoteSyntax(oldValue) AndAlso Not HasNoteSyntax(newValue) Then Return System.String.Empty
+        If Not System.String.Equals(pc.Command, "replace", System.StringComparison.OrdinalIgnoreCase) Then Return "Use note-free anchors for commands other than replace."
+        Dim oldMarks As System.Text.RegularExpressions.MatchCollection = ChatNoteToken.Matches(oldValue)
+        Dim newMarks As System.Text.RegularExpressions.MatchCollection = ChatNoteToken.Matches(newValue)
+        If oldMarks.Count = 0 OrElse oldMarks.Count <> newMarks.Count OrElse
+           HasNoteSyntax(ChatNoteToken.Replace(oldValue, System.String.Empty)) OrElse HasNoteSyntax(ChatNoteToken.Replace(newValue, System.String.Empty)) Then
+            Return "Copy every native note token from search into replacement text exactly once, unchanged and in source order."
+        End If
+        Dim seen As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
+        For i As System.Int32 = 0 To oldMarks.Count - 1
+            If Not seen.Add(oldMarks(i).Value) OrElse Not System.String.Equals(oldMarks(i).Value, newMarks(i).Value, System.StringComparison.Ordinal) Then
+                Return "The proposed replacement duplicates, changes or reorders native note anchors."
+            End If
+        Next
+        If chkConvertMarkdown.Checked Then
+            ' Inspect syntax, not characters such as underscores or § in ordinary prose.
+            ' Formatting is a separate native command; never feed a note-bearing range
+            ' to the selection-based Markdown renderer or insert markup as plain text.
+            Dim md As Markdig.Syntax.MarkdownDocument = Markdig.Markdown.Parse(ChatNoteToken.Replace(newValue, "NoteAnchor"), _mdPipeline)
+            For Each block As Markdig.Syntax.Block In md
+                Dim para As Markdig.Syntax.ParagraphBlock = TryCast(block, Markdig.Syntax.ParagraphBlock)
+                If para Is Nothing Then Return "Use plain replacement text around native notes and apply formatting with separate, note-free format commands."
+                If para.Inline Is Nothing Then Continue For
+                Dim child As Markdig.Syntax.Inlines.Inline = para.Inline.FirstChild
+                While child IsNot Nothing
+                    If Not TypeOf child Is Markdig.Syntax.Inlines.LiteralInline AndAlso Not TypeOf child Is Markdig.Syntax.Inlines.LineBreakInline Then
+                        Return "Use plain replacement text around native notes and apply formatting with separate, note-free format commands."
+                    End If
+                    child = child.NextSibling
+                End While
+            Next
+        End If
+        Return System.String.Empty
+    End Function
+
+    ' Strict note target resolution. Native IDs make a block unique; a literal lookalike
+    ' in document text is not an anchor. Keep existing occurrence and format semantics.
+    Private Function ResolveNoteTarget(doc As Microsoft.Office.Interop.Word.Document, map As ThisAddIn.ChatNoteProjection,
+                                       pc As ParsedCommand) As Microsoft.Office.Interop.Word.Range
+        Dim source As System.String = pc.Argument1
+        Dim offset As System.Int32 = map.Text.IndexOf(source, System.StringComparison.Ordinal)
+        If offset < 0 OrElse map.Text.IndexOf(source, offset + 1, System.StringComparison.Ordinal) >= 0 OrElse
+           Not IsMatchOrdinalSelected(1, pc.MatchSpec, System.Int32.MaxValue) Then Return Nothing
+        Dim candidate As Microsoft.Office.Interop.Word.Range = doc.Range(map.Starts(offset), map.Finishes(offset + source.Length - 1))
+        Dim live As ThisAddIn.ChatNoteProjection = ThisAddIn.ReadChatNoteProjection(candidate)
+        Dim marks As System.Text.RegularExpressions.MatchCollection = ChatNoteToken.Matches(source)
+        If Not System.String.Equals(live.Text, source, System.StringComparison.Ordinal) OrElse live.References.Count <> marks.Count Then Return Nothing
+        For i As System.Int32 = 0 To marks.Count - 1
+            If Not System.String.Equals(live.References(i).Token, marks(i).Value, System.StringComparison.Ordinal) OrElse
+               live.Starts(marks(i).Index) <> live.References(i).First Then Return Nothing
+        Next
+        ' Do not cross cells, rewrite a terminal paragraph mark, or flatten fields.
+        ' Re-planning into smaller disjoint commands remains possible for such blocks.
+        If source.IndexOf(Microsoft.VisualBasic.ChrW(7)) >= 0 OrElse pc.Argument2.IndexOf(Microsoft.VisualBasic.ChrW(7)) >= 0 OrElse
+           source.EndsWith(vbCr, System.StringComparison.Ordinal) OrElse candidate.Fields.Count > 0 OrElse
+           candidate.InlineShapes.Count > 0 OrElse IsInsideToc(candidate, doc) Then Return Nothing
+        If Not RangeMatchesFormatSpec(candidate, pc.MatchFormatSpec) Then Return Nothing
+        Return candidate
+    End Function
+
+    ' Detect an ORIGINAL exact match whose interior note the model did not copy.
+    ' Endpoints are half-open: an adjacent note is not inside a note-free match.
+    Private Function OmitsInteriorNote(flatText As System.String, boundaries As System.Collections.Generic.List(Of System.Int32),
+                                       pc As ParsedCommand) As System.Boolean
+        Dim needle As System.String = pc.Argument1
+        If System.String.IsNullOrEmpty(needle) OrElse boundaries.Count = 0 Then Return False
+        Dim at As System.Int32 = 0
+        Dim ordinal As System.Int32 = 0
+        While at <= flatText.Length - needle.Length
+            at = flatText.IndexOf(needle, at, System.StringComparison.OrdinalIgnoreCase)
+            If at < 0 Then Exit While
+            ordinal += 1
+            Dim finish As System.Int32 = at + needle.Length
+            Dim k As System.Int32 = boundaries.BinarySearch(at + 1)
+            If k < 0 Then k = Not k
+            If k < boundaries.Count AndAlso boundaries(k) < finish AndAlso
+               (pc.MatchFormatSpec IsNot Nothing OrElse IsMatchOrdinalSelected(ordinal, pc.MatchSpec, System.Int32.MaxValue)) Then Return True
+            at = finish
+        End While
+        Return False
+    End Function
+
+    Private Function ApplyNoteReplacement(doc As Microsoft.Office.Interop.Word.Document, scope As Microsoft.Office.Interop.Word.Range,
+                                          pc As ParsedCommand, trace As System.Text.StringBuilder) As System.Boolean
+        Dim reason As System.String = ValidateNoteSyntax(pc)
+        If reason.Length > 0 Then
+            _lastReplaceFailureMessage = reason
+            Return False
+        End If
+        Dim map As ThisAddIn.ChatNoteProjection = ThisAddIn.ReadChatNoteProjection(scope)
+        Dim target As Microsoft.Office.Interop.Word.Range = ResolveNoteTarget(doc, map, pc)
+        If target Is Nothing Then
+            _lastReplaceFailureMessage = "The note-bearing target could not be verified in the current selection. No text was written by this command."
+            Return False
+        End If
+        Using ThisAddIn.BeginMarkupAuthorScope(doc.Application)
+            Return ApplyVerifiedChatBlock(target, pc.Argument1, NormalizeWordReplacementPlanText(pc.Argument2), trace, _lastReplaceMayHavePartialChanges)
+        End Using
+    End Function
+
+    ' Per submitted command batch; used for host-issued receipts, not model statements.
+    Private _verifiedChatBlocksInBatch As System.Int32
+
+    Private Function ApplyVerifiedChatBlock(target As Microsoft.Office.Interop.Word.Range, source As System.String,
+                                            desired As System.String, trace As System.Text.StringBuilder,
+                                            ByRef mayHaveWritten As System.Boolean) As System.Boolean
+        Dim first As System.Int32 = target.Start
+        Dim verifiedEnd As System.Int32 = first
+        If Not ThisAddIn.TryApplyExactWordBlock(target, source, desired, trace, mayHaveWritten, verifiedEnd, _lastReplaceFailureMessage) Then Return False
+        _verifiedChatBlocksInBatch += 1
+        RememberLastActionRange(first, verifiedEnd)
+        Return True
+    End Function
+
+    Private Shared Function NormalizeWordReplacementPlanText(value As System.String) As System.String
+        Return If(value, System.String.Empty).Replace(vbCrLf, vbCr).Replace(vbLf, vbCr)
+    End Function
+
+    ''' <summary>
+    ''' Parses the current Word chat command protocol. JSON is authoritative: as soon as
+    ''' the redInkWordCommands marker is present, the complete JSON envelope must validate
+    ''' successfully or the batch is rejected. The legacy parser is consulted only when no
+    ''' JSON protocol marker exists at all.
+    ''' </summary>
+    Private Function ParseCommands(input As String, Optional prepareLegacyInput As Boolean = True) As List(Of ParsedCommand)
+        Dim envelopeStart As Integer = -1
+        Dim envelopeLength As Integer = 0
+        Dim envelope As Newtonsoft.Json.Linq.JObject = Nothing
+        Dim hasJsonProtocolMarker As Boolean = False
+        Dim locateError As String = ""
+
+        If TryLocateJsonCommandEnvelope(
+            input,
+            envelopeStart,
+            envelopeLength,
+            envelope,
+            hasJsonProtocolMarker,
+            locateError) Then
+
+            Return ParseJsonCommands(envelope)
+        End If
+
+        If hasJsonProtocolMarker Then
+            Throw New System.InvalidOperationException(
+                "The model returned a Word command JSON envelope that could not be validated. " & locateError)
+        End If
+
+        If prepareLegacyInput Then
+            Return ParseLegacyCommands(PrepareLegacyCommandParsingText(input))
+        End If
+
+        ' Compatibility path for callers of the pre-migration public ExecuteAnyCommands(String, ...):
+        ' that API historically passed its supplied string directly to ParseCommands().
+        Return ParseLegacyCommands(input)
+    End Function
+
+    ''' <summary>
+    ''' Recreates the exact pre-JSON parsing input for the temporary legacy fallback.
+    ''' Before this migration, [#...#] commands were parsed only after Markdown bullet
+    ''' conversion and RemoveMarkdownFormatting(). Keeping that preprocessing here is a
+    ''' regression invariant for persisted/custom legacy Word-command prompts. JSON never
+    ''' passes through this helper.
+    ''' </summary>
+    Private Function PrepareLegacyCommandParsingText(input As String) As String
+        Dim legacyText As String = If(input, "")
+        legacyText = legacyText.Replace($"{vbCrLf}* ", vbCrLf & ChrW(8226) & " ")
+        legacyText = legacyText.Replace($"{vbCr}* ", vbCr & ChrW(8226) & " ")
+        legacyText = legacyText.Replace($"{vbLf}* ", vbLf & ChrW(8226) & " ")
+        legacyText = legacyText.Replace($"  *  ", "  " & ChrW(8226) & "  ")
+        Return RemoveMarkdownFormatting(legacyText)
+    End Function
+
+    ''' <summary>
+    ''' Locates exactly one JSON object whose sole root property is redInkWordCommands.
+    ''' The response may contain ordinary prose before/after the object, so parsing the
+    ''' entire LLM response as JSON would be incorrect. A small brace scanner identifies
+    ''' candidate objects while respecting JSON strings and escapes; Newtonsoft.Json then
+    ''' performs authoritative syntax validation.
+    ''' </summary>
+    Private Function TryLocateJsonCommandEnvelope(
+        input As String,
+        ByRef envelopeStart As Integer,
+        ByRef envelopeLength As Integer,
+        ByRef envelope As Newtonsoft.Json.Linq.JObject,
+        ByRef hasJsonProtocolMarker As Boolean,
+        ByRef errorMessage As String) As Boolean
+
+        envelopeStart = -1
+        envelopeLength = 0
+        envelope = Nothing
+        errorMessage = ""
+
+        If String.IsNullOrEmpty(input) Then Return False
+
+        ' Treat the reserved protocol name as a command marker only when it appears as a
+        ' JSON property key. A user-visible quoted mention such as "redInkWordCommands"
+        ' must not by itself turn the response into a malformed command batch.
+        hasJsonProtocolMarker = ContainsJsonPropertyMarker(input, WordCommandJsonRoot)
+
+        If Not hasJsonProtocolMarker Then Return False
+
+        Dim matches As New List(Of Tuple(Of Integer, Integer, Newtonsoft.Json.Linq.JObject))()
+
+        For startIndex As Integer = 0 To input.Length - 1
+            If input(startIndex) <> "{"c Then Continue For
+
+            Dim endIndex As Integer = FindJsonObjectEnd(input, startIndex)
+            If endIndex < startIndex Then Continue For
+
+            Dim candidate As String = input.Substring(startIndex, endIndex - startIndex + 1)
+
+            Try
+                Dim candidateObject As Newtonsoft.Json.Linq.JObject =
+                    Newtonsoft.Json.Linq.JObject.Parse(candidate)
+
+                Dim protocolToken As Newtonsoft.Json.Linq.JToken =
+                    candidateObject.GetValue(WordCommandJsonRoot, StringComparison.OrdinalIgnoreCase)
+
+                If protocolToken IsNot Nothing Then
+                    If candidateObject.Properties().Count() <> 1 Then
+                        errorMessage = "The Word command envelope must contain only the redInkWordCommands root property."
+                        Return False
+                    End If
+
+                    If IsJsonCommandEnvelopeStructurallyNested(input, startIndex, endIndex) Then
+                        errorMessage = "The redInkWordCommands envelope must be a standalone JSON object, not nested inside another JSON structure."
+                        Return False
+                    End If
+
+                    matches.Add(Tuple.Create(startIndex, candidate.Length, candidateObject))
+                End If
+            Catch ex As Newtonsoft.Json.JsonException
+                ' Candidate was not a complete JSON object. Keep scanning because prose can
+                ' contain unrelated braces before the actual command envelope.
+            End Try
+        Next
+
+        If matches.Count = 0 Then
+            errorMessage = "The redInkWordCommands marker was present, but no complete valid JSON envelope was found."
+            Return False
+        End If
+
+        If matches.Count > 1 Then
+            errorMessage = "More than one redInkWordCommands envelope was returned. Exactly one envelope is allowed per response."
+            Return False
+        End If
+
+        envelopeStart = matches(0).Item1
+        envelopeLength = matches(0).Item2
+        envelope = matches(0).Item3
+        Return True
+    End Function
+
+    ''' <summary>
+    ''' Detects the reserved protocol name only when it appears as an unescaped quoted
+    ''' first root-property name immediately after an opening object brace. The key alone
+    ''' is enough to mark a protocol attempt: malformed JSON after that point must fail
+    ''' closed instead of falling back to the legacy parser. The check is deliberately local
+    ''' so ordinary or unmatched quotation marks in user-facing prose cannot hide a later
+    ''' valid envelope. Escaped text such as \"redInkWordCommands\": inside another
+    ''' string is ignored.
+    ''' </summary>
+    Private Function ContainsJsonPropertyMarker(input As String, propertyName As String) As Boolean
+        If String.IsNullOrEmpty(input) OrElse String.IsNullOrEmpty(propertyName) Then Return False
+
+        Dim quotedPropertyName As String = """" & propertyName & """"
+        Dim searchIndex As Integer = 0
+
+        Do While searchIndex < input.Length
+            Dim markerIndex As Integer = input.IndexOf(
+                quotedPropertyName,
+                searchIndex,
+                StringComparison.OrdinalIgnoreCase)
+
+            If markerIndex < 0 Then Return False
+
+            ' A JSON property-name quote is unescaped. Count consecutive backslashes before
+            ' the opening quote so an odd count (for example \ ") identifies escaped text,
+            ' while an even count still permits a real quote after literal backslashes.
+            Dim backslashCount As Integer = 0
+            Dim precedingIndex As Integer = markerIndex - 1
+            While precedingIndex >= 0 AndAlso input(precedingIndex) = "\"c
+                backslashCount += 1
+                precedingIndex -= 1
+            End While
+
+            If (backslashCount Mod 2) = 0 Then
+                ' The reserved key is the sole property of the host envelope, so the
+                ' preceding non-whitespace character must be the opening object brace.
+                ' This avoids treating prose such as "the property \"redInkWordCommands\":"
+                ' as a command marker while still detecting malformed host envelopes.
+                Dim objectStartIndex As Integer = markerIndex - 1
+                While objectStartIndex >= 0 AndAlso System.Char.IsWhiteSpace(input(objectStartIndex))
+                    objectStartIndex -= 1
+                End While
+
+                If objectStartIndex >= 0 AndAlso input(objectStartIndex) = "{"c Then
+                    ' The reserved root key is enough to declare that the model attempted
+                    ' the host protocol. Syntax validation (including the required colon)
+                    ' is performed by Newtonsoft.Json in TryLocateJsonCommandEnvelope().
+                    Return True
+                End If
+            End If
+
+            searchIndex = markerIndex + quotedPropertyName.Length
+        Loop
+
+        Return False
+    End Function
+
+    ''' <summary>
+    ''' Rejects a command envelope that is only a nested value/array element inside a larger
+    ''' JSON structure. This prevents visible JSON examples or provider payloads from being
+    ''' mistaken for host document actions merely because they contain the reserved root object.
+    ''' A legitimate command envelope is a standalone JSON object embedded between prose.
+    ''' </summary>
+    Private Function IsJsonCommandEnvelopeStructurallyNested(
+        input As String,
+        envelopeStart As Integer,
+        envelopeEnd As Integer) As Boolean
+
+        If String.IsNullOrEmpty(input) OrElse
+           envelopeStart < 0 OrElse
+           envelopeEnd < envelopeStart OrElse
+           envelopeEnd >= input.Length Then
+            Return False
+        End If
+
+        Dim previousIndex As Integer = envelopeStart - 1
+        While previousIndex >= 0 AndAlso System.Char.IsWhiteSpace(input(previousIndex))
+            previousIndex -= 1
+        End While
+
+        Dim nextIndex As Integer = envelopeEnd + 1
+        While nextIndex < input.Length AndAlso System.Char.IsWhiteSpace(input(nextIndex))
+            nextIndex += 1
+        End While
+
+        If previousIndex < 0 OrElse nextIndex >= input.Length Then Return False
+
+        Dim previousChar As Char = input(previousIndex)
+        Dim nextChar As Char = input(nextIndex)
+
+        Dim hasJsonParentPrefix As Boolean =
+            previousChar = ":"c OrElse previousChar = "["c OrElse previousChar = ","c
+        Dim hasJsonParentSuffix As Boolean =
+            nextChar = ","c OrElse nextChar = "]"c OrElse nextChar = "}"c
+
+        Return hasJsonParentPrefix AndAlso hasJsonParentSuffix
+    End Function
+
+    ''' <summary>
+    ''' Finds the closing brace for a JSON object starting at <paramref name="startIndex"/>.
+    ''' Braces inside quoted JSON strings do not affect nesting depth.
+    ''' </summary>
+    Private Function FindJsonObjectEnd(input As String, startIndex As Integer) As Integer
+        If String.IsNullOrEmpty(input) OrElse
+           startIndex < 0 OrElse
+           startIndex >= input.Length OrElse
+           input(startIndex) <> "{"c Then
+            Return -1
+        End If
+
+        Dim depth As Integer = 0
+        Dim inString As Boolean = False
+        Dim escaped As Boolean = False
+
+        For index As Integer = startIndex To input.Length - 1
+            Dim currentChar As Char = input(index)
+
+            If inString Then
+                If escaped Then
+                    escaped = False
+                ElseIf currentChar = "\"c Then
+                    escaped = True
+                ElseIf currentChar = """"c Then
+                    inString = False
+                End If
+                Continue For
+            End If
+
+            If currentChar = """"c Then
+                inString = True
+            ElseIf currentChar = "{"c Then
+                depth += 1
+            ElseIf currentChar = "}"c Then
+                depth -= 1
+                If depth = 0 Then Return index
+                If depth < 0 Then Return -1
+            End If
+        Next
+
+        Return -1
+    End Function
+
+    ''' <summary>
+    ''' Validates and normalizes a version-1 JSON command envelope before any Word mutation.
+    ''' Validation is batch-wide: a single invalid command rejects the entire batch.
+    ''' </summary>
+    Private Function ParseJsonCommands(envelope As Newtonsoft.Json.Linq.JObject) As List(Of ParsedCommand)
+        If envelope Is Nothing Then
+            Throw New System.InvalidOperationException("The Word command JSON envelope is missing.")
+        End If
+
+        Dim protocolToken As Newtonsoft.Json.Linq.JToken =
+            envelope.GetValue(WordCommandJsonRoot, System.StringComparison.OrdinalIgnoreCase)
+
+        If protocolToken Is Nothing OrElse protocolToken.Type <> Newtonsoft.Json.Linq.JTokenType.Object Then
+            Throw New System.InvalidOperationException("redInkWordCommands must be a JSON object.")
+        End If
+
+        Dim protocolObject As Newtonsoft.Json.Linq.JObject =
+            DirectCast(protocolToken, Newtonsoft.Json.Linq.JObject)
+
+        ValidateJsonProperties(
+            protocolObject,
+            "redInkWordCommands",
+            "version",
+            "commands")
+
+        Dim versionToken As Newtonsoft.Json.Linq.JToken =
+            protocolObject.GetValue("version", System.StringComparison.OrdinalIgnoreCase)
+
+        If versionToken Is Nothing OrElse
+           versionToken.Type <> Newtonsoft.Json.Linq.JTokenType.Integer OrElse
+           versionToken.ToObject(Of Integer)() <> WordCommandJsonVersion Then
+
+            Throw New System.InvalidOperationException(
+                $"Unsupported Word command protocol version. Expected integer version {WordCommandJsonVersion}.")
+        End If
+
+        Dim commandsToken As Newtonsoft.Json.Linq.JToken =
+            protocolObject.GetValue("commands", System.StringComparison.OrdinalIgnoreCase)
+
+        If commandsToken Is Nothing OrElse commandsToken.Type <> Newtonsoft.Json.Linq.JTokenType.Array Then
+            Throw New System.InvalidOperationException("redInkWordCommands.commands must be a JSON array.")
+        End If
+
+        Dim results As New System.Collections.Generic.List(Of ParsedCommand)()
+        Dim commandIndex As Integer = 0
+
+        For Each commandToken As Newtonsoft.Json.Linq.JToken In DirectCast(commandsToken, Newtonsoft.Json.Linq.JArray)
+            commandIndex += 1
+
+            If commandToken Is Nothing OrElse commandToken.Type <> Newtonsoft.Json.Linq.JTokenType.Object Then
+                Throw New System.InvalidOperationException(
+                    $"Word command #{commandIndex} must be a JSON object.")
+            End If
+
+            Dim commandObject As Newtonsoft.Json.Linq.JObject =
+                DirectCast(commandToken, Newtonsoft.Json.Linq.JObject)
+
+            Dim operation As System.String = GetRequiredJsonString(commandObject, "op", commandIndex).Trim().ToLowerInvariant()
+            Dim parsed As New ParsedCommand()
+
+            Select Case operation
+                Case "find"
+                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "occurrence", "max_matches", "match_format")
+                    parsed.Command = "find"
+                    parsed.Argument1 = CleanJsonArgument(GetRequiredJsonString(commandObject, "search", commandIndex))
+                    parsed.MatchFormatSpec = ParseJsonMatchFormatSpec(commandObject, commandIndex)
+                    parsed.MatchSpec = ParseJsonMatchSpec(commandObject, commandIndex, allowMaxMatches:=True)
+
+                Case "goto"
+                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "target", "occurrence", "match_format")
+                    parsed.Command = "goto"
+
+                    Dim gotoTarget As System.String = GetOptionalJsonString(commandObject, "target", commandIndex)
+                    Dim gotoSearch As System.String = GetOptionalJsonString(commandObject, "search", commandIndex)
+
+                    If Not System.String.IsNullOrWhiteSpace(gotoTarget) Then
+                        If Not System.String.IsNullOrWhiteSpace(gotoSearch) Then
+                            Throw New System.InvalidOperationException(
+                                $"Word goto command #{commandIndex} must use either 'search' or 'target', not both.")
+                        End If
+                        If commandObject.GetValue("occurrence", System.StringComparison.OrdinalIgnoreCase) IsNot Nothing Then
+                            Throw New System.InvalidOperationException(
+                                $"Word goto command #{commandIndex} cannot combine 'target' with 'occurrence'.")
+                        End If
+                        If commandObject.GetValue("match_format", System.StringComparison.OrdinalIgnoreCase) IsNot Nothing Then
+                            Throw New System.InvalidOperationException(
+                                $"Word goto command #{commandIndex} cannot combine a recent-change 'target' with 'match_format'.")
+                        End If
+                        parsed.Target = NormalizeRecentChangeTarget(gotoTarget, commandIndex, "goto")
+                    Else
+                        If System.String.IsNullOrWhiteSpace(gotoSearch) Then
+                            Throw New System.InvalidOperationException(
+                                $"Word goto command #{commandIndex} requires either a non-empty 'search' string or a recent-change 'target'.")
+                        End If
+                        parsed.Argument1 = CleanJsonArgument(gotoSearch)
+                        parsed.MatchFormatSpec = ParseJsonMatchFormatSpec(commandObject, commandIndex)
+                        parsed.MatchSpec = ParseJsonMatchSpec(commandObject, commandIndex, allowMaxMatches:=False)
+                    End If
+
+                Case "replace"
+                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "text", "occurrence", "max_matches", "match_format")
+                    parsed.Command = "replace"
+                    parsed.Argument1 = CleanJsonArgument(GetRequiredJsonString(commandObject, "search", commandIndex))
+                    parsed.Argument2 = CleanJsonGeneratedWordText(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True))
+                    parsed.MatchFormatSpec = ParseJsonMatchFormatSpec(commandObject, commandIndex)
+                    parsed.MatchSpec = ParseJsonMatchSpec(commandObject, commandIndex, allowMaxMatches:=True)
+
+                Case "delete"
+                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "occurrence", "max_matches", "match_format")
+                    parsed.Command = "replace"
+                    parsed.Argument1 = CleanJsonArgument(GetRequiredJsonString(commandObject, "search", commandIndex))
+                    parsed.Argument2 = ""
+                    parsed.MatchFormatSpec = ParseJsonMatchFormatSpec(commandObject, commandIndex)
+                    parsed.MatchSpec = ParseJsonMatchSpec(commandObject, commandIndex, allowMaxMatches:=True)
+
+                Case "insert"
+                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "text", "join_before", "join_after", "as_paragraph")
+                    parsed.Command = "insert"
+                    parsed.Argument1 = CleanJsonGeneratedWordText(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True))
+                    parsed.JoinBefore = ParseJsonInsertJoinMode(commandObject, "join_before", commandIndex)
+                    parsed.JoinAfter = ParseJsonInsertJoinMode(commandObject, "join_after", commandIndex)
+                    ApplyJsonParagraphInsertionIntent(commandObject, parsed, commandIndex)
+
+                Case "insert_before"
+                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "text", "occurrence", "max_matches", "match_format", "join_before", "join_after", "as_paragraph")
+                    parsed.Command = "insertbefore"
+                    parsed.Argument1 = CleanJsonArgument(GetRequiredJsonString(commandObject, "search", commandIndex))
+                    parsed.Argument2 = CleanJsonGeneratedWordText(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True))
+                    parsed.JoinBefore = ParseJsonInsertJoinMode(commandObject, "join_before", commandIndex)
+                    parsed.JoinAfter = ParseJsonInsertJoinMode(commandObject, "join_after", commandIndex)
+                    ApplyJsonParagraphInsertionIntent(commandObject, parsed, commandIndex)
+                    parsed.MatchFormatSpec = ParseJsonMatchFormatSpec(commandObject, commandIndex)
+                    parsed.MatchSpec = ParseJsonMatchSpec(commandObject, commandIndex, allowMaxMatches:=True)
+
+                Case "insert_after"
+                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "text", "occurrence", "max_matches", "match_format", "join_before", "join_after", "as_paragraph")
+                    parsed.Command = "insertafter"
+                    parsed.Argument1 = CleanJsonArgument(GetRequiredJsonString(commandObject, "search", commandIndex))
+                    parsed.Argument2 = CleanJsonGeneratedWordText(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True))
+                    parsed.JoinBefore = ParseJsonInsertJoinMode(commandObject, "join_before", commandIndex)
+                    parsed.JoinAfter = ParseJsonInsertJoinMode(commandObject, "join_after", commandIndex)
+                    ApplyJsonParagraphInsertionIntent(commandObject, parsed, commandIndex)
+                    parsed.MatchFormatSpec = ParseJsonMatchFormatSpec(commandObject, commandIndex)
+                    parsed.MatchSpec = ParseJsonMatchSpec(commandObject, commandIndex, allowMaxMatches:=True)
+
+                Case "insert_table"
+                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}",
+                                           "op", "rows", "search", "position", "occurrence", "header_row")
+                    parsed.Command = "inserttable"
+                    parsed.TableRows = ParseJsonTableRows(commandObject, commandIndex)
+                    Dim anchorText As System.String = GetOptionalJsonString(commandObject, "search", commandIndex)
+                    Dim location As System.String = GetOptionalJsonString(commandObject, "position", commandIndex)
+                    If anchorText IsNot Nothing AndAlso System.String.IsNullOrWhiteSpace(anchorText) Then
+                        Throw New System.InvalidOperationException($"Word table command #{commandIndex} cannot use an empty 'search' anchor.")
+                    End If
+                    If System.String.IsNullOrWhiteSpace(anchorText) Then
+                        If Not System.String.IsNullOrWhiteSpace(location) AndAlso
+                           Not System.String.Equals(location, "cursor", System.StringComparison.OrdinalIgnoreCase) Then
+                            Throw New System.InvalidOperationException($"Word table command #{commandIndex} requires 'search' for before/after placement.")
+                        End If
+                        If commandObject.GetValue("occurrence", System.StringComparison.OrdinalIgnoreCase) IsNot Nothing Then
+                            Throw New System.InvalidOperationException($"Word table command #{commandIndex} cannot use 'occurrence' without 'search'.")
+                        End If
+                        parsed.TablePosition = "cursor"
+                    Else
+                        parsed.Argument1 = CleanJsonArgument(anchorText)
+                        If System.String.IsNullOrWhiteSpace(location) OrElse
+                           (Not System.String.Equals(location, "before", System.StringComparison.OrdinalIgnoreCase) AndAlso
+                            Not System.String.Equals(location, "after", System.StringComparison.OrdinalIgnoreCase)) Then
+                            Throw New System.InvalidOperationException($"Word table command #{commandIndex} requires position='before' or 'after' when search is provided.")
+                        End If
+                        parsed.TablePosition = location.Trim().ToLowerInvariant()
+                        Dim nth As System.Nullable(Of Integer) = GetOptionalPositiveJsonInteger(commandObject, "occurrence", commandIndex)
+                        If nth.HasValue Then
+                            parsed.MatchSpec = New ParsedCommandMatchSpec() With {.Occurrence = nth}
+                        End If
+                    End If
+                    Dim headerToken As Newtonsoft.Json.Linq.JToken = commandObject.GetValue("header_row", System.StringComparison.OrdinalIgnoreCase)
+                    If headerToken IsNot Nothing Then
+                        parsed.TableHeaderRow = GetRequiredJsonBoolean(headerToken, "header_row", commandIndex)
+                    End If
+
+                Case "add_comment"
+                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "text", "occurrence", "max_matches", "match_format")
+                    parsed.Command = "addcomment"
+                    parsed.Argument1 = CleanJsonArgument(GetRequiredJsonString(commandObject, "search", commandIndex))
+                    parsed.Argument2 = CleanJsonGeneratedWordText(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True))
+                    parsed.MatchFormatSpec = ParseJsonMatchFormatSpec(commandObject, commandIndex)
+                    parsed.MatchSpec = ParseJsonMatchSpec(commandObject, commandIndex, allowMaxMatches:=True)
+
+                Case "reply_comment"
+                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "comment_id", "text")
+                    parsed.Command = "replycomment"
+                    parsed.Argument1 = CleanJsonArgument(GetRequiredJsonString(commandObject, "comment_id", commandIndex))
+                    parsed.Argument2 = CleanJsonGeneratedWordText(GetRequiredJsonString(commandObject, "text", commandIndex, allowEmpty:=True))
+
+                Case "format"
+                    ValidateJsonProperties(commandObject, $"Word command #{commandIndex}", "op", "search", "target", "occurrence", "max_matches", "format", "match_format")
+                    parsed.Command = "format"
+                    parsed.FormatSpec = ParseJsonFormatSpec(commandObject, commandIndex)
+
+                    Dim formatTarget As System.String = GetOptionalJsonString(commandObject, "target", commandIndex)
+                    Dim formatSearch As System.String = GetOptionalJsonString(commandObject, "search", commandIndex)
+
+                    If Not System.String.IsNullOrWhiteSpace(formatTarget) Then
+                        If Not System.String.IsNullOrWhiteSpace(formatSearch) Then
+                            Throw New System.InvalidOperationException(
+                                $"Word format command #{commandIndex} must use either 'search' or 'target', not both.")
+                        End If
+                        If commandObject.GetValue("occurrence", System.StringComparison.OrdinalIgnoreCase) IsNot Nothing OrElse
+                           commandObject.GetValue("max_matches", System.StringComparison.OrdinalIgnoreCase) IsNot Nothing Then
+                            Throw New System.InvalidOperationException(
+                                $"Word format command #{commandIndex} cannot combine a recent-change 'target' with occurrence/max_matches.")
+                        End If
+                        If commandObject.GetValue("match_format", System.StringComparison.OrdinalIgnoreCase) IsNot Nothing Then
+                            Throw New System.InvalidOperationException(
+                                $"Word format command #{commandIndex} cannot combine a recent-change 'target' with 'match_format'.")
+                        End If
+                        parsed.Target = NormalizeRecentChangeTarget(formatTarget, commandIndex, "format")
+                    Else
+                        If System.String.IsNullOrWhiteSpace(formatSearch) Then
+                            Throw New System.InvalidOperationException(
+                                $"Word format command #{commandIndex} requires either a non-empty 'search' string or a recent-change 'target'.")
+                        End If
+                        parsed.Argument1 = CleanJsonArgument(formatSearch)
+                        parsed.MatchFormatSpec = ParseJsonMatchFormatSpec(commandObject, commandIndex)
+                        parsed.MatchSpec = ParseJsonMatchSpec(commandObject, commandIndex, allowMaxMatches:=True)
+                    End If
+
+                Case Else
+                    Throw New System.InvalidOperationException(
+                        $"Unsupported Word command operation '{operation}' in command #{commandIndex}.")
+            End Select
+
+            AddParsedCommandIfNotDuplicate(results, parsed)
+        Next
+
+        Return results
+    End Function
+
+    ''' <summary>
+    ''' Applies a single explicit paragraph-level insertion intent to BOTH edges.
+    ''' This does not infer intention from punctuation, content, anchors or provider.
+    ''' Existing JSON without this flag and all legacy commands remain unchanged.
+    ''' </summary>
+    Private Sub ApplyJsonParagraphInsertionIntent(
+        commandObject As Newtonsoft.Json.Linq.JObject,
+        parsed As ParsedCommand,
+        commandIndex As Integer)
+
+        Dim paragraphToken As Newtonsoft.Json.Linq.JToken =
+            commandObject.GetValue("as_paragraph", System.StringComparison.OrdinalIgnoreCase)
+        If paragraphToken Is Nothing Then Return
+        If paragraphToken.Type <> Newtonsoft.Json.Linq.JTokenType.Boolean Then
+            Throw New System.InvalidOperationException(
+                $"Word command #{commandIndex} property 'as_paragraph' must be a JSON boolean.")
+        End If
+        If Not paragraphToken.ToObject(Of Boolean)() Then Return
+
+        ' Conflicting instructions must not silently change the document. In particular,
+        ' a caller explicitly requesting a literal edge cannot simultaneously request
+        ' a standalone paragraph at that edge.
+        If (Not System.String.IsNullOrEmpty(parsed.JoinBefore) AndAlso
+            parsed.JoinBefore <> "paragraph_if_needed") OrElse
+           (Not System.String.IsNullOrEmpty(parsed.JoinAfter) AndAlso
+            parsed.JoinAfter <> "paragraph_if_needed") Then
+            Throw New System.InvalidOperationException(
+                $"Word command #{commandIndex} cannot combine 'as_paragraph': true with conflicting join modes.")
+        End If
+
+        parsed.JoinBefore = "paragraph_if_needed"
+        parsed.JoinAfter = "paragraph_if_needed"
+    End Sub
+
+    ''' <summary>
+    ''' Validates optional, model-independent insertion-boundary intent. An omitted field
+    ''' preserves existing commands. The host applies the requested boundary only when needed.
+    ''' </summary>
+    Private Function ParseJsonInsertJoinMode(
+        commandObject As Newtonsoft.Json.Linq.JObject,
+        propertyName As System.String,
+        commandIndex As Integer) As System.String
+
+        Dim token As Newtonsoft.Json.Linq.JToken =
+            commandObject.GetValue(propertyName, System.StringComparison.OrdinalIgnoreCase)
+        If token Is Nothing Then Return Nothing
+        If token.Type <> Newtonsoft.Json.Linq.JTokenType.String Then
+            Throw New System.InvalidOperationException(
+                $"Word command #{commandIndex} property '{propertyName}' must be a JSON string.")
+        End If
+
+        Dim mode As System.String = token.ToObject(Of System.String)().Trim().ToLowerInvariant()
+        Select Case mode
+            Case "verbatim", "none", "space_if_needed", "paragraph_if_needed"
+                Return mode
+            Case Else
+                Throw New System.InvalidOperationException(
+                    $"Word command #{commandIndex} property '{propertyName}' must be verbatim, none, space_if_needed, or paragraph_if_needed.")
+        End Select
+    End Function
+
+    ''' <summary>
+    ''' Normalizes a host-side recent-change target. Stable change IDs are supplied by
+    ''' the host in the dynamic system prompt; the model must never invent them.
+    ''' last_action remains accepted as a backward-compatible alias for last_change.
+    ''' </summary>
+    Private Function NormalizeRecentChangeTarget(
+        target As System.String,
+        commandIndex As Integer,
+        operationName As System.String) As System.String
+
+        Dim normalized As System.String = If(target, "").Trim().ToLowerInvariant()
+        If normalized = "last_action" Then normalized = "last_change"
+
+        If normalized = "last_change" Then Return normalized
+
+        If System.Text.RegularExpressions.Regex.IsMatch(
+            normalized,
+            "^change:c[0-9]+$",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant) Then
+            Return normalized
+        End If
+
+        Throw New System.InvalidOperationException(
+            $"Word {operationName} command #{commandIndex} property 'target' must be 'last_change' or a host-listed value such as 'change:c12'.")
+    End Function
+
+    Private Function ParseJsonMatchSpec(
+        commandObject As Newtonsoft.Json.Linq.JObject,
+        commandIndex As Integer,
+        allowMaxMatches As Boolean) As ParsedCommandMatchSpec
+
+        Dim occurrence As System.Nullable(Of Integer) = GetOptionalPositiveJsonInteger(commandObject, "occurrence", commandIndex)
+        Dim maxMatches As System.Nullable(Of Integer) = Nothing
+
+        If allowMaxMatches Then
+            maxMatches = GetOptionalPositiveJsonInteger(commandObject, "max_matches", commandIndex)
+        ElseIf commandObject.GetValue("max_matches", System.StringComparison.OrdinalIgnoreCase) IsNot Nothing Then
+            Throw New System.InvalidOperationException(
+                $"Word command #{commandIndex} does not support property 'max_matches'.")
+        End If
+
+        If Not occurrence.HasValue AndAlso Not maxMatches.HasValue Then Return Nothing
+
+        Return New ParsedCommandMatchSpec() With {
+            .Occurrence = occurrence,
+            .MaxMatches = maxMatches
+        }
+    End Function
+
+    Private Function GetOptionalPositiveJsonInteger(
+        commandObject As Newtonsoft.Json.Linq.JObject,
+        propertyName As System.String,
+        commandIndex As Integer) As System.Nullable(Of Integer)
+
+        Dim token As Newtonsoft.Json.Linq.JToken =
+            commandObject.GetValue(propertyName, System.StringComparison.OrdinalIgnoreCase)
+
+        If token Is Nothing OrElse token.Type = Newtonsoft.Json.Linq.JTokenType.Null Then Return Nothing
+
+        If token.Type <> Newtonsoft.Json.Linq.JTokenType.Integer Then
+            Throw New System.InvalidOperationException(
+                $"Word command #{commandIndex} property '{propertyName}' must be a positive JSON integer.")
+        End If
+
+        Dim value As Integer = token.ToObject(Of Integer)()
+        If value <= 0 Then
+            Throw New System.InvalidOperationException(
+                $"Word command #{commandIndex} property '{propertyName}' must be greater than zero.")
+        End If
+
+        Return value
+    End Function
+
+    ''' <summary>Strict rectangular table contract, verified before executing any commands.</summary>
+    Private Function ParseJsonTableRows(commandObject As Newtonsoft.Json.Linq.JObject,
+                                        commandIndex As Integer) As System.Collections.Generic.List(Of System.Collections.Generic.List(Of System.String))
+        Dim token As Newtonsoft.Json.Linq.JToken = commandObject.GetValue("rows", System.StringComparison.OrdinalIgnoreCase)
+        If token Is Nothing OrElse token.Type <> Newtonsoft.Json.Linq.JTokenType.Array Then
+            Throw New System.InvalidOperationException($"Word table command #{commandIndex} requires a 'rows' array.")
+        End If
+        Dim inputRows As Newtonsoft.Json.Linq.JArray = DirectCast(token, Newtonsoft.Json.Linq.JArray)
+        If inputRows.Count < 1 OrElse inputRows.Count > 100 Then
+            Throw New System.InvalidOperationException($"Word table command #{commandIndex} must contain 1 to 100 rows.")
+        End If
+        Dim result As New System.Collections.Generic.List(Of System.Collections.Generic.List(Of System.String))()
+        Dim columnCount As Integer = -1
+        Dim totalTextLength As Integer = 0
+        For Each rowToken As Newtonsoft.Json.Linq.JToken In inputRows
+            If rowToken Is Nothing OrElse rowToken.Type <> Newtonsoft.Json.Linq.JTokenType.Array Then
+                Throw New System.InvalidOperationException($"Word table command #{commandIndex} rows must be arrays of strings.")
+            End If
+            Dim inputCells As Newtonsoft.Json.Linq.JArray = DirectCast(rowToken, Newtonsoft.Json.Linq.JArray)
+            If columnCount < 0 Then columnCount = inputCells.Count
+            If columnCount < 1 OrElse columnCount > 20 OrElse inputCells.Count <> columnCount Then
+                Throw New System.InvalidOperationException($"Word table command #{commandIndex} must have 1 to 20 columns and equal-sized rows.")
+            End If
+            Dim cells As New System.Collections.Generic.List(Of System.String)()
+            For Each cellToken As Newtonsoft.Json.Linq.JToken In inputCells
+                If cellToken Is Nothing OrElse cellToken.Type <> Newtonsoft.Json.Linq.JTokenType.String Then
+                    Throw New System.InvalidOperationException($"Word table command #{commandIndex} cell values must be JSON strings.")
+                End If
+                Dim cellText As System.String = NormalizeGeneratedWordProse(cellToken.ToObject(Of System.String)())
+                If cellText.Length > 10000 OrElse cellText.IndexOf(ChrW(7)) >= 0 Then
+                    Throw New System.InvalidOperationException($"Word table command #{commandIndex} contains an oversized cell or an invalid Word cell delimiter.")
+                End If
+                totalTextLength += cellText.Length
+                If totalTextLength > 80000 Then
+                    Throw New System.InvalidOperationException($"Word table command #{commandIndex} contains too much text.")
+                End If
+                cells.Add(cellText.Replace(vbCrLf, vbCr).Replace(vbLf, vbCr))
+            Next
+            result.Add(cells)
+        Next
+        Return result
+    End Function
+
+    Private Function GetOptionalJsonString(
+        commandObject As Newtonsoft.Json.Linq.JObject,
+        propertyName As System.String,
+        commandIndex As Integer) As System.String
+
+        Dim token As Newtonsoft.Json.Linq.JToken =
+            commandObject.GetValue(propertyName, System.StringComparison.OrdinalIgnoreCase)
+
+        If token Is Nothing OrElse token.Type = Newtonsoft.Json.Linq.JTokenType.Null Then Return Nothing
+
+        If token.Type <> Newtonsoft.Json.Linq.JTokenType.String Then
+            Throw New System.InvalidOperationException(
+                $"Word command #{commandIndex} property '{propertyName}' must be a JSON string.")
+        End If
+
+        Return token.ToObject(Of System.String)()
+    End Function
+
+    Private Sub ValidateJsonProperties(
+        jsonObject As Newtonsoft.Json.Linq.JObject,
+        objectDescription As String,
+        ParamArray allowedProperties() As String)
+
+        If jsonObject Is Nothing Then
+            Throw New System.InvalidOperationException(objectDescription & " is missing.")
+        End If
+
+        Dim allowed As New System.Collections.Generic.HashSet(Of String)(
+            allowedProperties,
+            System.StringComparer.OrdinalIgnoreCase)
+
+        For Each propertyItem As Newtonsoft.Json.Linq.JProperty In jsonObject.Properties()
+            If Not allowed.Contains(propertyItem.Name) Then
+                Throw New System.InvalidOperationException(
+                    $"{objectDescription} contains unsupported property '{propertyItem.Name}'.")
+            End If
+        Next
+    End Sub
+
+    Private Function GetRequiredJsonString(
+        commandObject As Newtonsoft.Json.Linq.JObject,
+        propertyName As String,
+        commandIndex As Integer,
+        Optional allowEmpty As Boolean = False) As String
+
+        Dim token As Newtonsoft.Json.Linq.JToken =
+            commandObject.GetValue(propertyName, StringComparison.OrdinalIgnoreCase)
+
+        If token Is Nothing OrElse token.Type = Newtonsoft.Json.Linq.JTokenType.Null Then
+            Throw New System.InvalidOperationException(
+                $"Word command #{commandIndex} is missing required property '{propertyName}'.")
+        End If
+
+        If token.Type <> Newtonsoft.Json.Linq.JTokenType.String Then
+            Throw New System.InvalidOperationException(
+                $"Word command #{commandIndex} property '{propertyName}' must be a JSON string.")
+        End If
+
+        Dim value As String = token.ToObject(Of String)()
+        If Not allowEmpty AndAlso String.IsNullOrWhiteSpace(value) Then
+            Throw New System.InvalidOperationException(
+                $"Word command #{commandIndex} property '{propertyName}' must not be empty.")
+        End If
+
+        Return If(value, "")
+    End Function
+
+    Private Function ParseJsonFormatSpec(
+        commandObject As Newtonsoft.Json.Linq.JObject,
+        commandIndex As Integer) As ParsedCommandFormat
+
+        Dim formatToken As Newtonsoft.Json.Linq.JToken =
+            commandObject.GetValue("format", System.StringComparison.OrdinalIgnoreCase)
+
+        If formatToken Is Nothing OrElse formatToken.Type <> Newtonsoft.Json.Linq.JTokenType.Object Then
+            Throw New System.InvalidOperationException(
+                $"Word format command #{commandIndex} requires a 'format' JSON object.")
+        End If
+
+        Return ParseJsonFormatObject(
+            DirectCast(formatToken, Newtonsoft.Json.Linq.JObject),
+            commandIndex,
+            "format",
+            allowAnyHighlight:=False)
+    End Function
+
+    Private Function ParseJsonMatchFormatSpec(
+        commandObject As Newtonsoft.Json.Linq.JObject,
+        commandIndex As Integer) As ParsedCommandFormat
+
+        Dim matchFormatToken As Newtonsoft.Json.Linq.JToken =
+            commandObject.GetValue("match_format", System.StringComparison.OrdinalIgnoreCase)
+
+        If matchFormatToken Is Nothing OrElse matchFormatToken.Type = Newtonsoft.Json.Linq.JTokenType.Null Then
+            Return Nothing
+        End If
+
+        If matchFormatToken.Type <> Newtonsoft.Json.Linq.JTokenType.Object Then
+            Throw New System.InvalidOperationException(
+                $"Word command #{commandIndex} property 'match_format' must be a JSON object.")
+        End If
+
+        Return ParseJsonFormatObject(
+            DirectCast(matchFormatToken, Newtonsoft.Json.Linq.JObject),
+            commandIndex,
+            "match_format",
+            allowAnyHighlight:=True)
+    End Function
+
+    Private Function ParseJsonFormatObject(
+        formatObject As Newtonsoft.Json.Linq.JObject,
+        commandIndex As Integer,
+        propertyName As System.String,
+        allowAnyHighlight As Boolean) As ParsedCommandFormat
+
+        If formatObject Is Nothing Then
+            Throw New System.InvalidOperationException(
+                $"Word command #{commandIndex} property '{propertyName}' must be a JSON object.")
+        End If
+
+        Dim spec As New ParsedCommandFormat()
+
+        For Each propertyItem As Newtonsoft.Json.Linq.JProperty In formatObject.Properties()
+            Select Case propertyItem.Name.ToLowerInvariant()
+                Case "style"
+                    If propertyItem.Value.Type <> Newtonsoft.Json.Linq.JTokenType.String OrElse
+                       System.String.IsNullOrWhiteSpace(propertyItem.Value.ToObject(Of System.String)()) Then
+                        Throw New System.InvalidOperationException($"Word command #{commandIndex} property '{propertyName}.style' must be a non-empty string.")
+                    End If
+                    spec.StyleName = propertyItem.Value.ToObject(Of System.String)().Trim()
+
+                Case "builtin_style"
+                    If propertyItem.Value.Type <> Newtonsoft.Json.Linq.JTokenType.String Then
+                        Throw New System.InvalidOperationException($"Word command #{commandIndex} property '{propertyName}.builtin_style' must be a string.")
+                    End If
+                    Dim builtinStyle As System.String = If(propertyItem.Value.ToObject(Of System.String)(), "").Trim().ToLowerInvariant()
+                    Select Case builtinStyle
+                        Case "normal", "heading1", "heading2", "heading3", "heading4", "heading5", "heading6"
+                            spec.BuiltinStyle = builtinStyle
+                        Case Else
+                            Throw New System.InvalidOperationException(
+                                $"Word command #{commandIndex} property '{propertyName}.builtin_style' must be normal or heading1 through heading6.")
+                    End Select
+
+                Case "font_name"
+                    If propertyItem.Value.Type <> Newtonsoft.Json.Linq.JTokenType.String OrElse
+                       System.String.IsNullOrWhiteSpace(propertyItem.Value.ToObject(Of System.String)()) Then
+                        Throw New System.InvalidOperationException($"Word command #{commandIndex} property '{propertyName}.font_name' must be a non-empty string.")
+                    End If
+                    spec.FontName = propertyItem.Value.ToObject(Of System.String)().Trim()
+
+                Case "bold"
+                    spec.Bold = GetRequiredJsonBoolean(propertyItem.Value, propertyName & ".bold", commandIndex)
+
+                Case "italic"
+                    spec.Italic = GetRequiredJsonBoolean(propertyItem.Value, propertyName & ".italic", commandIndex)
+
+                Case "underline"
+                    spec.Underline = GetRequiredJsonBoolean(propertyItem.Value, propertyName & ".underline", commandIndex)
+
+                Case "font_size_pt"
+                    spec.FontSizePt = GetRequiredJsonSingle(
+                        propertyItem.Value,
+                        propertyName & ".font_size_pt",
+                        commandIndex,
+                        0.0F,
+                        1638.0F,
+                        allowZero:=False)
+
+                Case "font_color"
+                    If propertyItem.Value.Type <> Newtonsoft.Json.Linq.JTokenType.String Then
+                        Throw New System.InvalidOperationException($"Word command #{commandIndex} property '{propertyName}.font_color' must be a string.")
+                    End If
+                    Dim color As System.String = If(propertyItem.Value.ToObject(Of System.String)(), "").Trim()
+                    If Not System.Text.RegularExpressions.Regex.IsMatch(color, "^#[0-9A-Fa-f]{6}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant) Then
+                        Throw New System.InvalidOperationException(
+                            $"Word command #{commandIndex} property '{propertyName}.font_color' must use #RRGGBB.")
+                    End If
+                    spec.FontColor = color
+
+                Case "highlight"
+                    spec.Highlight = ParseJsonHighlightValue(
+                        propertyItem.Value,
+                        propertyName & ".highlight",
+                        commandIndex,
+                        allowAnyHighlight)
+
+                Case "alignment"
+                    If propertyItem.Value.Type <> Newtonsoft.Json.Linq.JTokenType.String Then
+                        Throw New System.InvalidOperationException($"Word command #{commandIndex} property '{propertyName}.alignment' must be a string.")
+                    End If
+                    Dim alignment As System.String = If(propertyItem.Value.ToObject(Of System.String)(), "").Trim().ToLowerInvariant()
+                    If alignment <> "left" AndAlso alignment <> "center" AndAlso alignment <> "right" AndAlso alignment <> "justify" Then
+                        Throw New System.InvalidOperationException(
+                            $"Word command #{commandIndex} property '{propertyName}.alignment' must be left, center, right, or justify.")
+                    End If
+                    spec.Alignment = alignment
+
+                Case "space_before_pt"
+                    spec.SpaceBeforePt = GetRequiredJsonSingle(
+                        propertyItem.Value,
+                        propertyName & ".space_before_pt",
+                        commandIndex,
+                        0.0F,
+                        1584.0F,
+                        allowZero:=True)
+
+                Case "space_after_pt"
+                    spec.SpaceAfterPt = GetRequiredJsonSingle(
+                        propertyItem.Value,
+                        propertyName & ".space_after_pt",
+                        commandIndex,
+                        0.0F,
+                        1584.0F,
+                        allowZero:=True)
+
+                Case "keep_with_next"
+                    spec.KeepWithNext = GetRequiredJsonBoolean(propertyItem.Value, propertyName & ".keep_with_next", commandIndex)
+
+                Case "keep_together"
+                    spec.KeepTogether = GetRequiredJsonBoolean(propertyItem.Value, propertyName & ".keep_together", commandIndex)
+
+                Case "page_break_before"
+                    spec.PageBreakBefore = GetRequiredJsonBoolean(propertyItem.Value, propertyName & ".page_break_before", commandIndex)
+
+                Case "list_type"
+                    If propertyItem.Value.Type <> Newtonsoft.Json.Linq.JTokenType.String Then
+                        Throw New System.InvalidOperationException($"Word command #{commandIndex} property '{propertyName}.list_type' must be a string.")
+                    End If
+                    Dim listType As System.String = If(propertyItem.Value.ToObject(Of System.String)(), "").Trim().ToLowerInvariant()
+                    If listType <> "bullet" AndAlso listType <> "number" AndAlso listType <> "none" Then
+                        Throw New System.InvalidOperationException(
+                            $"Word command #{commandIndex} property '{propertyName}.list_type' must be bullet, number, or none.")
+                    End If
+                    spec.ListType = listType
+
+                Case Else
+                    Throw New System.InvalidOperationException(
+                        $"Unsupported Word formatting property '{propertyItem.Name}' in '{propertyName}' of command #{commandIndex}.")
+            End Select
+        Next
+
+        If Not System.String.IsNullOrWhiteSpace(spec.StyleName) AndAlso
+           Not System.String.IsNullOrWhiteSpace(spec.BuiltinStyle) Then
+            Throw New System.InvalidOperationException(
+                $"Word command #{commandIndex} property '{propertyName}' cannot combine 'style' with 'builtin_style'.")
+        End If
+
+        If Not spec.HasAnySetting() Then
+            Throw New System.InvalidOperationException(
+                $"Word command #{commandIndex} property '{propertyName}' does not contain any supported formatting property.")
+        End If
+
+        Return spec
+    End Function
+
+    Private Function ParseJsonHighlightValue(
+        token As Newtonsoft.Json.Linq.JToken,
+        propertyName As System.String,
+        commandIndex As Integer,
+        allowAnyHighlight As Boolean) As System.String
+
+        If token Is Nothing Then
+            Throw New System.InvalidOperationException(
+                $"Word command #{commandIndex} property '{propertyName}' is missing.")
+        End If
+
+        If token.Type = Newtonsoft.Json.Linq.JTokenType.Boolean Then
+            Dim enabled As Boolean = token.ToObject(Of Boolean)()
+            If allowAnyHighlight Then Return If(enabled, "any", "none")
+            Return If(enabled, "yellow", "none")
+        End If
+
+        If token.Type <> Newtonsoft.Json.Linq.JTokenType.String Then
+            Throw New System.InvalidOperationException(
+                $"Word command #{commandIndex} property '{propertyName}' must be a boolean or a supported highlight-color string.")
+        End If
+
+        Dim normalized As System.String = If(token.ToObject(Of System.String)(), "").Trim().ToLowerInvariant().Replace("_", "").Replace("-", "").Replace(" ", "")
+        Select Case normalized
+            Case "none", "nohighlight", "yellow", "brightgreen", "turquoise", "pink", "blue", "red", "darkblue", "teal", "green", "violet", "darkred", "darkyellow", "gray50", "grey50", "gray25", "grey25", "black", "white"
+                If normalized = "nohighlight" Then normalized = "none"
+                If normalized = "grey50" Then normalized = "gray50"
+                If normalized = "grey25" Then normalized = "gray25"
+                Return normalized
+            Case "any"
+                If allowAnyHighlight Then Return "any"
+        End Select
+
+        Dim allowedText As System.String = If(
+            allowAnyHighlight,
+            "any, none, yellow, brightgreen, turquoise, pink, blue, red, darkblue, teal, green, violet, darkred, darkyellow, gray50, gray25, black, or white",
+            "none, yellow, brightgreen, turquoise, pink, blue, red, darkblue, teal, green, violet, darkred, darkyellow, gray50, gray25, black, or white")
+        Throw New System.InvalidOperationException(
+            $"Word command #{commandIndex} property '{propertyName}' must be {allowedText}.")
+    End Function
+
+    Private Function GetRequiredJsonSingle(
+        token As Newtonsoft.Json.Linq.JToken,
+        propertyName As System.String,
+        commandIndex As Integer,
+        minimumValue As Single,
+        maximumValue As Single,
+        allowZero As Boolean) As Single
+
+        If token Is Nothing OrElse
+           (token.Type <> Newtonsoft.Json.Linq.JTokenType.Integer AndAlso token.Type <> Newtonsoft.Json.Linq.JTokenType.Float) Then
+            Throw New System.InvalidOperationException(
+                $"Word command #{commandIndex} property '{propertyName}' must be a JSON number.")
+        End If
+
+        Dim value As Single = token.ToObject(Of Single)()
+        Dim belowMinimum As Boolean = If(allowZero, value < minimumValue, value <= minimumValue)
+
+        If System.Single.IsNaN(value) OrElse
+           System.Single.IsInfinity(value) OrElse
+           belowMinimum OrElse
+           value > maximumValue Then
+
+            Dim lowerBoundText As System.String = If(allowZero, $"at least {minimumValue}", $"greater than {minimumValue}")
+            Throw New System.InvalidOperationException(
+                $"Word command #{commandIndex} property '{propertyName}' must be {lowerBoundText} and at most {maximumValue}.")
+        End If
+
+        Return value
+    End Function
+
+    Private Function GetRequiredJsonBoolean(
+        token As Newtonsoft.Json.Linq.JToken,
+        propertyName As String,
+        commandIndex As Integer) As Boolean
+
+        If token Is Nothing OrElse token.Type <> Newtonsoft.Json.Linq.JTokenType.Boolean Then
+            Throw New System.InvalidOperationException(
+                $"Word command #{commandIndex} property '{propertyName}' must be a JSON boolean.")
+        End If
+
+        Return token.ToObject(Of Boolean)()
+    End Function
+
+    ''' <summary>
+    ''' Compatibility normalization for a common model-planning error: if the model emits
+    ''' the same replace/delete command multiple times with occurrence=1, each later command
+    ''' would otherwise be discarded as an exact duplicate. Merge only that narrow shape into
+    ''' one command starting at occurrence 1 with max_matches equal to the number of repeated
+    ''' commands. All substantive arguments and match-format criteria must be identical.
+    ''' Explicit max_matches commands and occurrence values other than 1 are never rewritten.
+    ''' </summary>
+    Private Function TryMergeRepeatedOccurrenceOneReplaceCommand(
+        results As System.Collections.Generic.List(Of ParsedCommand),
+        parsed As ParsedCommand) As Boolean
+
+        If results Is Nothing OrElse parsed Is Nothing Then Return False
+        If Not System.String.Equals(parsed.Command, "replace", System.StringComparison.OrdinalIgnoreCase) Then Return False
+        If parsed.MatchSpec Is Nothing OrElse
+           Not parsed.MatchSpec.Occurrence.HasValue OrElse
+           parsed.MatchSpec.Occurrence.Value <> 1 OrElse
+           parsed.MatchSpec.MaxMatches.HasValue Then
+            Return False
+        End If
+
+        Dim parsedFormatKey As System.String = If(parsed.FormatSpec Is Nothing, "", parsed.FormatSpec.GetDuplicateKey())
+        Dim parsedMatchFormatKey As System.String = If(parsed.MatchFormatSpec Is Nothing, "", parsed.MatchFormatSpec.GetDuplicateKey())
+
+        For Each existing As ParsedCommand In results
+            If existing Is Nothing OrElse
+               Not System.String.Equals(existing.Command, parsed.Command, System.StringComparison.OrdinalIgnoreCase) OrElse
+               existing.Argument1 <> parsed.Argument1 OrElse
+               existing.Argument2 <> parsed.Argument2 OrElse
+               existing.Target <> parsed.Target Then
+                Continue For
+            End If
+
+            Dim existingFormatKey As System.String = If(existing.FormatSpec Is Nothing, "", existing.FormatSpec.GetDuplicateKey())
+            Dim existingMatchFormatKey As System.String = If(existing.MatchFormatSpec Is Nothing, "", existing.MatchFormatSpec.GetDuplicateKey())
+            If existingFormatKey <> parsedFormatKey OrElse existingMatchFormatKey <> parsedMatchFormatKey Then Continue For
+
+            If existing.MatchSpec Is Nothing OrElse
+               Not existing.MatchSpec.Occurrence.HasValue OrElse
+               existing.MatchSpec.Occurrence.Value <> 1 Then
+                Continue For
+            End If
+
+            Dim existingRepresentsMerge As Boolean =
+                existing.RepeatedOccurrenceOneMergeCount >= 2 AndAlso
+                existing.MatchSpec.MaxMatches.HasValue AndAlso
+                existing.MatchSpec.MaxMatches.Value = existing.RepeatedOccurrenceOneMergeCount
+
+            Dim existingIsSingleOccurrenceOne As Boolean =
+                Not existing.MatchSpec.MaxMatches.HasValue AndAlso
+                existing.RepeatedOccurrenceOneMergeCount = 0
+
+            If Not existingIsSingleOccurrenceOne AndAlso Not existingRepresentsMerge Then Continue For
+
+            Dim mergedCount As System.Int32 =
+                If(existingRepresentsMerge, existing.RepeatedOccurrenceOneMergeCount, 1) + 1
+
+            existing.MatchSpec.MaxMatches = mergedCount
+            existing.RepeatedOccurrenceOneMergeCount = mergedCount
+
+            System.Diagnostics.Debug.WriteLine(
+                $"Normalized {mergedCount} identical occurrence=1 replace command(s) for '{parsed.Argument1}' into one max_matches={mergedCount} command.")
+            Return True
+        Next
+
+        Return False
+    End Function
+
+    Private Sub AddParsedCommandIfNotDuplicate(results As List(Of ParsedCommand), parsed As ParsedCommand)
+        If results Is Nothing OrElse parsed Is Nothing Then Return
+
+        ' Normalize the narrow repeated-occurrence=1 replace shape before generic exact
+        ' duplicate suppression. This preserves the model's intended cardinality instead
+        ' of silently dropping the second and later requested replacements.
+        If TryMergeRepeatedOccurrenceOneReplaceCommand(results, parsed) Then Return
+
+        ' Tables are distinct document actions even when their shape and anchor match.
+        If System.String.Equals(parsed.Command, "inserttable", System.StringComparison.OrdinalIgnoreCase) Then
+            results.Add(parsed)
+            Return
+        End If
+
+        Dim parsedFormatKey As System.String = If(parsed.FormatSpec Is Nothing, "", parsed.FormatSpec.GetDuplicateKey())
+        Dim parsedMatchFormatKey As System.String = If(parsed.MatchFormatSpec Is Nothing, "", parsed.MatchFormatSpec.GetDuplicateKey())
+        Dim parsedMatchKey As System.String = If(parsed.MatchSpec Is Nothing, "", parsed.MatchSpec.GetDuplicateKey())
+
+        If results.Any(
+            Function(existing)
+                Dim existingFormatKey As System.String = If(existing.FormatSpec Is Nothing, "", existing.FormatSpec.GetDuplicateKey())
+                Dim existingMatchFormatKey As System.String = If(existing.MatchFormatSpec Is Nothing, "", existing.MatchFormatSpec.GetDuplicateKey())
+                Dim existingMatchKey As System.String = If(existing.MatchSpec Is Nothing, "", existing.MatchSpec.GetDuplicateKey())
+                Return existing.Command.Equals(parsed.Command, System.StringComparison.OrdinalIgnoreCase) AndAlso
+                       existing.Argument1 = parsed.Argument1 AndAlso
+                       existing.Argument2 = parsed.Argument2 AndAlso
+                       existing.Target = parsed.Target AndAlso
+                       existing.JoinBefore = parsed.JoinBefore AndAlso
+                       existing.JoinAfter = parsed.JoinAfter AndAlso
+                       existingFormatKey = parsedFormatKey AndAlso
+                       existingMatchFormatKey = parsedMatchFormatKey AndAlso
+                       existingMatchKey = parsedMatchKey
+            End Function) Then
+            Return
+        End If
+
+        results.Add(parsed)
+    End Sub
+
+    ' -------------------------------------------------------------------------
+    ' LEGACY [#...#] COMMAND PARSER -- TEMPORARY MIGRATION FALLBACK
+    ' -------------------------------------------------------------------------
+    ' IMPORTANT REMOVAL INSTRUCTIONS FOR A FUTURE CLEANUP:
+    ' The code below exists ONLY so responses produced from old persisted/custom
+    ' SP_Add_ChatWord_Commands prompts remain executable during the JSON migration.
+    ' It must not become a second permanent protocol.
+    '
+    ' Remove the legacy parser only in one deliberate cleanup change, and perform ALL
+    ' of the following steps together:
+    '   1. Confirm that supported installations no longer require pre-JSON persisted
+    '      SP_Add_ChatWord_Commands output. The runtime prompt suffix may remain for old
+    '      custom wording, but the model must already have been emitting JSON reliably.
+    '   2. Delete ParseLegacyCommands(), RemoveLegacyCommands(), and
+    '      PrepareLegacyCommandParsingText() in this file.
+    '   3. In ParseCommands(), delete BOTH legacy fallback branches (the prepared internal
+    '      chat path and the direct public-API compatibility path) and replace them with
+    '      "Return New List(Of ParsedCommand)()". Keep the rule that a PRESENT BUT INVALID
+    '      redInkWordCommands envelope throws and never falls back.
+    '      Also remove the commandHarnessShouldRun compatibility use of
+    '      PrepareLegacyCommandParsingText() in btnSend_Click; after the migration window the
+    '      harness may be gated directly by parsedCommands.Count > 0 if that old no-command
+    '      side effect is intentionally retired.
+    '   4. In RemoveCommands(), remove the final RemoveLegacyCommands() call. Keep JSON
+    '      envelope removal unchanged so internal command data never reaches UI/history.
+    '   5. Remove any remaining [#...#] documentation/guidance references from Word-only
+    '      prompts/resources. Do NOT touch the independent Excel command protocol.
+    '   6. Re-run the JSON parser regression matrix, Word chat execution tests, tooling
+    '      TASK_STATUS/tool-call detection tests, and an Excel no-change smoke test.
+    '
+    ' Until those steps are intentionally completed, do not weaken or broaden this
+    ' parser. JSON always wins: if redInkWordCommands exists, these functions are never
+    ' allowed to execute commands from the same response.
+
+    ''' <summary>
+    ''' Legacy parser for the former [#verb: @@arg1@@ §§arg2§§ #] Word chat protocol.
+    ''' Called only when the JSON protocol marker is entirely absent.
+    ''' </summary>
+    Private Function ParseLegacyCommands(input As String) As List(Of ParsedCommand)
+        Dim results As New List(Of ParsedCommand)()
+
+        Try
+            Dim pattern As String = "\[#(?<cmd>[^:]+):\s*@@(?<arg1>(?:[^@]|@(?!@))*?)@@\s*(?:(?:§§|@@)(?<arg2>(?:[^@§]|@(?!@)|§(?!§))*?)(?:§§|@@))?\s*#?\]"
+            Dim regex As New Regex(pattern, RegexOptions.Singleline)
+
+            For Each matchItem As Match In regex.Matches(If(input, ""))
+                Dim parsed As New ParsedCommand() With {
+                    .IsLegacyCommand = True,
+                    .Command = matchItem.Groups("cmd").Value.Trim(),
+                    .Argument1 = CleanArgument(matchItem.Groups("arg1").Value),
+                    .Argument2 = CleanArgument(If(matchItem.Groups("arg2") IsNot Nothing, matchItem.Groups("arg2").Value, ""))
+                }
+
+                AddParsedCommandIfNotDuplicate(results, parsed)
+            Next
+        Catch ex As System.Exception
+            ' Preserve the former parser's failure behavior during the compatibility window.
+            ShowWordChatOperationError(
+                "ParseLegacyCommands", ex,
+                "The model's document-editing instructions could not be read reliably. " &
+                "Please try the request again. If the problem continues, choose a different AI model.")
+        End Try
+
+        Return results
+    End Function
+
+    ' =========================================================================
+    ' Command Removal
     ' =========================================================================
 
     ''' <summary>
-    ''' Removes bot command blocks from LLM response text.
-    ''' Pattern: [#command: @@argument1@@ §§argument2§§ #]
-    ''' Also collapses multiple consecutive line breaks to single newline.
+    ''' Removes the hidden Word command transport from text before rendering or storing it.
+    ''' JSON removal is exact: only an object rooted at redInkWordCommands is removed, so
+    ''' ordinary JSON examples in the visible answer remain untouched. Legacy blocks are
+    ''' also hidden during the migration, but are never executed when JSON is present.
     ''' </summary>
-    ''' <param name="input">Text potentially containing command blocks</param>
-    ''' <returns>Text with commands removed and whitespace normalized</returns>
     Public Function RemoveCommands(input As String) As String
         If input Is Nothing Then Return ""
 
         Dim output As String = input
+        Dim envelopeStart As Integer = -1
+        Dim envelopeLength As Integer = 0
+        Dim envelope As Newtonsoft.Json.Linq.JObject = Nothing
+        Dim hasJsonProtocolMarker As Boolean = False
+        Dim locateError As String = ""
 
-        Try
-            ' Keep this pattern aligned with ParseCommands (including the fault-tolerant parts):
-            ' - single @ is allowed inside the @@...@@ anchor
-            ' - single § is allowed inside the §§...§§ argument
-            ' - arg2 may open/close with either §§ or @@, and the final # before ] is optional
-            Dim commandPattern As String = "\s*[\r\n]*\s*\[#(?<cmd>[^:]+):\s*@@(?<arg1>(?:[^@]|@(?!@))*?)@@\s*(?:(?:§§|@@)(?<arg2>(?:[^@§]|@(?!@)|§(?!§))*?)(?:§§|@@))?\s*#?\]\s*[\r\n]*\s*"
-            Dim regex As New Regex(commandPattern, RegexOptions.Singleline)
-            output = regex.Replace(input, "")
+        If TryLocateJsonCommandEnvelope(
+            output,
+            envelopeStart,
+            envelopeLength,
+            envelope,
+            hasJsonProtocolMarker,
+            locateError) Then
 
-            ' Collapse 3+ consecutive line breaks to single newline
-            Dim whitespacePattern As String = "[\r\n]{3,}"
-            Dim collapseRegex As New Regex(whitespacePattern)
-            output = collapseRegex.Replace(output, Environment.NewLine)
+            ExpandJsonEnvelopeRemovalForMarkdownFence(output, envelopeStart, envelopeLength)
+            output = output.Remove(envelopeStart, envelopeLength)
+        End If
 
-        Catch ex As System.Exception
-            ShowCustomMessageBox("Error in RemoveCommands: " & ex.Message)
-        End Try
+        ' Hide legacy syntax during the compatibility window even when JSON was present.
+        ' Execution precedence is enforced separately in ParseCommands(): JSON exclusively wins.
+        output = RemoveLegacyCommands(output)
 
+        Dim whitespacePattern As String = "[\r\n]{3,}"
+        output = Regex.Replace(output, whitespacePattern, Environment.NewLine)
         Return output
     End Function
+
+    ''' <summary>
+    ''' If the model defensively wrapped the internal JSON object in a Markdown fence despite
+    ''' the prompt, expand the removal span to consume that fence only. Unrelated code fences
+    ''' elsewhere in the answer are never touched.
+    ''' </summary>
+    Private Sub ExpandJsonEnvelopeRemovalForMarkdownFence(
+        input As String,
+        ByRef envelopeStart As Integer,
+        ByRef envelopeLength As Integer)
+
+        If String.IsNullOrEmpty(input) OrElse envelopeStart < 0 OrElse envelopeLength <= 0 Then Return
+
+        Dim envelopeLineStart As Integer = input.LastIndexOf(ChrW(10), System.Math.Max(0, envelopeStart - 1))
+        If envelopeLineStart < 0 Then
+            envelopeLineStart = 0
+        Else
+            envelopeLineStart += 1
+        End If
+
+        Dim openingFenceStart As Integer = -1
+
+        ' Tolerate the unusual same-line form "```json { ... }" as well as the
+        ' normal Markdown form where the opening fence is on the immediately
+        ' preceding line. Do not scan farther back: that could consume an unrelated
+        ' code block when prose/blank lines exist between it and the command JSON.
+        Dim sameLinePrefix As String = input.Substring(envelopeLineStart, envelopeStart - envelopeLineStart).Trim()
+        If sameLinePrefix.Equals("```", StringComparison.Ordinal) OrElse
+           sameLinePrefix.Equals("```json", StringComparison.OrdinalIgnoreCase) Then
+            openingFenceStart = envelopeLineStart
+        ElseIf envelopeLineStart > 0 Then
+            Dim previousLineEnd As Integer = envelopeLineStart - 1
+            While previousLineEnd > 0 AndAlso
+                  (input(previousLineEnd - 1) = ChrW(13) OrElse input(previousLineEnd - 1) = ChrW(10))
+                previousLineEnd -= 1
+            End While
+
+            Dim previousLineStart As Integer = input.LastIndexOf(ChrW(10), System.Math.Max(0, previousLineEnd - 1))
+            If previousLineStart < 0 Then
+                previousLineStart = 0
+            Else
+                previousLineStart += 1
+            End If
+
+            Dim previousLine As String = input.Substring(previousLineStart, previousLineEnd - previousLineStart).Trim()
+            If previousLine.Equals("```", StringComparison.Ordinal) OrElse
+               previousLine.Equals("```json", StringComparison.OrdinalIgnoreCase) Then
+                openingFenceStart = previousLineStart
+            End If
+        End If
+
+        If openingFenceStart < 0 Then Return
+
+        Dim originalEnd As Integer = envelopeStart + envelopeLength
+        Dim closeStart As Integer = originalEnd
+        While closeStart < input.Length AndAlso
+              (input(closeStart) = " "c OrElse input(closeStart) = ChrW(9) OrElse
+               input(closeStart) = ChrW(13) OrElse input(closeStart) = ChrW(10))
+            closeStart += 1
+        End While
+
+        If closeStart + 3 > input.Length OrElse
+           Not input.Substring(closeStart, 3).Equals("```", StringComparison.Ordinal) Then
+            Return
+        End If
+
+        Dim closeLineEnd As Integer = input.IndexOf(ChrW(10), closeStart + 3)
+        If closeLineEnd < 0 Then closeLineEnd = input.Length
+
+        Dim closingLine As String = input.Substring(closeStart, closeLineEnd - closeStart).Trim()
+        If Not closingLine.Equals("```", StringComparison.Ordinal) Then Return
+
+        envelopeStart = openingFenceStart
+        envelopeLength = closeLineEnd - openingFenceStart
+        If closeLineEnd < input.Length Then envelopeLength += 1
+    End Sub
+
+    ''' <summary>
+    ''' Removes only the former Word [#...#] blocks. See the legacy-removal checklist above.
+    ''' </summary>
+    Private Function RemoveLegacyCommands(input As String) As String
+        If input Is Nothing Then Return ""
+
+        Try
+            Dim commandPattern As String = "\s*[\r\n]*\s*\[#(?<cmd>[^:]+):\s*@@(?<arg1>(?:[^@]|@(?!@))*?)@@\s*(?:(?:§§|@@)(?<arg2>(?:[^@§]|@(?!@)|§(?!§))*?)(?:§§|@@))?\s*#?\]\s*[\r\n]*\s*"
+            Return Regex.Replace(input, commandPattern, "", RegexOptions.Singleline)
+        Catch ex As System.Exception
+            ' Preserve the former RemoveCommands behavior during the compatibility window.
+            ShowWordChatOperationError(
+                "RemoveLegacyCommands", ex,
+                "The model response could not be displayed correctly. Please try your request again.")
+            Return input
+        End Try
+    End Function
+
 
     ' =========================================================================
     ' Command Execution State Fields
@@ -2949,11 +4971,48 @@ Public Class frmAIChat
     ''' <summary>Tracks commands that failed execution for error reporting to chat</summary>
     Private FailedCommandsList As New List(Of String)()
 
+    ' A failed surgical edit may already have applied some tracked changes. Preserve that
+    ' uncertainty at the chat-command boundary instead of blindly executing a later edit.
+    Private _lastReplaceMayHavePartialChanges As System.Boolean = False
+    Private _lastReplaceFailureMessage As System.String = System.String.Empty
+
     ''' <summary>Start position of the last document action performed by chat commands.</summary>
     Private _lastActionStart As Integer = -1
 
     ''' <summary>End position of the last document action performed by chat commands.</summary>
     Private _lastActionEnd As Integer = -1
+
+    ''' <summary>
+    ''' Live Word range for the most recent successful document-changing action. A Word Range
+    ''' is kept only in memory (never as a document bookmark) so later edits can move the range
+    ''' with the document without adding persistent metadata to the user's file.
+    ''' </summary>
+    Private _lastActionRange As Microsoft.Office.Interop.Word.Range = Nothing
+
+    ''' <summary>Monotonic counter incremented whenever RememberLastActionRange stores a new range.</summary>
+    Private _lastActionSerial As Integer = 0
+    Private _lastActionDocumentName As System.String = ""
+    Private _lastActionDocumentFullName As System.String = ""
+
+    ''' <summary>
+    ''' ID of the most recent unambiguous single-range change. An empty value means the
+    ''' latest modifying command affected zero/multiple ranges or is otherwise unsuitable
+    ''' for target=last_change. Specific older change:cN references remain usable.
+    ''' </summary>
+    Private _lastRecentWordChangeId As System.String = ""
+
+    Private Const MaxRecentWordChanges As Integer = 8
+    Private _recentWordChangeSequence As Integer = 0
+
+    Private NotInheritable Class RecentWordChange
+        Public Property Id As System.String
+        Public Property Operation As System.String
+        Public Property DocumentName As System.String
+        Public Property DocumentFullName As System.String
+        Public Property Range As Microsoft.Office.Interop.Word.Range
+    End Class
+
+    Private ReadOnly _recentWordChanges As New System.Collections.Generic.List(Of RecentWordChange)()
 
     Private Function IsSameChatWordDocument(first As Microsoft.Office.Interop.Word.Document,
                                                 second As Microsoft.Office.Interop.Word.Document) As Boolean
@@ -3010,7 +5069,9 @@ Public Class frmAIChat
     ' =========================================================================
 
     ''' <summary>
-    ''' Stores the last active-document range changed or commented by a chat command.
+    ''' Stores the latest changed Word range in memory. This is deliberately not persisted as
+    ''' a Word bookmark or document property: the user document must not gain hidden artefacts.
+    ''' Word keeps the live Range aligned when surrounding document text moves during the chat.
     ''' </summary>
     Private Sub RememberLastActionRange(startPos As Integer, endPos As Integer)
         Try
@@ -3020,17 +5081,306 @@ Public Class frmAIChat
             Dim safeStart As Integer = System.Math.Max(doc.Content.Start, System.Math.Min(startPos, doc.Content.End))
             Dim safeEnd As Integer = System.Math.Max(doc.Content.Start, System.Math.Min(endPos, doc.Content.End))
 
-            If safeEnd < safeStart Then
-                safeEnd = safeStart
-            End If
+            If safeEnd < safeStart Then safeEnd = safeStart
 
+            Dim newRange As Microsoft.Office.Interop.Word.Range = doc.Range(safeStart, safeEnd)
+
+            ReleaseWordRange(_lastActionRange)
+            _lastActionRange = Nothing
+            _lastActionRange = newRange
             _lastActionStart = safeStart
             _lastActionEnd = safeEnd
+            GetDocumentIdentity(doc, _lastActionDocumentName, _lastActionDocumentFullName)
+            _lastActionSerial += 1
         Catch
+            ReleaseWordRange(_lastActionRange)
+            _lastActionRange = Nothing
             _lastActionStart = -1
             _lastActionEnd = -1
+            _lastActionDocumentName = ""
+            _lastActionDocumentFullName = ""
         End Try
     End Sub
+
+    Private Sub ReleaseWordRange(range As Microsoft.Office.Interop.Word.Range)
+        If range Is Nothing Then Return
+        Try
+            System.Runtime.InteropServices.Marshal.ReleaseComObject(range)
+        Catch
+        End Try
+    End Sub
+
+    Private Function GetDocumentIdentity(
+        doc As Microsoft.Office.Interop.Word.Document,
+        ByRef documentName As System.String,
+        ByRef documentFullName As System.String) As Boolean
+
+        documentName = ""
+        documentFullName = ""
+        If doc Is Nothing Then Return False
+
+        Try
+            documentName = If(doc.Name, "")
+        Catch
+            documentName = ""
+        End Try
+
+        Try
+            documentFullName = If(doc.FullName, "")
+        Catch
+            documentFullName = ""
+        End Try
+
+        Return documentName <> "" OrElse documentFullName <> ""
+    End Function
+
+    Private Function DocumentIdentityMatches(
+        storedDocumentName As System.String,
+        storedDocumentFullName As System.String,
+        documentName As System.String,
+        documentFullName As System.String) As Boolean
+
+        If Not System.String.IsNullOrWhiteSpace(documentFullName) AndAlso
+           Not System.String.IsNullOrWhiteSpace(storedDocumentFullName) Then
+            Return System.String.Equals(
+                storedDocumentFullName,
+                documentFullName,
+                System.StringComparison.OrdinalIgnoreCase)
+        End If
+
+        Return Not System.String.IsNullOrWhiteSpace(documentName) AndAlso
+               System.String.Equals(
+                   storedDocumentName,
+                   documentName,
+                   System.StringComparison.OrdinalIgnoreCase)
+    End Function
+
+    Private Function RecentChangeMatchesDocument(
+        change As RecentWordChange,
+        documentName As System.String,
+        documentFullName As System.String) As Boolean
+
+        If change Is Nothing Then Return False
+        Return DocumentIdentityMatches(
+            change.DocumentName,
+            change.DocumentFullName,
+            documentName,
+            documentFullName)
+    End Function
+
+    ''' <summary>
+    ''' Commits one command-level recent-change reference only when a successful command
+    ''' produced exactly one contiguous changed range. Multi-range commands deliberately do
+    ''' not publish a last_change target because choosing one sub-edit would be ambiguous.
+    ''' </summary>
+    Private Sub CommitRecentWordChange(
+        operation As System.String,
+        actionSerialBeforeCommand As Integer)
+
+        ' A recent-change reference must identify exactly one contiguous changed range.
+        ' Commands that changed several occurrences are intentionally not collapsed to the
+        ' last physical sub-edit because that would make target=last_change misleading.
+        If _lastActionSerial - actionSerialBeforeCommand <> 1 OrElse _lastActionRange Is Nothing Then Return
+
+        Dim duplicateRange As Microsoft.Office.Interop.Word.Range = Nothing
+        Try
+            Dim documentName As System.String = _lastActionDocumentName
+            Dim documentFullName As System.String = _lastActionDocumentFullName
+            If System.String.IsNullOrWhiteSpace(documentName) AndAlso
+               System.String.IsNullOrWhiteSpace(documentFullName) Then Return
+
+            duplicateRange = _lastActionRange.Duplicate
+            If duplicateRange Is Nothing Then Return
+
+            _recentWordChangeSequence += 1
+            Dim change As New RecentWordChange() With {
+                .Id = "c" & _recentWordChangeSequence.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                .Operation = If(operation, "").Trim().ToLowerInvariant(),
+                .DocumentName = documentName,
+                .DocumentFullName = documentFullName,
+                .Range = duplicateRange
+            }
+            duplicateRange = Nothing
+            _recentWordChanges.Add(change)
+            _lastRecentWordChangeId = change.Id
+
+            While _recentWordChanges.Count > MaxRecentWordChanges
+                Dim oldest As RecentWordChange = _recentWordChanges(0)
+                _recentWordChanges.RemoveAt(0)
+                If oldest IsNot Nothing Then
+                    ReleaseWordRange(oldest.Range)
+                    oldest.Range = Nothing
+                End If
+            End While
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine($"CommitRecentWordChange failed: {ex.Message}")
+        Finally
+            If duplicateRange IsNot Nothing Then
+                ReleaseWordRange(duplicateRange)
+                duplicateRange = Nothing
+            End If
+        End Try
+    End Sub
+
+    Private Sub ClearRecentWordChangeHistory()
+        For Each change As RecentWordChange In _recentWordChanges
+            If change IsNot Nothing Then
+                ReleaseWordRange(change.Range)
+                change.Range = Nothing
+            End If
+        Next
+        _recentWordChanges.Clear()
+        ReleaseWordRange(_lastActionRange)
+        _lastActionRange = Nothing
+        ' Preserve _lastActionStart/_lastActionEnd for the pre-existing legacy goto-last
+        ' behavior. Only the new JSON recent-change session state is cleared here.
+        _lastActionSerial = 0
+        _lastActionDocumentName = ""
+        _lastActionDocumentFullName = ""
+        _lastRecentWordChangeId = ""
+        _recentWordChangeSequence = 0
+    End Sub
+
+    Private Function IsRangeInsideRequestedScope(
+        range As Microsoft.Office.Interop.Word.Range,
+        restrictToScope As Boolean,
+        scopeStart As Integer,
+        scopeEnd As Integer) As Boolean
+
+        If range Is Nothing Then Return False
+        If Not restrictToScope Then Return True
+        If scopeStart < 0 OrElse scopeEnd < scopeStart Then Return False
+
+        Try
+            Return range.Start >= scopeStart AndAlso range.End <= scopeEnd
+        Catch
+            Return False
+        End Try
+    End Function
+
+    Private Function ResolveRecentWordChangeRange(
+        target As System.String,
+        doc As Microsoft.Office.Interop.Word.Document,
+        Optional restrictToScope As Boolean = False,
+        Optional scopeStart As Integer = -1,
+        Optional scopeEnd As Integer = -1) As Microsoft.Office.Interop.Word.Range
+
+        If doc Is Nothing Then Return Nothing
+
+        Dim normalized As System.String = If(target, "").Trim().ToLowerInvariant()
+        If normalized = "last_action" Then normalized = "last_change"
+
+        Dim documentName As System.String = ""
+        Dim documentFullName As System.String = ""
+        GetDocumentIdentity(doc, documentName, documentFullName)
+
+        If normalized = "last_change" Then
+            If System.String.IsNullOrWhiteSpace(_lastRecentWordChangeId) Then Return Nothing
+
+            For index As Integer = _recentWordChanges.Count - 1 To 0 Step -1
+                Dim candidate As RecentWordChange = _recentWordChanges(index)
+                If candidate Is Nothing Then Continue For
+                If Not System.String.Equals(candidate.Id, _lastRecentWordChangeId, System.StringComparison.OrdinalIgnoreCase) Then Continue For
+                If Not RecentChangeMatchesDocument(candidate, documentName, documentFullName) Then Return Nothing
+                Try
+                    If candidate.Range IsNot Nothing AndAlso
+                       IsRangeInsideRequestedScope(candidate.Range, restrictToScope, scopeStart, scopeEnd) Then
+                        Return candidate.Range.Duplicate
+                    End If
+                Catch
+                    ' A closed/replaced Word document can invalidate a stored COM range.
+                End Try
+                Return Nothing
+            Next
+
+            Return Nothing
+        End If
+
+        If normalized.StartsWith("change:c", System.StringComparison.Ordinal) Then
+            Dim id As System.String = normalized.Substring("change:".Length)
+            For index As Integer = _recentWordChanges.Count - 1 To 0 Step -1
+                Dim candidate As RecentWordChange = _recentWordChanges(index)
+                If candidate Is Nothing Then Continue For
+                If Not System.String.Equals(candidate.Id, id, System.StringComparison.OrdinalIgnoreCase) Then Continue For
+                If Not RecentChangeMatchesDocument(candidate, documentName, documentFullName) Then Return Nothing
+                Try
+                    If candidate.Range IsNot Nothing AndAlso
+                       IsRangeInsideRequestedScope(candidate.Range, restrictToScope, scopeStart, scopeEnd) Then
+                        Return candidate.Range.Duplicate
+                    End If
+                    Return Nothing
+                Catch
+                    Return Nothing
+                End Try
+            Next
+        End If
+
+        Return Nothing
+    End Function
+
+    ''' <summary>
+    ''' Adds a compact, runtime-only list of recent change references to the system prompt.
+    ''' This is not written to redink.ini. IDs are stable only for the lifetime of this chat.
+    ''' </summary>
+    Private Function GetRecentWordChangeReferencePrompt(
+        targetDocumentName As System.String,
+        targetDocumentFullName As System.String,
+        restrictToSelection As Boolean,
+        targetSelectionStart As Integer,
+        targetSelectionEnd As Integer) As System.String
+
+        Dim matching As New System.Collections.Generic.List(Of RecentWordChange)()
+
+        For Each change As RecentWordChange In _recentWordChanges
+            If Not RecentChangeMatchesDocument(change, targetDocumentName, targetDocumentFullName) Then Continue For
+            Try
+                If change.Range Is Nothing Then Continue For
+                Dim rangeStartProbe As Integer = change.Range.Start
+                Dim rangeEndProbe As Integer = change.Range.End
+                If rangeStartProbe < 0 OrElse rangeEndProbe < rangeStartProbe Then Continue For
+                If restrictToSelection AndAlso
+                   (targetSelectionStart < 0 OrElse targetSelectionEnd < targetSelectionStart OrElse
+                    rangeStartProbe < targetSelectionStart OrElse rangeEndProbe > targetSelectionEnd) Then
+                    Continue For
+                End If
+                matching.Add(change)
+            Catch
+                ' Closed/replaced documents invalidate their session-local Word Range.
+            End Try
+        Next
+
+        If matching.Count = 0 Then Return ""
+
+        Dim firstIndex As Integer = System.Math.Max(0, matching.Count - MaxRecentWordChanges)
+        Dim items As New System.Collections.Generic.List(Of System.String)()
+
+        For index As Integer = firstIndex To matching.Count - 1
+            Dim change As RecentWordChange = matching(index)
+            Dim operationLabel As System.String = If(change.Operation, "").Trim().ToLowerInvariant()
+            If System.String.IsNullOrWhiteSpace(operationLabel) Then operationLabel = "change"
+            items.Add("change:" & change.Id & "(" & operationLabel & ")")
+        Next
+
+        Dim lastChangeAvailableInScope As Boolean = False
+        If Not System.String.IsNullOrWhiteSpace(_lastRecentWordChangeId) Then
+            For Each change As RecentWordChange In matching
+                If change IsNot Nothing AndAlso
+                   System.String.Equals(change.Id, _lastRecentWordChangeId, System.StringComparison.OrdinalIgnoreCase) Then
+                    lastChangeAvailableInScope = True
+                    Exit For
+                End If
+            Next
+        End If
+
+        Dim lastChangeGuidance As System.String = If(
+            lastChangeAvailableInScope,
+            " target=last_change is available and refers to the latest unambiguous single-range change in this scope.",
+            " target=last_change is currently unavailable in this scope; use an exact listed change:cN target or a text search instead.")
+
+        Return " RECENT WORD CHANGE REFERENCES (session-local, oldest to newest, valid for the current command scope): " &
+               System.String.Join("; ", items) & "." & lastChangeGuidance &
+               " Use only exact listed change:cN targets and never invent a change ID. These references are host-side session state, not model memory, and disappear when the chat is cleared or closed. The labels describe only the operation type; rely on the conversation and document context for meaning."
+    End Function
 
     ''' <summary>
     ''' Selects a range in the currently active document and scrolls it into view.
@@ -3053,58 +5403,143 @@ Public Class frmAIChat
             app.Activate()
             doc.Activate()
 
-            Dim targetRange As Microsoft.Office.Interop.Word.Range = doc.Range(safeStart, safeEnd)
-            targetRange.Select()
-
+            Dim targetRange As Microsoft.Office.Interop.Word.Range = Nothing
             Try
-                Dim scrollTarget As Object = targetRange
-                app.ActiveWindow.ScrollIntoView(scrollTarget, True)
-            Catch
-                ' Selection is already sufficient if ScrollIntoView is unavailable.
-            End Try
+                targetRange = doc.Range(safeStart, safeEnd)
+                targetRange.Select()
 
-            Return True
-        Catch ex As Exception
+                Try
+                    Dim scrollTarget As System.Object = targetRange
+                    app.ActiveWindow.ScrollIntoView(scrollTarget, True)
+                Catch
+                    ' Selection is already sufficient if ScrollIntoView is unavailable.
+                End Try
+
+                Return True
+            Finally
+                If targetRange IsNot Nothing Then ReleaseWordRange(targetRange)
+            End Try
+        Catch ex As System.Exception
             Debug.WriteLine($"SelectAndShowActiveDocumentRange failed: {ex.Message}")
             Return False
         End Try
     End Function
 
-    ''' <summary>
-    ''' Executes a navigation command in the currently active document.
-    ''' Use "last" to jump to the last chat-command action.
-    ''' </summary>
-    Private Function ExecuteGotoCommand(targetText As String, Optional onlySelection As Boolean = False) As Boolean
-        Try
-            targetText = CleanArgument(targetText)
+    Private Function IsMatchOrdinalSelected(
+        matchOrdinal As Integer,
+        matchSpec As ParsedCommandMatchSpec,
+        defaultMaxMatches As Integer) As Boolean
 
-            If String.IsNullOrWhiteSpace(targetText) OrElse
-           targetText.Equals("last", StringComparison.OrdinalIgnoreCase) OrElse
-           targetText.Equals("lastaction", StringComparison.OrdinalIgnoreCase) OrElse
-           targetText.Equals("last action", StringComparison.OrdinalIgnoreCase) OrElse
-           targetText.Equals("last point of action", StringComparison.OrdinalIgnoreCase) Then
+        Dim startOccurrence As Integer = If(matchSpec Is Nothing, 1, matchSpec.GetStartOccurrence())
+        Dim maxMatches As Integer = If(matchSpec Is Nothing, defaultMaxMatches, matchSpec.GetEffectiveMaxMatches(defaultMaxMatches))
+        Dim lastExclusive As Long = CLng(startOccurrence) + CLng(maxMatches)
 
-                If _lastActionStart >= 0 AndAlso _lastActionEnd >= _lastActionStart Then
-                    Return SelectAndShowActiveDocumentRange(_lastActionStart, _lastActionEnd)
-                End If
+        Return matchOrdinal >= startOccurrence AndAlso CLng(matchOrdinal) < lastExclusive
+    End Function
 
-                Debug.WriteLine("Goto: No last action range is available.")
-                Return False
+    Private Function HasReachedSelectedMatchLimit(
+        appliedCount As Integer,
+        matchSpec As ParsedCommandMatchSpec,
+        defaultMaxMatches As Integer) As Boolean
+
+        Dim maxMatches As Integer = If(matchSpec Is Nothing, defaultMaxMatches, matchSpec.GetEffectiveMaxMatches(defaultMaxMatches))
+        Return maxMatches <> System.Int32.MaxValue AndAlso appliedCount >= maxMatches
+    End Function
+
+    Private Function SelectMatchPositions(
+        matches As System.Collections.Generic.List(Of (Start As Integer, [End] As Integer)),
+        matchSpec As ParsedCommandMatchSpec,
+        defaultMaxMatches As Integer) As System.Collections.Generic.List(Of (Start As Integer, [End] As Integer))
+
+        Dim selected As New System.Collections.Generic.List(Of (Start As Integer, [End] As Integer))()
+        If matches Is Nothing OrElse matches.Count = 0 Then Return selected
+
+        For index As Integer = 0 To matches.Count - 1
+            Dim ordinal As Integer = index + 1
+            If IsMatchOrdinalSelected(ordinal, matchSpec, defaultMaxMatches) Then
+                selected.Add(matches(index))
+                If HasReachedSelectedMatchLimit(selected.Count, matchSpec, defaultMaxMatches) Then Exit For
             End If
+        Next
 
+        Return selected
+    End Function
+
+    ''' <summary>
+    ''' Executes a navigation command in the currently active document. A JSON target can
+    ''' point to a remembered recent change; legacy search="last" remains supported.
+    ''' </summary>
+    Private Function ExecuteGotoCommand(
+        targetText As System.String,
+        Optional onlySelection As Boolean = False,
+        Optional matchSpec As ParsedCommandMatchSpec = Nothing,
+        Optional matchFormatSpec As ParsedCommandFormat = Nothing,
+        Optional target As System.String = "",
+        Optional targetSelectionStart As Integer = -1,
+        Optional targetSelectionEnd As Integer = -1) As Boolean
+
+        Try
             Dim app As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
             If app Is Nothing OrElse app.Documents Is Nothing OrElse app.Documents.Count = 0 Then Return False
 
             Dim doc As Microsoft.Office.Interop.Word.Document = app.ActiveDocument
             If doc Is Nothing Then Return False
 
-            targetText = DecodeParagraphMarks(targetText)
+            Dim effectiveTarget As System.String = If(target, "").Trim()
+            If effectiveTarget <> "" Then
+                Dim rememberedRange As Microsoft.Office.Interop.Word.Range = Nothing
+                Try
+                    rememberedRange = ResolveRecentWordChangeRange(
+                        effectiveTarget,
+                        doc,
+                        onlySelection,
+                        targetSelectionStart,
+                        targetSelectionEnd)
+                    If rememberedRange Is Nothing Then
+                        System.Diagnostics.Debug.WriteLine($"Goto: Recent-change target '{effectiveTarget}' is unavailable.")
+                        Return False
+                    End If
+                    Return SelectAndShowActiveDocumentRange(rememberedRange.Start, rememberedRange.End)
+                Finally
+                    If rememberedRange IsNot Nothing Then ReleaseWordRange(rememberedRange)
+                End Try
+            End If
+
+            ' ParsedCommand arguments are normalized by the protocol parser before execution.
+            If System.String.IsNullOrWhiteSpace(targetText) OrElse
+               targetText.Equals("last", System.StringComparison.OrdinalIgnoreCase) OrElse
+               targetText.Equals("lastaction", System.StringComparison.OrdinalIgnoreCase) OrElse
+               targetText.Equals("last action", System.StringComparison.OrdinalIgnoreCase) OrElse
+               targetText.Equals("last point of action", System.StringComparison.OrdinalIgnoreCase) Then
+
+                Dim rememberedRange As Microsoft.Office.Interop.Word.Range = Nothing
+                Try
+                    rememberedRange = ResolveRecentWordChangeRange("last_change", doc)
+                    If rememberedRange IsNot Nothing Then
+                        Return SelectAndShowActiveDocumentRange(rememberedRange.Start, rememberedRange.End)
+                    End If
+                Finally
+                    If rememberedRange IsNot Nothing Then ReleaseWordRange(rememberedRange)
+                End Try
+
+                ' Preserve the pre-existing legacy goto-last fallback even when the new
+                ' session-local JSON change history has been cleared.
+                If _lastActionStart >= 0 AndAlso _lastActionEnd >= _lastActionStart Then
+                    Return SelectAndShowActiveDocumentRange(_lastActionStart, _lastActionEnd)
+                End If
+
+                System.Diagnostics.Debug.WriteLine("Goto: No last action range is available.")
+                Return False
+            End If
 
             Dim sel As Microsoft.Office.Interop.Word.Selection = doc.Application.Selection
+            If sel Is Nothing Then Return False
+
             Dim scopeStart As Integer
             Dim scopeEnd As Integer
 
-            If onlySelection AndAlso sel IsNot Nothing AndAlso Not String.IsNullOrEmpty(sel.Text) Then
+            If onlySelection Then
+                If sel.Start >= sel.End Then Return False
                 scopeStart = sel.Range.Start
                 scopeEnd = sel.Range.End
             Else
@@ -3112,26 +5547,569 @@ Public Class frmAIChat
                 scopeEnd = doc.Content.End
             End If
 
-            Try
-                sel.SetRange(scopeStart, scopeEnd)
-            Catch exScope As System.Exception
-                Debug.WriteLine($"ExecuteGotoCommand: pre-find SetRange failed: {exScope.Message}")
-            End Try
+            Dim occurrenceOrdinal As Integer = 0
+            Dim nextSearchStart As Integer = scopeStart
 
-            If Globals.ThisAddIn.FindLongTextInChunks(targetText, sel, True) Then
+            Do While nextSearchStart < scopeEnd
+                Try
+                    sel.SetRange(nextSearchStart, scopeEnd)
+                Catch exScope As System.Exception
+                    System.Diagnostics.Debug.WriteLine($"ExecuteGotoCommand: SetRange failed: {exScope.Message}")
+                    Exit Do
+                End Try
+
+                If Not Globals.ThisAddIn.FindLongTextInChunks(targetText, sel, True) Then Exit Do
+                If sel.Start < nextSearchStart OrElse sel.Start >= scopeEnd OrElse sel.End > scopeEnd Then Exit Do
+
                 Dim foundStart As Integer = sel.Start
                 Dim foundEnd As Integer = sel.End
-                Return SelectAndShowActiveDocumentRange(foundStart, foundEnd)
-            End If
+                Dim candidateRange As Microsoft.Office.Interop.Word.Range = Nothing
+                Dim matchesFormat As Boolean = False
+                Try
+                    candidateRange = sel.Range.Duplicate
+                    matchesFormat = RangeMatchesFormatSpec(candidateRange, matchFormatSpec)
+                Finally
+                    If candidateRange IsNot Nothing Then ReleaseWordRange(candidateRange)
+                End Try
 
-            Debug.WriteLine($"Goto: Target text not found: '{targetText}'.")
+                If matchesFormat Then
+                    occurrenceOrdinal += 1
+                    If IsMatchOrdinalSelected(occurrenceOrdinal, matchSpec, 1) Then
+                        Return SelectAndShowActiveDocumentRange(foundStart, foundEnd)
+                    End If
+                End If
+
+                Dim progressedStart As Integer = System.Math.Max(foundEnd, nextSearchStart + 1)
+                If progressedStart >= scopeEnd Then Exit Do
+                nextSearchStart = progressedStart
+            Loop
+
+            System.Diagnostics.Debug.WriteLine($"Goto: Requested occurrence of target text was not found: '{targetText}'.")
             Return False
 
-        Catch ex As Exception
-            Debug.WriteLine($"ExecuteGotoCommand failed: {ex.Message}")
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine($"ExecuteGotoCommand failed: {ex.Message}")
             Return False
         End Try
     End Function
+
+    Private Function TryGetBuiltinStyle(
+        builtinStyleName As System.String,
+        ByRef builtinStyle As Microsoft.Office.Interop.Word.WdBuiltinStyle) As Boolean
+
+        Select Case If(builtinStyleName, "").Trim().ToLowerInvariant()
+            Case "normal"
+                builtinStyle = Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleNormal
+            Case "heading1"
+                builtinStyle = Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading1
+            Case "heading2"
+                builtinStyle = Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading2
+            Case "heading3"
+                builtinStyle = Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading3
+            Case "heading4"
+                builtinStyle = Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading4
+            Case "heading5"
+                builtinStyle = Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading5
+            Case "heading6"
+                builtinStyle = Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleHeading6
+            Case Else
+                Return False
+        End Select
+
+        Return True
+    End Function
+
+    Private Function TryGetHighlightColorIndex(
+        highlightName As System.String,
+        ByRef colorIndex As Microsoft.Office.Interop.Word.WdColorIndex) As Boolean
+
+        Select Case If(highlightName, "").Trim().ToLowerInvariant()
+            Case "none"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdNoHighlight
+            Case "yellow"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdYellow
+            Case "brightgreen"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdBrightGreen
+            Case "turquoise"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdTurquoise
+            Case "pink"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdPink
+            Case "blue"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdBlue
+            Case "red"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdRed
+            Case "darkblue"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdDarkBlue
+            Case "teal"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdTeal
+            Case "green"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdGreen
+            Case "violet"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdViolet
+            Case "darkred"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdDarkRed
+            Case "darkyellow"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdDarkYellow
+            Case "gray50"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdGray50
+            Case "gray25"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdGray25
+            Case "black"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdBlack
+            Case "white"
+                colorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdWhite
+            Case Else
+                Return False
+        End Select
+
+        Return True
+    End Function
+
+    Private Function ConvertHexColorToWordColor(hexColor As System.String) As Microsoft.Office.Interop.Word.WdColor
+        Dim hexValue As System.String = If(hexColor, "").Trim().TrimStart("#"c)
+        Dim rgb As Integer = System.Convert.ToInt32(hexValue, 16)
+        Dim red As Integer = (rgb >> 16) And &HFF
+        Dim green As Integer = (rgb >> 8) And &HFF
+        Dim blue As Integer = rgb And &HFF
+        Return CType((blue << 16) Or (green << 8) Or red, Microsoft.Office.Interop.Word.WdColor)
+    End Function
+
+    Private Function RangeMatchesFormatSpec(
+        targetRange As Microsoft.Office.Interop.Word.Range,
+        matchFormatSpec As ParsedCommandFormat) As Boolean
+
+        If matchFormatSpec Is Nothing OrElse Not matchFormatSpec.HasAnySetting() Then Return True
+        If targetRange Is Nothing Then Return False
+
+        Try
+            If Not System.String.IsNullOrWhiteSpace(matchFormatSpec.StyleName) OrElse
+               Not System.String.IsNullOrWhiteSpace(matchFormatSpec.BuiltinStyle) Then
+
+                Dim rangeStyleObject As System.Object = Nothing
+                Dim rangeStyle As Microsoft.Office.Interop.Word.Style = Nothing
+                Try
+                    rangeStyleObject = targetRange.Style
+                    rangeStyle = TryCast(rangeStyleObject, Microsoft.Office.Interop.Word.Style)
+                    If rangeStyle Is Nothing Then Return False
+
+                    If Not System.String.IsNullOrWhiteSpace(matchFormatSpec.StyleName) Then
+                        Dim actualStyleName As System.String = If(rangeStyle.NameLocal, "")
+                        If Not actualStyleName.Equals(matchFormatSpec.StyleName, System.StringComparison.OrdinalIgnoreCase) Then Return False
+                    End If
+
+                    If Not System.String.IsNullOrWhiteSpace(matchFormatSpec.BuiltinStyle) Then
+                        Dim builtinStyle As Microsoft.Office.Interop.Word.WdBuiltinStyle
+                        If Not TryGetBuiltinStyle(matchFormatSpec.BuiltinStyle, builtinStyle) Then Return False
+
+                        Dim expectedStyle As Microsoft.Office.Interop.Word.Style = Nothing
+                        Try
+                            expectedStyle = CType(targetRange.Document.Styles(builtinStyle), Microsoft.Office.Interop.Word.Style)
+                            If expectedStyle Is Nothing OrElse
+                               Not If(rangeStyle.NameLocal, "").Equals(If(expectedStyle.NameLocal, ""), System.StringComparison.OrdinalIgnoreCase) Then Return False
+                        Finally
+                            If expectedStyle IsNot Nothing Then
+                                Try
+                                    System.Runtime.InteropServices.Marshal.ReleaseComObject(expectedStyle)
+                                Catch
+                                End Try
+                            End If
+                        End Try
+                    End If
+                Finally
+                    If rangeStyle IsNot Nothing Then
+                        Try
+                            System.Runtime.InteropServices.Marshal.ReleaseComObject(rangeStyle)
+                        Catch
+                        End Try
+                    End If
+                End Try
+            End If
+
+            If Not System.String.IsNullOrWhiteSpace(matchFormatSpec.FontName) Then
+                Dim actualFontName As System.String = If(targetRange.Font.Name, "")
+                If actualFontName = CStr(Microsoft.Office.Interop.Word.WdConstants.wdUndefined) OrElse
+                   Not actualFontName.Equals(matchFormatSpec.FontName, System.StringComparison.OrdinalIgnoreCase) Then Return False
+            End If
+
+            If matchFormatSpec.Bold.HasValue Then
+                Dim actualBold As Integer = targetRange.Font.Bold
+                If actualBold = CInt(Microsoft.Office.Interop.Word.WdConstants.wdUndefined) OrElse
+                   (actualBold <> 0) <> matchFormatSpec.Bold.Value Then Return False
+            End If
+
+            If matchFormatSpec.Italic.HasValue Then
+                Dim actualItalic As Integer = targetRange.Font.Italic
+                If actualItalic = CInt(Microsoft.Office.Interop.Word.WdConstants.wdUndefined) OrElse
+                   (actualItalic <> 0) <> matchFormatSpec.Italic.Value Then Return False
+            End If
+
+            If matchFormatSpec.Underline.HasValue Then
+                Dim actualUnderline As Microsoft.Office.Interop.Word.WdUnderline = targetRange.Font.Underline
+                If actualUnderline = CType(Microsoft.Office.Interop.Word.WdConstants.wdUndefined, Microsoft.Office.Interop.Word.WdUnderline) Then Return False
+                Dim isUnderlined As Boolean = actualUnderline <> Microsoft.Office.Interop.Word.WdUnderline.wdUnderlineNone
+                If isUnderlined <> matchFormatSpec.Underline.Value Then Return False
+            End If
+
+            If matchFormatSpec.FontSizePt.HasValue Then
+                Dim actualFontSize As Single = targetRange.Font.Size
+                If actualFontSize = CSng(Microsoft.Office.Interop.Word.WdConstants.wdUndefined) OrElse
+                   System.Math.Abs(CDbl(actualFontSize - matchFormatSpec.FontSizePt.Value)) > 0.01R Then Return False
+            End If
+
+            If Not System.String.IsNullOrWhiteSpace(matchFormatSpec.FontColor) Then
+                Dim actualFontColor As Microsoft.Office.Interop.Word.WdColor = targetRange.Font.Color
+                If CInt(actualFontColor) = CInt(Microsoft.Office.Interop.Word.WdConstants.wdUndefined) OrElse
+                   actualFontColor <> ConvertHexColorToWordColor(matchFormatSpec.FontColor) Then Return False
+            End If
+
+            If Not System.String.IsNullOrWhiteSpace(matchFormatSpec.Highlight) Then
+                Dim actualHighlight As Integer = CInt(targetRange.HighlightColorIndex)
+                If matchFormatSpec.Highlight.Equals("any", System.StringComparison.OrdinalIgnoreCase) Then
+                    If actualHighlight = CInt(Microsoft.Office.Interop.Word.WdColorIndex.wdNoHighlight) OrElse
+                       actualHighlight = CInt(Microsoft.Office.Interop.Word.WdConstants.wdUndefined) Then Return False
+                Else
+                    Dim expectedHighlight As Microsoft.Office.Interop.Word.WdColorIndex
+                    If Not TryGetHighlightColorIndex(matchFormatSpec.Highlight, expectedHighlight) Then Return False
+                    If actualHighlight <> CInt(expectedHighlight) Then Return False
+                End If
+            End If
+
+            If Not System.String.IsNullOrWhiteSpace(matchFormatSpec.Alignment) Then
+                Dim expectedAlignment As Microsoft.Office.Interop.Word.WdParagraphAlignment
+                Select Case matchFormatSpec.Alignment.ToLowerInvariant()
+                    Case "left"
+                        expectedAlignment = Microsoft.Office.Interop.Word.WdParagraphAlignment.wdAlignParagraphLeft
+                    Case "center"
+                        expectedAlignment = Microsoft.Office.Interop.Word.WdParagraphAlignment.wdAlignParagraphCenter
+                    Case "right"
+                        expectedAlignment = Microsoft.Office.Interop.Word.WdParagraphAlignment.wdAlignParagraphRight
+                    Case "justify"
+                        expectedAlignment = Microsoft.Office.Interop.Word.WdParagraphAlignment.wdAlignParagraphJustify
+                    Case Else
+                        Return False
+                End Select
+                If targetRange.ParagraphFormat.Alignment <> expectedAlignment Then Return False
+            End If
+
+            If matchFormatSpec.SpaceBeforePt.HasValue Then
+                Dim actualSpaceBefore As Single = targetRange.ParagraphFormat.SpaceBefore
+                If actualSpaceBefore = CSng(Microsoft.Office.Interop.Word.WdConstants.wdUndefined) OrElse
+                   System.Math.Abs(CDbl(actualSpaceBefore - matchFormatSpec.SpaceBeforePt.Value)) > 0.01R Then Return False
+            End If
+
+            If matchFormatSpec.SpaceAfterPt.HasValue Then
+                Dim actualSpaceAfter As Single = targetRange.ParagraphFormat.SpaceAfter
+                If actualSpaceAfter = CSng(Microsoft.Office.Interop.Word.WdConstants.wdUndefined) OrElse
+                   System.Math.Abs(CDbl(actualSpaceAfter - matchFormatSpec.SpaceAfterPt.Value)) > 0.01R Then Return False
+            End If
+
+            If matchFormatSpec.KeepWithNext.HasValue Then
+                Dim actualKeepWithNext As Integer = targetRange.ParagraphFormat.KeepWithNext
+                If actualKeepWithNext = CInt(Microsoft.Office.Interop.Word.WdConstants.wdUndefined) OrElse
+                   (actualKeepWithNext <> 0) <> matchFormatSpec.KeepWithNext.Value Then Return False
+            End If
+
+            If matchFormatSpec.KeepTogether.HasValue Then
+                Dim actualKeepTogether As Integer = targetRange.ParagraphFormat.KeepTogether
+                If actualKeepTogether = CInt(Microsoft.Office.Interop.Word.WdConstants.wdUndefined) OrElse
+                   (actualKeepTogether <> 0) <> matchFormatSpec.KeepTogether.Value Then Return False
+            End If
+
+            If matchFormatSpec.PageBreakBefore.HasValue Then
+                Dim actualPageBreakBefore As Integer = targetRange.ParagraphFormat.PageBreakBefore
+                If actualPageBreakBefore = CInt(Microsoft.Office.Interop.Word.WdConstants.wdUndefined) OrElse
+                   (actualPageBreakBefore <> 0) <> matchFormatSpec.PageBreakBefore.Value Then Return False
+            End If
+
+            If Not System.String.IsNullOrWhiteSpace(matchFormatSpec.ListType) Then
+                Dim actualListType As Microsoft.Office.Interop.Word.WdListType = targetRange.ListFormat.ListType
+                Select Case matchFormatSpec.ListType.ToLowerInvariant()
+                    Case "none"
+                        If actualListType <> Microsoft.Office.Interop.Word.WdListType.wdListNoNumbering Then Return False
+                    Case "bullet"
+                        If actualListType <> Microsoft.Office.Interop.Word.WdListType.wdListBullet AndAlso
+                           actualListType <> Microsoft.Office.Interop.Word.WdListType.wdListPictureBullet Then Return False
+                    Case "number"
+                        If actualListType = Microsoft.Office.Interop.Word.WdListType.wdListNoNumbering OrElse
+                           actualListType = Microsoft.Office.Interop.Word.WdListType.wdListBullet OrElse
+                           actualListType = Microsoft.Office.Interop.Word.WdListType.wdListPictureBullet OrElse
+                           actualListType = Microsoft.Office.Interop.Word.WdListType.wdListMixedNumbering Then Return False
+                    Case Else
+                        Return False
+                End Select
+            End If
+
+            Return True
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine($"RangeMatchesFormatSpec failed: {ex.Message}")
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Applies native Word formatting to an exact text anchor while preserving omitted
+    ''' properties. The search scope follows the same selection/document rules as the
+    ''' existing chat commands, and the formatted range becomes the last action target.
+    ''' </summary>
+    Private Function ApplyFormatSpecToRange(
+        targetRange As Microsoft.Office.Interop.Word.Range,
+        formatSpec As ParsedCommandFormat) As Boolean
+
+        If targetRange Is Nothing OrElse formatSpec Is Nothing OrElse Not formatSpec.HasAnySetting() Then Return False
+
+        Try
+            If Not System.String.IsNullOrWhiteSpace(formatSpec.BuiltinStyle) Then
+                Dim builtinStyle As Microsoft.Office.Interop.Word.WdBuiltinStyle
+                If Not TryGetBuiltinStyle(formatSpec.BuiltinStyle, builtinStyle) Then Return False
+
+                Try
+                    Dim styleValue As System.Object = builtinStyle
+                    targetRange.Style = styleValue
+                Catch ex As System.Exception
+                    Debug.WriteLine($"Format: Built-in Word style '{formatSpec.BuiltinStyle}' could not be applied: {ex.Message}")
+                    Return False
+                End Try
+            End If
+
+            If Not System.String.IsNullOrWhiteSpace(formatSpec.StyleName) Then
+                Try
+                    Dim styleName As System.Object = formatSpec.StyleName
+                    targetRange.Style = styleName
+                Catch ex As System.Exception
+                    Debug.WriteLine($"Format: Word style '{formatSpec.StyleName}' could not be applied: {ex.Message}")
+                    Return False
+                End Try
+            End If
+
+            If Not System.String.IsNullOrWhiteSpace(formatSpec.FontName) Then
+                targetRange.Font.Name = formatSpec.FontName
+            End If
+
+            If formatSpec.Bold.HasValue Then targetRange.Font.Bold = If(formatSpec.Bold.Value, -1, 0)
+            If formatSpec.Italic.HasValue Then targetRange.Font.Italic = If(formatSpec.Italic.Value, -1, 0)
+            If formatSpec.Underline.HasValue Then
+                targetRange.Font.Underline = If(
+                    formatSpec.Underline.Value,
+                    Microsoft.Office.Interop.Word.WdUnderline.wdUnderlineSingle,
+                    Microsoft.Office.Interop.Word.WdUnderline.wdUnderlineNone)
+            End If
+            If formatSpec.FontSizePt.HasValue Then targetRange.Font.Size = formatSpec.FontSizePt.Value
+
+            If Not System.String.IsNullOrWhiteSpace(formatSpec.FontColor) Then
+                targetRange.Font.Color = ConvertHexColorToWordColor(formatSpec.FontColor)
+            End If
+
+            If Not System.String.IsNullOrWhiteSpace(formatSpec.Highlight) Then
+                Dim highlightColor As Microsoft.Office.Interop.Word.WdColorIndex
+                If Not TryGetHighlightColorIndex(formatSpec.Highlight, highlightColor) Then Return False
+                targetRange.HighlightColorIndex = highlightColor
+            End If
+
+            Select Case If(formatSpec.Alignment, "").ToLowerInvariant()
+                Case "left"
+                    targetRange.ParagraphFormat.Alignment = Microsoft.Office.Interop.Word.WdParagraphAlignment.wdAlignParagraphLeft
+                Case "center"
+                    targetRange.ParagraphFormat.Alignment = Microsoft.Office.Interop.Word.WdParagraphAlignment.wdAlignParagraphCenter
+                Case "right"
+                    targetRange.ParagraphFormat.Alignment = Microsoft.Office.Interop.Word.WdParagraphAlignment.wdAlignParagraphRight
+                Case "justify"
+                    targetRange.ParagraphFormat.Alignment = Microsoft.Office.Interop.Word.WdParagraphAlignment.wdAlignParagraphJustify
+            End Select
+
+            If formatSpec.SpaceBeforePt.HasValue Then targetRange.ParagraphFormat.SpaceBefore = formatSpec.SpaceBeforePt.Value
+            If formatSpec.SpaceAfterPt.HasValue Then targetRange.ParagraphFormat.SpaceAfter = formatSpec.SpaceAfterPt.Value
+            If formatSpec.KeepWithNext.HasValue Then targetRange.ParagraphFormat.KeepWithNext = If(formatSpec.KeepWithNext.Value, -1, 0)
+            If formatSpec.KeepTogether.HasValue Then targetRange.ParagraphFormat.KeepTogether = If(formatSpec.KeepTogether.Value, -1, 0)
+            If formatSpec.PageBreakBefore.HasValue Then targetRange.ParagraphFormat.PageBreakBefore = If(formatSpec.PageBreakBefore.Value, -1, 0)
+
+            Select Case If(formatSpec.ListType, "").ToLowerInvariant()
+                Case "bullet"
+                    targetRange.ListFormat.ApplyBulletDefault()
+                Case "number"
+                    targetRange.ListFormat.ApplyNumberDefault()
+                Case "none"
+                    targetRange.ListFormat.RemoveNumbers()
+            End Select
+
+            RememberLastActionRange(targetRange.Start, targetRange.End)
+            Return True
+        Catch ex As System.Exception
+            Debug.WriteLine($"ApplyFormatSpecToRange failed: {ex.Message}")
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Applies native Word formatting either to an exact text anchor or to the range
+    ''' changed by a remembered successful chat-document action. Search-based
+    ''' formatting can target a specific occurrence and/or a bounded number of occurrences.
+    ''' Omitted selector fields preserve the original behavior of formatting only the first
+    ''' eligible non-TOC match.
+    ''' </summary>
+    Private Function ExecuteFormatCommand(
+        searchText As System.String,
+        formatSpec As ParsedCommandFormat,
+        Optional onlySelection As Boolean = False,
+        Optional matchSpec As ParsedCommandMatchSpec = Nothing,
+        Optional matchFormatSpec As ParsedCommandFormat = Nothing,
+        Optional target As System.String = "",
+        Optional targetSelectionStart As Integer = -1,
+        Optional targetSelectionEnd As Integer = -1) As Boolean
+
+        If formatSpec Is Nothing OrElse Not formatSpec.HasAnySetting() Then Return False
+
+        Try
+            Dim app As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
+            If app Is Nothing OrElse app.Documents Is Nothing OrElse app.Documents.Count = 0 Then Return False
+
+            Dim doc As Microsoft.Office.Interop.Word.Document = app.ActiveDocument
+            If doc Is Nothing Then Return False
+
+            If Not System.String.IsNullOrWhiteSpace(target) Then
+                Dim recentRange As Microsoft.Office.Interop.Word.Range = Nothing
+                Try
+                    recentRange = ResolveRecentWordChangeRange(
+                        target,
+                        doc,
+                        onlySelection,
+                        targetSelectionStart,
+                        targetSelectionEnd)
+                    If recentRange Is Nothing Then
+                        System.Diagnostics.Debug.WriteLine($"Format: Recent-change target '{target}' is unavailable.")
+                        Return False
+                    End If
+
+                    ' A live Word Range can collapse if the user later deletes its text.
+                    ' Formatting a collapsed range would alter insertion-point formatting rather
+                    ' than visible document text, so require a still-materialized target range.
+                    If recentRange.Start >= recentRange.End Then
+                        System.Diagnostics.Debug.WriteLine($"Format: Recent-change target '{target}' no longer spans document text and was not formatted.")
+                        Return False
+                    End If
+
+                    ' Recent-change targets must obey the same TOC protection as search-based
+                    ' format commands. A remembered range can originate from an older action,
+                    ' so never assume that it is safe merely because the host still tracks it.
+                    If TocEndIfInside(recentRange, doc) > 0 Then
+                        System.Diagnostics.Debug.WriteLine($"Format: Recent-change target '{target}' is inside a table of contents and was not formatted.")
+                        Return False
+                    End If
+
+                    Return ApplyFormatSpecToRange(recentRange, formatSpec)
+                Finally
+                    If recentRange IsNot Nothing Then ReleaseWordRange(recentRange)
+                End Try
+            End If
+
+            If System.String.IsNullOrWhiteSpace(searchText) Then Return False
+
+            Dim selection As Microsoft.Office.Interop.Word.Selection = app.Selection
+            If selection Is Nothing Then Return False
+
+            Dim scopeStart As Integer
+            Dim scopeEnd As Integer
+
+            If onlySelection Then
+                If selection.Start >= selection.End Then Return False
+                scopeStart = selection.Start
+                scopeEnd = selection.End
+            Else
+                scopeStart = doc.Content.Start
+                scopeEnd = doc.Content.End
+            End If
+
+            Dim nextSearchStart As Integer = scopeStart
+            Dim eligibleOrdinal As Integer = 0
+            Dim formattedCount As Integer = 0
+
+            Do While nextSearchStart < scopeEnd
+                selection.SetRange(nextSearchStart, scopeEnd)
+                If Not Globals.ThisAddIn.FindLongTextInChunks(searchText, selection, True) Then Exit Do
+                If selection.Start < nextSearchStart OrElse selection.Start >= scopeEnd OrElse selection.End > scopeEnd Then Exit Do
+
+                Dim candidateRange As Microsoft.Office.Interop.Word.Range = selection.Range.Duplicate
+                Try
+                    Dim candidateStart As Integer = candidateRange.Start
+                    Dim candidateEnd As Integer = candidateRange.End
+                    Dim tocEnd As Integer = TocEndIfInside(candidateRange, doc)
+
+                    If tocEnd > 0 Then
+                        Dim tocContinue As Integer = System.Math.Min(tocEnd, scopeEnd)
+                        If tocContinue <= nextSearchStart Then tocContinue = nextSearchStart + 1
+                        If tocContinue >= scopeEnd Then Exit Do
+                        nextSearchStart = tocContinue
+                        Continue Do
+                    End If
+
+                    If Not RangeMatchesFormatSpec(candidateRange, matchFormatSpec) Then
+                        Dim filteredProgressStart As Integer = System.Math.Max(candidateEnd, nextSearchStart + 1)
+                        If filteredProgressStart >= scopeEnd Then Exit Do
+                        nextSearchStart = filteredProgressStart
+                        Continue Do
+                    End If
+
+                    eligibleOrdinal += 1
+                    If IsMatchOrdinalSelected(eligibleOrdinal, matchSpec, 1) Then
+                        If ApplyFormatSpecToRange(candidateRange, formatSpec) Then
+                            formattedCount += 1
+                        End If
+
+                        If HasReachedSelectedMatchLimit(formattedCount, matchSpec, 1) Then Exit Do
+                    End If
+
+                    Dim progressedStart As Integer = System.Math.Max(candidateEnd, nextSearchStart + 1)
+                    If progressedStart >= scopeEnd Then Exit Do
+                    nextSearchStart = progressedStart
+                Finally
+                    Try
+                        System.Runtime.InteropServices.Marshal.ReleaseComObject(candidateRange)
+                    Catch
+                    End Try
+                End Try
+            Loop
+
+            If formattedCount = 0 Then
+                Debug.WriteLine($"Format: Requested occurrence(s) not found outside a table of contents: '{searchText}'.")
+            End If
+
+            Return formattedCount > 0
+        Catch ex As System.Exception
+            Debug.WriteLine($"ExecuteFormatCommand failed: {ex.Message}")
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Compatibility overload retaining the pre-migration public API. Raw response text is
+    ''' parsed through the current JSON-first/legacy-fallback protocol, then routed into the
+    ''' validated command execution overload below. Internal chat flow does not use this overload.
+    ''' </summary>
+    Public Sub ExecuteAnyCommands(teststring As String,
+                                  OnlySelection As Boolean,
+                                  Optional targetDocumentName As String = "",
+                                  Optional targetDocumentFullName As String = "",
+                                  Optional targetSelectionStart As Integer = -1,
+                                  Optional targetSelectionEnd As Integer = -1)
+
+        Dim commands As List(Of ParsedCommand)
+
+        Try
+            commands = ParseCommands(If(teststring, ""), prepareLegacyInput:=False)
+        Catch ex As System.Exception
+            ' Preserve the old public entry point's non-throwing parser behavior. The normal
+            ' chat path validates JSON earlier and reports invalid command data in-chat.
+            ShowWordChatOperationError("ExecuteAnyCommands.ParseCommands", ex, InvalidWordCommandUserMessage)
+            Return
+        End Try
+
+        ExecuteAnyCommands(
+            commands,
+            OnlySelection,
+            targetDocumentName,
+            targetDocumentFullName,
+            targetSelectionStart,
+            targetSelectionEnd)
+    End Sub
 
     ''' <summary>
     ''' Executes parsed bot commands on the active Word document.
@@ -3139,14 +6117,14 @@ Public Class frmAIChat
     ''' tracks success/failure for each command, removes marker characters,
     ''' and reports failures to chat. Supports ESC to abort.
     ''' </summary>
-    ''' <param name="teststring">LLM response containing embedded commands</param>
+    ''' <param name="commands">Fully parsed and batch-validated commands</param>
     ''' <param name="OnlySelection">True to restrict operations to current selection</param>
     ''' <remarks>
     ''' Execution flow:
-    ''' 1. Parse commands from teststring
+    ''' 1. Receive commands that were fully validated and argument-normalized before entering the Word mutation layer
     ''' 2. Ensure selection is in main document story (not header/footer/comment)
     ''' 3. Set Word view to Final (hide deletions)
-    ''' 4. Iterate commands: find, replace, insert, insertbefore, insertafter, addcomment, replycomment
+    ''' 4. Iterate commands: find, replace, insert, insertbefore, insertafter, addcomment, replycomment, format
     ''' 5. Track success/failure for each command
     ''' 6. Remove MarkerChar cleanup markers
     ''' 7. Restore view settings
@@ -3155,28 +6133,29 @@ Public Class frmAIChat
     ''' ESC key polling via GetAsyncKeyState allows user to abort mid-execution.
     ''' InfoBox displays progress for operations that modify document (replace, insert*).
     ''' </remarks>
-    Public Sub ExecuteAnyCommands(teststring As String,
+    Public Sub ExecuteAnyCommands(commands As List(Of ParsedCommand),
                                   OnlySelection As Boolean,
                                   Optional targetDocumentName As String = "",
                                   Optional targetDocumentFullName As String = "",
                                   Optional targetSelectionStart As Integer = -1,
                                   Optional targetSelectionEnd As Integer = -1)
 
-        Dim commands = ParseCommands(teststring)
+        If commands Is Nothing Then commands = New List(Of ParsedCommand)()
         Dim topmost As Boolean = Me.TopMost
 
         Me.TopMost = False
 
         CommandsList = ""
         FailedCommandsList.Clear()
+        _verifiedChatBlocksInBatch = 0
         Dim LastCommandsList As String = ""
         Dim activateDocumentAfterCommands As Boolean = False
 
         Dim wordApp As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
         Dim doc As Microsoft.Office.Interop.Word.Document = ResolveChatCommandTargetDocument(targetDocumentName, targetDocumentFullName)
         If doc Is Nothing Then
-            FailedCommandsList.Add("Failed: The Word document that was active when this request started is no longer open.")
-            ReportFailedCommands()
+            FailedCommandsList.Add("The Word document selected for this request is no longer open. Open or activate it and try again.")
+            ReportFailedCommands(noChangesMade:=True)
             Me.TopMost = topmost
             Return
         End If
@@ -3198,11 +6177,16 @@ Public Class frmAIChat
             End If
 
             If targetSelectionStart >= 0 AndAlso wordApp.Selection IsNot Nothing Then
+                If OnlySelection AndAlso (targetSelectionEnd <= targetSelectionStart OrElse targetSelectionStart < doc.Content.Start OrElse targetSelectionEnd > doc.Content.End) Then Throw New System.InvalidOperationException("The pinned scope is unavailable.")
                 Dim safeStart As Integer = System.Math.Max(doc.Content.Start, System.Math.Min(targetSelectionStart, doc.Content.End))
                 Dim safeEnd As Integer = System.Math.Max(doc.Content.Start, System.Math.Min(If(targetSelectionEnd >= 0, targetSelectionEnd, safeStart), doc.Content.End))
                 If safeEnd < safeStart Then safeEnd = safeStart
-                wordApp.Selection.SetRange(safeStart, safeEnd)
+                doc.Range(safeStart, safeEnd).Select()
+            ElseIf OnlySelection AndAlso wordApp.Selection IsNot Nothing Then
+                targetSelectionStart = wordApp.Selection.Start
+                targetSelectionEnd = wordApp.Selection.End
             End If
+            If OnlySelection AndAlso (wordApp.Selection Is Nothing OrElse wordApp.Selection.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory OrElse wordApp.Selection.Start <> targetSelectionStart OrElse wordApp.Selection.End <> targetSelectionEnd OrElse targetSelectionEnd <= targetSelectionStart) Then Throw New System.InvalidOperationException("The pinned selection is unavailable.")
 
             targetContextEstablished = IsSameChatWordDocument(wordApp.ActiveDocument, doc)
         Catch ex As System.Exception
@@ -3210,8 +6194,8 @@ Public Class frmAIChat
         End Try
 
         If Not targetContextEstablished Then
-            FailedCommandsList.Add("Failed: Could not establish the Word document that was active when this request started.")
-            ReportFailedCommands()
+            FailedCommandsList.Add("Word could not access the document selected for this request. Activate that document and try again.")
+            ReportFailedCommands(noChangesMade:=True)
             Try
                 If focusLeaseActive AndAlso userWindowBeforeCommands IsNot Nothing Then userWindowBeforeCommands.Activate()
             Catch ex As System.Exception
@@ -3226,6 +6210,27 @@ Public Class frmAIChat
             Me.TopMost = topmost
             Return
         End If
+
+        ' Refuse a provably conflicting plan *before* Word is modified. A second
+        ' caller may bypass the chat's model-side revision pass, so check here too.
+        Try
+            Dim conflict As System.String = FindOverlappingWordReplacementPlan(
+                commands, doc, OnlySelection, targetSelectionStart, targetSelectionEnd)
+            If Not System.String.IsNullOrEmpty(conflict) Then
+                SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb("WordChat", "Rejected Word command plan before mutation: " & conflict)
+                FailedCommandsList.Add("Unsafe Word edit plan was not executed: " & conflict &
+                    " No Word chat command in this batch was executed.")
+                commands = New System.Collections.Generic.List(Of ParsedCommand)()
+            End If
+        Catch ex As System.Exception
+            ' A failed validation is not proof of safety. Do not silently execute an
+            ' unvalidated multi-replacement batch if the snapshot is unavailable.
+            If commands.Exists(Function(pc) System.String.Equals(pc.Command, "replace", System.StringComparison.OrdinalIgnoreCase)) Then
+                FailedCommandsList.Add("Word could not validate the multi-replacement plan before editing (" & ex.GetType().Name & "). No Word changes were made.")
+                SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb("WordChat", "Word replacement preflight unavailable: " & ex.ToString())
+                commands = New System.Collections.Generic.List(Of ParsedCommand)()
+            End If
+        End Try
 
         Try
         ' ═════════════════════════════════════════════════════════════════════════════
@@ -3264,19 +6269,38 @@ Public Class frmAIChat
             End If
         End If
 
+        Dim batchDocEnd As System.Int32 = doc.Content.End
+        Dim batchSelectionEnd As System.Int32 = targetSelectionEnd
+        Dim commandOrdinal As System.Int32 = 0
         For Each pc In commands
+            commandOrdinal += 1
             Debug.WriteLine($"Command: '{pc.Command}' with '{pc.Argument1}' '{pc.Argument2}'")
 
-            If (GetAsyncKeyState(System.Windows.Forms.Keys.Escape) And 1) <> 0 Then
+            If (GetAsyncKeyState(System.Windows.Forms.Keys.Escape) And &H8000) <> 0 Then
+                FailedCommandsList.Add("Command execution cancelled before the remaining actions.")
                 Exit For
             End If
 
             Dim commandSuccess As Boolean = True
             Dim commandDescription As String = ""
+            Dim actionSerialBeforeCommand As Integer = _lastActionSerial
 
-            If Not OnlySelection Then
+            If OnlySelection Then
+                targetSelectionEnd = batchSelectionEnd + (doc.Content.End - batchDocEnd)
+                If Not IsSameChatWordDocument(wordApp.ActiveDocument, doc) OrElse targetSelectionEnd <= targetSelectionStart OrElse targetSelectionEnd > doc.Content.End Then
+                    FailedCommandsList.Add("The selected edit scope is no longer available. No wider search was attempted.")
+                    Exit For
+                End If
+                Dim keepInsertionPoint As System.Boolean = commandOrdinal > 1 AndAlso (pc.Command = "insert" OrElse (pc.Command = "inserttable" AndAlso pc.TablePosition = "cursor")) AndAlso
+                    wordApp.Selection.StoryType = Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory AndAlso wordApp.Selection.Start >= targetSelectionStart AndAlso wordApp.Selection.End <= targetSelectionEnd
+                If Not keepInsertionPoint Then doc.Range(targetSelectionStart, targetSelectionEnd).Select()
+                If Not keepInsertionPoint AndAlso (wordApp.Selection.Start <> targetSelectionStart OrElse wordApp.Selection.End <> targetSelectionEnd OrElse wordApp.Selection.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory) Then
+                    FailedCommandsList.Add("Word could not restore the exact selection. Remaining commands stopped.")
+                    Exit For
+                End If
+            Else
                 Select Case pc.Command.ToLower()
-                    Case "find", "addcomment", "replace", "insertafter", "insertbefore", "goto", "jump", "show", "select"
+                    Case "find", "addcomment", "replace", "insertafter", "insertbefore", "goto", "jump", "show", "select", "format"
                         Try
                             If wordApp IsNot Nothing AndAlso wordApp.ActiveDocument IsNot Nothing AndAlso wordApp.Selection IsNot Nothing Then
                                 wordApp.Selection.SetRange(wordApp.ActiveDocument.Content.Start, wordApp.ActiveDocument.Content.End)
@@ -3293,21 +6317,28 @@ Public Class frmAIChat
                     CommandsList = commandDescription & Environment.NewLine & CommandsList
                     LastCommandsList = CommandsList
                     System.Threading.Thread.Sleep(500)
-                    commandSuccess = ExecuteFindCommand(pc.Argument1, OnlySelection)
+                    If pc.IsLegacyCommand Then
+                        ' Preserve the legacy search-as-highlight contract only for old
+                        ' bracket-protocol commands. JSON find is non-mutating navigation.
+                        commandSuccess = ExecuteFindCommand(pc.Argument1, OnlySelection, pc.MatchSpec, pc.MatchFormatSpec)
+                    Else
+                        commandSuccess = ExecuteGotoCommand(pc.Argument1, OnlySelection, pc.MatchSpec, pc.MatchFormatSpec)
+                        activateDocumentAfterCommands = activateDocumentAfterCommands OrElse commandSuccess
+                    End If
 
                 Case "addcomment"
                     commandDescription = $"Adding comment '{pc.Argument2}' to the text '{pc.Argument1}'"
                     CommandsList = commandDescription & Environment.NewLine & CommandsList
                     LastCommandsList = CommandsList
                     System.Threading.Thread.Sleep(500)
-                    commandSuccess = ExecuteAddComment(pc.Argument1, pc.Argument2, OnlySelection)
+                    commandSuccess = ExecuteAddComment(pc.Argument1, pc.Argument2, OnlySelection, pc.MatchSpec, pc.MatchFormatSpec)
 
                 Case "replycomment"
                     commandDescription = $"Replying to comment '{pc.Argument1}' with '{pc.Argument2}'"
                     CommandsList = commandDescription & Environment.NewLine & CommandsList
                     LastCommandsList = CommandsList
                     System.Threading.Thread.Sleep(500)
-                    commandSuccess = ExecuteReplyToCommentByIdToken(pc.Argument1, pc.Argument2)
+                    commandSuccess = ExecuteReplyToCommentByIdToken(pc.Argument1, pc.Argument2, If(OnlySelection, doc.Range(targetSelectionStart, targetSelectionEnd), Nothing))
 
                 Case "replace"
                     If String.IsNullOrEmpty(pc.Argument2) Then
@@ -3319,7 +6350,7 @@ Public Class frmAIChat
                     LastCommandsList = CommandsList
                     InfoBox.ShowInfoBox("Executing bot commands ('Esc' to abort):" & Environment.NewLine & Environment.NewLine & CommandsList)
                     System.Threading.Thread.Sleep(500)
-                    commandSuccess = ExecuteReplaceCommand(pc.Argument1, pc.Argument2, OnlySelection, MarkerChar)
+                    commandSuccess = ExecuteReplaceCommand(pc.Argument1, pc.Argument2, OnlySelection, MarkerChar, pc.MatchSpec, pc.MatchFormatSpec, If(OnlySelection, doc.Range(targetSelectionStart, targetSelectionEnd), Nothing))
 
                 Case "insertafter"
                     commandDescription = $"Inserting '{pc.Argument2}' after '{pc.Argument1}'"
@@ -3327,7 +6358,7 @@ Public Class frmAIChat
                     LastCommandsList = CommandsList
                     InfoBox.ShowInfoBox("Executing bot commands ('Esc' to abort):" & Environment.NewLine & Environment.NewLine & CommandsList)
                     System.Threading.Thread.Sleep(500)
-                    commandSuccess = ExecuteInsertBeforeAfterCommand(pc.Argument1, pc.Argument2, OnlySelection, False)
+                    commandSuccess = ExecuteInsertBeforeAfterCommand(pc.Argument1, pc.Argument2, OnlySelection, False, pc.MatchSpec, pc.MatchFormatSpec, pc.JoinBefore, pc.JoinAfter)
 
                 Case "insertbefore"
                     commandDescription = $"Inserting '{pc.Argument2}' before '{pc.Argument1}'"
@@ -3335,7 +6366,7 @@ Public Class frmAIChat
                     LastCommandsList = CommandsList
                     InfoBox.ShowInfoBox("Executing bot commands ('Esc' to abort):" & Environment.NewLine & Environment.NewLine & CommandsList)
                     System.Threading.Thread.Sleep(500)
-                    commandSuccess = ExecuteInsertBeforeAfterCommand(pc.Argument1, pc.Argument2, OnlySelection, True)
+                    commandSuccess = ExecuteInsertBeforeAfterCommand(pc.Argument1, pc.Argument2, OnlySelection, True, pc.MatchSpec, pc.MatchFormatSpec, pc.JoinBefore, pc.JoinAfter)
 
                 Case "insert"
                     commandDescription = $"Inserting '{pc.Argument1}'"
@@ -3344,23 +6375,93 @@ Public Class frmAIChat
                     InfoBox.ShowInfoBox("Executing bot commands ('Esc' to abort):" & Environment.NewLine & Environment.NewLine & CommandsList)
                     System.Threading.Thread.Sleep(500)
                     Debug.WriteLine("ExecuteInsert")
-                    commandSuccess = ExecuteInsertCommand(pc.Argument1)
+                    commandSuccess = ExecuteInsertCommand(pc.Argument1, pc.JoinBefore, pc.JoinAfter, If(OnlySelection, targetSelectionStart, -1), targetSelectionEnd)
+
+                Case "inserttable"
+                    commandDescription = "Inserting a Word table"
+                    CommandsList = commandDescription & System.Environment.NewLine & CommandsList
+                    LastCommandsList = CommandsList
+                    commandSuccess = ExecuteInsertTableCommand(pc, OnlySelection)
 
                 Case "goto", "jump", "show", "select"
-                    commandDescription = $"Showing '{pc.Argument1}'"
+                    commandDescription = If(
+                        System.String.IsNullOrWhiteSpace(pc.Target),
+                        $"Showing '{pc.Argument1}'",
+                        $"Showing recent change '{pc.Target}'")
                     CommandsList = commandDescription & Environment.NewLine & CommandsList
                     LastCommandsList = CommandsList
                     System.Threading.Thread.Sleep(250)
-                    commandSuccess = ExecuteGotoCommand(pc.Argument1, OnlySelection)
+                    commandSuccess = ExecuteGotoCommand(
+                        pc.Argument1,
+                        OnlySelection,
+                        pc.MatchSpec,
+                        pc.MatchFormatSpec,
+                        pc.Target,
+                        targetSelectionStart,
+                        targetSelectionEnd)
                     activateDocumentAfterCommands = activateDocumentAfterCommands OrElse commandSuccess
+
+                Case "format"
+                    commandDescription = If(
+                        System.String.IsNullOrWhiteSpace(pc.Target),
+                        $"Formatting '{pc.Argument1}'",
+                        $"Formatting recent change '{pc.Target}'")
+                    CommandsList = commandDescription & Environment.NewLine & CommandsList
+                    LastCommandsList = CommandsList
+                    InfoBox.ShowInfoBox("Executing bot commands ('Esc' to abort):" & Environment.NewLine & Environment.NewLine & CommandsList)
+                    System.Threading.Thread.Sleep(250)
+                    commandSuccess = ExecuteFormatCommand(
+                        pc.Argument1,
+                        pc.FormatSpec,
+                        OnlySelection,
+                        pc.MatchSpec,
+                        pc.MatchFormatSpec,
+                        pc.Target,
+                        targetSelectionStart,
+                        targetSelectionEnd)
 
                 Case Else
                     commandDescription = $"Unknown command: '{pc.Command}'"
                     commandSuccess = False
             End Select
 
+            Dim changedRangeCount As Integer = _lastActionSerial - actionSerialBeforeCommand
+            If changedRangeCount > 0 Then
+                ' Invalidate last_change first. CommitRecentWordChange assigns a fresh ID
+                ' only when this command produced exactly one unambiguous changed range.
+                _lastRecentWordChangeId = ""
+            End If
+
+            If commandSuccess AndAlso changedRangeCount = 1 Then
+                CommitRecentWordChange(pc.Command, actionSerialBeforeCommand)
+            End If
+
             If Not commandSuccess AndAlso Not String.IsNullOrWhiteSpace(commandDescription) Then
-                FailedCommandsList.Add($"Failed: {commandDescription}")
+                Select Case pc.Command.ToLowerInvariant()
+                    Case "replace", "insert", "insertbefore", "insertafter", "inserttable", "format"
+                        ' A partial apply must never leave last_change pointing at an older action.
+                        _lastRecentWordChangeId = ""
+                End Select
+                If System.String.Equals(pc.Command, "replace", System.StringComparison.OrdinalIgnoreCase) Then
+                    ' The replace routine already knows the result cardinality and failure phase.
+                    ' Do not report the same unsuccessful command twice or print full paragraphs.
+                    FailedCommandsList.Add(If(
+                        System.String.IsNullOrWhiteSpace(_lastReplaceFailureMessage),
+                        "Replacement could not be completed for '" & PreviewForLog(pc.Argument1, 90) & "'. Review the passage before retrying.",
+                        _lastReplaceFailureMessage))
+                Else
+                    FailedCommandsList.Add($"Failed or incomplete: {commandDescription}. Check the affected passage before retrying; other commands may already have succeeded.")
+                End If
+            End If
+
+            If System.String.Equals(pc.Command, "replace", System.StringComparison.OrdinalIgnoreCase) AndAlso
+               Not commandSuccess AndAlso _lastReplaceMayHavePartialChanges Then
+                Dim commandsNotExecuted As System.Int32 = commands.Count - commandOrdinal
+                If commandsNotExecuted > 0 Then
+                    FailedCommandsList.Add($"Stopped {commandsNotExecuted} subsequent Word command(s) because the previous replacement may have left partial tracked changes. Review the affected passage before submitting a new batch.")
+                End If
+                Debug.WriteLine($"ExecuteAnyCommands: stopped after incomplete replacement at command {commandOrdinal}/{commands.Count}")
+                Exit For
             End If
 
             If LastCommandsList <> CommandsList Then
@@ -3369,7 +6470,8 @@ Public Class frmAIChat
         Next
 
         If commands.Count() > 0 Then
-            ReplaceSpecialCharacter(OnlySelection)
+            ' The two-pass executor never inserts MarkerChar. Do not run a global
+            ' cleanup Find against user content or beyond a collapsed selection.
 
             InfoBox.ShowInfoBox("")
 
@@ -3485,13 +6587,17 @@ Public Class frmAIChat
     ''' Error rendered with red styling (#d93025) to distinguish from warnings (orange).
     ''' Failures formatted as bulleted list in HTML view.
     ''' </remarks>
-    Private Sub ReportFailedCommands()
+    Private Sub ReportFailedCommands(Optional noChangesMade As Boolean = False)
         If FailedCommandsList Is Nothing OrElse FailedCommandsList.Count = 0 Then Return
 
+        Dim userSummary As String = If(
+            noChangesMade,
+            "The requested Word actions could not start. No changes were made. Please check the document and try again.",
+            "Not all requested Word actions could be completed. Some changes may already have been applied. Please review the document before trying again.")
         Dim errorMessage As New System.Text.StringBuilder()
         errorMessage.AppendLine()
         errorMessage.AppendLine("─────────────────────────────────────")
-        errorMessage.AppendLine("⚠ Some commands could not be executed:")
+        errorMessage.AppendLine("⚠ " & userSummary)
         errorMessage.AppendLine()
 
         For Each failedCmd In FailedCommandsList
@@ -3509,7 +6615,7 @@ Public Class frmAIChat
             <span class='who' style='color: #d93025;'>System:</span>
             <div class='content'>
                 <hr style='border: none; border-top: 1px solid #d93025; margin: 8px 0;' />
-                <strong>⚠ Some commands could not be executed:</strong><br/>
+                <strong>⚠ {HtmlEncode(userSummary)}</strong><br/>
                 <ul style='margin: 8px 0;'>"
 
         For Each failedCmd In FailedCommandsList
@@ -3522,7 +6628,7 @@ Public Class frmAIChat
         PersistChatHtml()
 
         ' Add to chat history so AI can see failures in future context
-        _chatHistory.Add(("assistant", $"System: Some commands failed - {String.Join("; ", FailedCommandsList)}"))
+        _chatHistory.Add(("assistant", "System: " & userSummary & " Details: " & String.Join("; ", FailedCommandsList)))
     End Sub
 
 
@@ -3567,7 +6673,9 @@ Public Class frmAIChat
                 End With
             End Using
         Catch ex As Exception
-            ShowCustomMessageBox("Error in ReplaceSpecialCharacter: " & ex.Message)
+            ShowWordChatOperationError(
+                "ReplaceSpecialCharacter", ex,
+                "Word could not finish cleaning up the document changes. Please review the document before continuing.")
         Finally
             doc.TrackRevisions = trackChangesEnabled
         End Try
@@ -3589,7 +6697,7 @@ Public Class frmAIChat
     ''' Uses TryParseCommentIdToken to extract Word comment Index and/or PseudoHash.
     ''' Calls ThisAddIn.ReplyToWordComment with formatted flag from chkConvertMarkdown.
     ''' </remarks>
-    Private Function ExecuteReplyToCommentByIdToken(ByVal idToken As String, ByVal replyText As String) As Boolean
+    Private Function ExecuteReplyToCommentByIdToken(ByVal idToken As String, ByVal replyText As String, Optional scope As Microsoft.Office.Interop.Word.Range = Nothing) As Boolean
 
         Dim app As Microsoft.Office.Interop.Word.Application = Nothing
         Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
@@ -3631,7 +6739,7 @@ Public Class frmAIChat
 
             ' Execute reply with Markdown formatting if enabled
             Dim formatted As Boolean = chkConvertMarkdown.Checked
-            Dim ok As Boolean = ThisAddIn.ReplyToWordComment(wordId, pseudoHash, AN6 & ": " & replyText, formatted)
+            Dim ok As Boolean = ThisAddIn.ReplyToScopedWordComment(wordId, pseudoHash, AN6 & ": " & replyText, formatted, scope)
 
             If ok Then
                 Debug.WriteLine($"Add-Reply: Successfully added reply to comment {If(wordId.HasValue, wordId.Value.ToString(), pseudoHash)}")
@@ -3752,68 +6860,74 @@ Public Class frmAIChat
     ' =========================================================================
 
     ''' <summary>
-    ''' Adds a Word comment to the first occurrence of search term in document or selection.
+    ''' Adds a Word comment to selected occurrence(s) of a search term in document or selection.
+    ''' Without occurrence/max_matches it preserves the historic first-match behavior.
     ''' Uses FindLongTextInChunks for reliable matching in large documents.
     ''' </summary>
     ''' <param name="searchTerm">Text to search for as comment anchor</param>
     ''' <param name="commentText">Comment body text (prefixed with AN6)</param>
     ''' <param name="onlySelection">True to restrict to current selection</param>
-    ''' <returns>True if one comment was added</returns>
+    ''' <returns>True if at least one requested comment was added</returns>
     ''' <remarks>
-    ''' Chat-generated addcomment commands are expected to target the first matching anchor.
-    ''' This avoids adding duplicate comments to repeated short phrases and prevents loops
-    ''' caused by Word moving the active selection into the comment after Comments.Add.
+    ''' By default addcomment targets the first matching anchor. JSON occurrence/max_matches can
+    ''' explicitly select later or multiple anchors. The search is re-established after each
+    ''' addition so Word moving the active selection into a comment cannot cause a loop.
     ''' </remarks>
     Private Function ExecuteAddComment(
-        ByVal searchTerm As String,
-        ByVal commentText As String,
-        Optional ByVal onlySelection As Boolean = False) As Boolean
+        ByVal searchTerm As System.String,
+        ByVal commentText As System.String,
+        Optional ByVal onlySelection As Boolean = False,
+        Optional ByVal matchSpec As ParsedCommandMatchSpec = Nothing,
+        Optional ByVal matchFormatSpec As ParsedCommandFormat = Nothing) As Boolean
 
         Dim app As Microsoft.Office.Interop.Word.Application = Nothing
         Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
 
-        If String.IsNullOrWhiteSpace(searchTerm) Then
-            Debug.WriteLine("AddComments: Search term is empty.")
+        If System.String.IsNullOrWhiteSpace(searchTerm) Then
+            System.Diagnostics.Debug.WriteLine("AddComments: Search term is empty.")
             Return False
         End If
 
-        If String.IsNullOrWhiteSpace(commentText) Then
-            Debug.WriteLine("AddComments: Comment text is empty.")
+        If System.String.IsNullOrWhiteSpace(commentText) Then
+            System.Diagnostics.Debug.WriteLine("AddComments: Comment text is empty.")
             Return False
         End If
 
-        searchTerm = DecodeParagraphMarks(searchTerm)
+        ' ParsedCommand arguments are normalized by the protocol parser before execution.
 
         Try
             Try
-                app = CType(System.Runtime.InteropServices.Marshal.GetActiveObject("Word.Application"), Microsoft.Office.Interop.Word.Application)
+                app = If(onlySelection, Globals.ThisAddIn.Application, CType(System.Runtime.InteropServices.Marshal.GetActiveObject("Word.Application"), Microsoft.Office.Interop.Word.Application))
             Catch
                 app = Globals.ThisAddIn.Application
             End Try
         Catch ex As System.Exception
-            Debug.WriteLine("AddComments: Unable to access Word Application instance.")
+            System.Diagnostics.Debug.WriteLine("AddComments: Unable to access Word Application instance.")
             Return False
         End Try
 
         Try
             doc = app.ActiveDocument
         Catch
-            Debug.WriteLine("AddComments: No active document found.")
+            System.Diagnostics.Debug.WriteLine("AddComments: No active document found.")
             Return False
         End Try
 
         If doc Is Nothing Then
-            Debug.WriteLine("AddComments: No active document found.")
+            System.Diagnostics.Debug.WriteLine("AddComments: No active document found.")
             Return False
         End If
 
         Dim sel As Microsoft.Office.Interop.Word.Selection = doc.Application.Selection
+        If sel Is Nothing Then Return False
+
         Dim originalSelStart As Integer = sel.Start
         Dim originalSelEnd As Integer = sel.End
 
         Dim scopeStart As Integer
         Dim scopeEnd As Integer
-        If onlySelection AndAlso sel IsNot Nothing AndAlso Not String.IsNullOrEmpty(sel.Text) Then
+        If onlySelection Then
+                If sel.Start >= sel.End Then Return False
             scopeStart = sel.Range.Start
             scopeEnd = sel.Range.End
         Else
@@ -3821,51 +6935,74 @@ Public Class frmAIChat
             scopeEnd = doc.Content.End
         End If
 
+        Dim eligibleOrdinal As Integer = 0
+        Dim addedCount As Integer = 0
+        Dim nextSearchStart As Integer = scopeStart
+
         Try
-            ' Search only inside the intended working range.
-            Try
-                sel.SetRange(scopeStart, scopeEnd)
-            Catch exScope As System.Exception
-                Debug.WriteLine($"ExecuteAddComment: pre-find SetRange failed: {exScope.Message}")
-            End Try
+            Do While nextSearchStart < scopeEnd
+                Try
+                    sel.SetRange(nextSearchStart, scopeEnd)
+                Catch exScope As System.Exception
+                    System.Diagnostics.Debug.WriteLine($"ExecuteAddComment: pre-find SetRange failed: {exScope.Message}")
+                    Exit Do
+                End Try
 
-            If Not Globals.ThisAddIn.FindLongTextInChunks(searchTerm, sel) Then
-                Debug.WriteLine($"AddComments: Search term not found: '{searchTerm}'.")
-                Return False
-            End If
+                If Not Globals.ThisAddIn.FindLongTextInChunks(searchTerm, sel) Then Exit Do
+                If sel.Start < nextSearchStart OrElse sel.Start >= scopeEnd OrElse sel.Start >= sel.End OrElse sel.End > scopeEnd Then Exit Do
 
-            If sel Is Nothing OrElse sel.Start >= sel.End Then
-                Debug.WriteLine($"AddComments: Invalid found range for term '{searchTerm}'.")
-                Return False
-            End If
+                Dim anchorStart As Integer = sel.Start
+                Dim anchorEnd As Integer = sel.End
+                If anchorStart < scopeStart OrElse anchorEnd > scopeEnd Then Exit Do
 
-            Dim anchor As Microsoft.Office.Interop.Word.Range = sel.Range.Duplicate
-            Dim anchorStart As Integer = anchor.Start
-            Dim anchorEnd As Integer = anchor.End
+                Dim candidateAnchor As Microsoft.Office.Interop.Word.Range = Nothing
+                Dim matchesFormat As Boolean = False
+                Try
+                    candidateAnchor = sel.Range.Duplicate
+                    matchesFormat = RangeMatchesFormatSpec(candidateAnchor, matchFormatSpec)
+                Finally
+                    If candidateAnchor IsNot Nothing Then ReleaseWordRange(candidateAnchor)
+                End Try
 
-            If anchorStart < scopeStart OrElse anchorEnd > scopeEnd Then
-                Debug.WriteLine($"AddComments: Found range outside working range for term '{searchTerm}'.")
-                Return False
-            End If
+                If matchesFormat Then eligibleOrdinal += 1
 
-            Using ThisAddIn.BeginMarkupAuthorScope(app)
-                Dim newComment As Microsoft.Office.Interop.Word.Comment = doc.Comments.Add(anchor, String.Empty)
+                If matchesFormat AndAlso IsMatchOrdinalSelected(eligibleOrdinal, matchSpec, 1) Then
+                    Dim anchor As Microsoft.Office.Interop.Word.Range = Nothing
+                    Try
+                        anchor = sel.Range.Duplicate
+                        Using ThisAddIn.BeginMarkupAuthorScope(app)
+                            Dim newComment As Microsoft.Office.Interop.Word.Comment = doc.Comments.Add(anchor, System.String.Empty)
 
-                If chkConvertMarkdown.Checked Then
-                    ThisAddIn.InsertMarkdownToComment(newComment.Range, AN6 & ": " & commentText)
-                Else
-                    newComment.Range.Text = AN6 & ": " & commentText
+                            If chkConvertMarkdown.Checked Then
+                                ThisAddIn.InsertMarkdownToComment(newComment.Range, AN6 & ": " & commentText)
+                            Else
+                                newComment.Range.Text = AN6 & ": " & commentText
+                            End If
+                        End Using
+
+                        addedCount += 1
+                        RememberLastActionRange(anchorStart, anchorEnd)
+                        System.Diagnostics.Debug.WriteLine($"AddComments: Added comment #{addedCount} for term '{searchTerm}' at [{anchorStart},{anchorEnd}].")
+                    Finally
+                        If anchor IsNot Nothing Then ReleaseWordRange(anchor)
+                    End Try
+
+                    If HasReachedSelectedMatchLimit(addedCount, matchSpec, 1) Then Exit Do
                 End If
-            End Using
 
-            Debug.WriteLine($"AddComments: Added one comment for term '{searchTerm}' at [{anchorStart},{anchorEnd}].")
+                Dim progressedStart As Integer = System.Math.Max(anchorEnd, nextSearchStart + 1)
+                If progressedStart >= scopeEnd Then Exit Do
+                nextSearchStart = progressedStart
+            Loop
 
-            RememberLastActionRange(anchorStart, anchorEnd)
+            If addedCount = 0 Then
+                System.Diagnostics.Debug.WriteLine($"AddComments: Requested occurrence(s) not found for term '{searchTerm}'.")
+            End If
 
-            Return True
+            Return addedCount > 0
 
         Catch ex As System.Exception
-            Debug.WriteLine($"AddComments failed: {ex.Message}")
+            System.Diagnostics.Debug.WriteLine($"AddComments failed: {ex.Message}")
             Return False
 
         Finally
@@ -3884,10 +7021,11 @@ Public Class frmAIChat
     ' =========================================================================
 
     ''' <summary>
-    ''' Finds and highlights all occurrences of search term with yellow highlighting.
+    ''' Finds and highlights selected occurrences of search term with yellow highlighting.
+    ''' Without occurrence/max_matches it preserves the historic all-occurrences behavior.
     ''' Supports ESC key abort and handles table cell boundaries.
     ''' </summary>
-    ''' <param name="searchTerm">Text to find (normalized via DecodeParagraphMarks)</param>
+    ''' <param name="searchTerm">Parser-normalized text to find</param>
     ''' <param name="OnlySelection">True to restrict search to current selection</param>
     ''' <returns>True if at least one match found</returns>
     ''' <remarks>
@@ -3896,10 +7034,14 @@ Public Class frmAIChat
     ''' Handles table navigation to avoid infinite loops at cell boundaries.
     ''' Restores original selection and TrackRevisions state in Finally block.
     ''' </remarks>
-    Private Function ExecuteFindCommand(searchTerm As String, Optional OnlySelection As Boolean = False) As Boolean
+    Private Function ExecuteFindCommand(
+        searchTerm As System.String,
+        Optional OnlySelection As Boolean = False,
+        Optional matchSpec As ParsedCommandMatchSpec = Nothing,
+        Optional matchFormatSpec As ParsedCommandFormat = Nothing) As Boolean
+
         Dim doc As Word.Document = Globals.ThisAddIn.Application.ActiveDocument
         Dim trackChangesEnabled As Boolean = doc.TrackRevisions
-        Dim originalAuthor As String = doc.Application.UserName
         Dim selectionStart As Integer = doc.Application.Selection.Start
         Dim selectionEnd As Integer = doc.Application.Selection.End
         Dim found As Boolean = False
@@ -3907,18 +7049,16 @@ Public Class frmAIChat
         Try
             doc.TrackRevisions = True
 
-            ' Normalize paragraph marks
-            searchTerm = DecodeParagraphMarks(searchTerm)
-            If String.IsNullOrWhiteSpace(searchTerm) Then
-                CommandsList = $"Note: Empty search term (ignored)." & Environment.NewLine & CommandsList
+            ' ParsedCommand arguments are normalized by the protocol parser before execution.
+            If System.String.IsNullOrWhiteSpace(searchTerm) Then
+                CommandsList = $"Note: Empty search term (ignored)." & System.Environment.NewLine & CommandsList
                 Return False
             End If
 
             ' Define starting selection
             If OnlySelection Then
-                If doc.Application.Selection Is Nothing OrElse doc.Application.Selection.Range.Text = "" Then
-                    OnlySelection = False
-                    doc.Application.Selection.SetRange(doc.Content.Start, doc.Content.End)
+                If doc.Application.Selection Is Nothing OrElse selectionEnd <= selectionStart Then
+                    Return False
                 End If
             Else
                 doc.Application.Selection.SetRange(doc.Content.Start, doc.Content.End)
@@ -3927,22 +7067,44 @@ Public Class frmAIChat
             Dim lastSelectionStart As Integer = -1
             Dim stuckCounter As Integer = 0
             Dim maxStuckLimit As Integer = 2
+            Dim eligibleOrdinal As Integer = 0
+            Dim highlightedCount As Integer = 0
 
-            ' Find and highlight all instances
+            ' Find and highlight selected instances. With no selector this preserves the
+            ' original behavior of highlighting every occurrence.
             Do While Globals.ThisAddIn.FindLongTextInChunks(searchTerm, doc.Application.Selection, True) = True
 
                 If doc.Application.Selection Is Nothing Then Exit Do
 
-                System.Windows.Forms.Application.DoEvents()
+                If Not OnlySelection Then System.Windows.Forms.Application.DoEvents()
+                If OnlySelection AndAlso (Not IsSameChatWordDocument(doc, doc.Application.ActiveDocument) OrElse doc.Application.Selection.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory OrElse doc.Application.Selection.Start < selectionStart OrElse doc.Application.Selection.End > selectionEnd) Then Return False
                 If (GetAsyncKeyState(System.Windows.Forms.Keys.Escape) And &H8000) <> 0 Then
-                    CommandsList = $"Operation cancelled by user (ESC)." & Environment.NewLine & CommandsList
+                    CommandsList = $"Operation cancelled by user (ESC)." & System.Environment.NewLine & CommandsList
                     Exit Do
                 End If
 
-                found = True
+                Dim candidateRange As Microsoft.Office.Interop.Word.Range = Nothing
+                Dim matchesFormat As Boolean = False
+                Try
+                    candidateRange = doc.Application.Selection.Range.Duplicate
+                    matchesFormat = RangeMatchesFormatSpec(candidateRange, matchFormatSpec)
+                Finally
+                    If candidateRange IsNot Nothing Then ReleaseWordRange(candidateRange)
+                End Try
 
-                ' Highlight found text with yellow
-                doc.Application.Selection.Range.HighlightColorIndex = Word.WdColorIndex.wdYellow
+                If matchesFormat Then
+                    eligibleOrdinal += 1
+
+                    If IsMatchOrdinalSelected(eligibleOrdinal, matchSpec, System.Int32.MaxValue) Then
+                        doc.Application.Selection.Range.HighlightColorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdYellow
+                        highlightedCount += 1
+                        found = True
+
+                        If HasReachedSelectedMatchLimit(highlightedCount, matchSpec, System.Int32.MaxValue) Then
+                            Exit Do
+                        End If
+                    End If
+                End If
 
                 ' Detect stuck state (same position multiple times)
                 If doc.Application.Selection.Start = lastSelectionStart Then
@@ -3971,7 +7133,7 @@ Public Class frmAIChat
                 End If
 
                 ' Ensure not stuck in empty cell
-                If doc.Application.Selection.Range.Text = vbCr Or doc.Application.Selection.Range.Text = "" Then
+                If doc.Application.Selection.Range.Text = vbCr OrElse doc.Application.Selection.Range.Text = "" Then
                     doc.Application.Selection.Move(Unit:=Word.WdUnits.wdCharacter, Count:=1)
                 End If
 
@@ -3986,17 +7148,18 @@ Public Class frmAIChat
             Loop
 
             If Not found Then
-                CommandsList = $"Note: The search term was not found." & Environment.NewLine & CommandsList
+                CommandsList = $"Note: The requested search occurrence(s) were not found." & System.Environment.NewLine & CommandsList
             End If
 
             Return found
 
         Catch ex As System.Exception
-            ShowCustomMessageBox("Error in ExecuteFindCommand: " & ex.Message)
+            ShowWordChatOperationError(
+                "ExecuteFindCommand", ex,
+                "Word could not complete the requested search. Please check the document and try again.")
             Return False
 
         Finally
-            ' Restore original state
             doc.TrackRevisions = trackChangesEnabled
             doc.Application.Selection.SetRange(selectionStart, selectionEnd)
             doc.Application.Selection.Select()
@@ -4008,10 +7171,11 @@ Public Class frmAIChat
     ' =========================================================================
 
     ''' <summary>
-    ''' Finds and replaces all occurrences of oldText with newText using tracked changes.
+    ''' Finds and replaces selected occurrences of oldText with newText using tracked changes.
+    ''' Without occurrence/max_matches it preserves the historic replace-all behavior.
     ''' Uses two-pass strategy: forward scan to collect match positions, then reverse-order replacement.
     ''' </summary>
-    ''' <param name="oldText">Text to find (normalized via DecodeParagraphMarks)</param>
+    ''' <param name="oldText">Parser-normalized text to find</param>
     ''' <param name="newText">Replacement text (empty for delete)</param>
     ''' <param name="OnlySelection">True to restrict to current selection</param>
     ''' <param name="Marker">MarkerChar (U+E000) — unused in two-pass approach but kept for API compat</param>
@@ -4045,12 +7209,25 @@ Public Class frmAIChat
     ''' - The cell-boundary advancement in Pass 1 prevents the scanner from getting stuck
     '''   at end-of-cell markers.
     ''' </remarks>
-    Private Function ExecuteReplaceCommand(oldText As String, newText As String, OnlySelection As Boolean, Marker As String) As Boolean
+    Private Function ExecuteReplaceCommand(oldText As System.String, newText As System.String, OnlySelection As Boolean, Marker As System.String, Optional matchSpec As ParsedCommandMatchSpec = Nothing, Optional matchFormatSpec As ParsedCommandFormat = Nothing, Optional pinnedScope As Microsoft.Office.Interop.Word.Range = Nothing) As Boolean
+        _lastReplaceMayHavePartialChanges = False
+        _lastReplaceFailureMessage = System.String.Empty
         Dim doc As Word.Document = Nothing
         Dim view As Word.View = Nothing
         Dim trackChangesEnabled As Boolean = False
+        Dim trackingCaptured As System.Boolean = False
+        Dim viewCaptured As System.Boolean = False
         Dim originalRevisionsView As Word.WdRevisionsView = Word.WdRevisionsView.wdRevisionsViewFinal
         Dim originalShowRevisions As Boolean = False
+
+        ' Diagnostic only: never change search ranges, selection, or retry behavior.
+        ' Persist numeric progress once per replacement, not inside the search loop.
+        Dim searchTraceClock As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
+        Dim searchTrace As New System.Text.StringBuilder()
+        Dim searchTraceAttempts As System.Int32 = 0
+        Dim searchTraceRejected As System.Int32 = 0
+        Dim searchTraceOutcome As System.String = "not-completed"
+        searchTrace.AppendLine("BEGIN " & System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", System.Globalization.CultureInfo.InvariantCulture))
 
         Try
             Debug.WriteLine("ExecuteReplaceCommand: START")
@@ -4058,26 +7235,30 @@ Public Class frmAIChat
             LogReplaceDiag("START")
 
             Try
-                doc = Globals.ThisAddIn.Application.ActiveDocument
+                doc = If(pinnedScope Is Nothing, Globals.ThisAddIn.Application.ActiveDocument, pinnedScope.Document)
+                If OnlySelection AndAlso (pinnedScope Is Nothing OrElse Not IsSameChatWordDocument(doc, Globals.ThisAddIn.Application.ActiveDocument)) Then
+                    _lastReplaceFailureMessage = "The original document or selection is unavailable. No text was written."
+                    Return False
+                End If
             Catch ex As Exception
                 Debug.WriteLine($"ExecuteReplaceCommand: FAILED to get ActiveDocument: {ex.Message}")
                 Return False
             End Try
 
             trackChangesEnabled = doc.TrackRevisions
+            trackingCaptured = True
 
             Try
                 view = doc.Application.ActiveWindow.View
                 originalRevisionsView = view.RevisionsView
                 originalShowRevisions = view.ShowRevisionsAndComments
+                viewCaptured = True
             Catch ex As Exception
                 Debug.WriteLine($"ExecuteReplaceCommand: FAILED to get view settings: {ex.Message}")
                 Return False
             End Try
 
-            ' Normalize inputs
-            oldText = DecodeParagraphMarks(oldText)
-            newText = DecodeParagraphMarks(newText)
+            ' ParsedCommand arguments are normalized by the protocol parser before execution.
             oldText = If(oldText, String.Empty)
             newText = If(newText, String.Empty)
 
@@ -4095,15 +7276,26 @@ Public Class frmAIChat
             view.RevisionsView = Word.WdRevisionsView.wdRevisionsViewFinal
             view.ShowRevisionsAndComments = True
 
-            Dim savedSelectionStart As Integer = doc.Application.Selection.Start
-            Dim savedSelectionEnd As Integer = doc.Application.Selection.End
+            Dim savedSelectionStart As Integer = If(OnlySelection, pinnedScope.Start, doc.Application.Selection.Start)
+            Dim savedSelectionEnd As Integer = If(OnlySelection, pinnedScope.End, doc.Application.Selection.End)
+            Dim originalSearchDocEnd As System.Int32 = doc.Content.End
             Debug.WriteLine($"ExecuteReplaceCommand: savedSelection=[{savedSelectionStart},{savedSelectionEnd}]")
             LogReplaceDiag($"Saved selection=[{savedSelectionStart},{savedSelectionEnd}] {DescribeSelectionState(doc.Application.Selection)}")
 
             ' Define search boundaries
             Dim searchEnd As Integer
-            If OnlySelection AndAlso Not String.IsNullOrWhiteSpace(doc.Application.Selection.Text) Then
-                searchEnd = doc.Application.Selection.End
+            If OnlySelection Then
+                If savedSelectionStart >= savedSelectionEnd OrElse
+                   pinnedScope.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory Then
+                    _lastReplaceFailureMessage = "The original main-text selection is unavailable. No document-wide search was attempted."
+                    Return False
+                End If
+                searchEnd = savedSelectionEnd
+                If doc.Range(searchEnd - 1, searchEnd).Text = vbCr Then
+                    searchEnd -= 1
+                    If searchEnd <= savedSelectionStart Then Return False
+                    doc.Application.Selection.SetRange(savedSelectionStart, searchEnd)
+                End If
                 Debug.WriteLine($"ExecuteReplaceCommand: searching within selection, searchEnd={searchEnd}")
             Else
                 OnlySelection = False
@@ -4112,26 +7304,84 @@ Public Class frmAIChat
                 Debug.WriteLine($"ExecuteReplaceCommand: searching whole document, searchEnd={searchEnd}")
             End If
             ' ─────────────────────────────────────────────────────────────────────
+            ' A token-bearing search cannot be resolved by Word.Find. Use the same
+            ' exact projection as preflight and never write or render the whole hit.
+            searchTrace.AppendLine($"SCOPE selection={OnlySelection} start={If(OnlySelection, savedSelectionStart, doc.Content.Start)} limit={searchEnd} selectedEnd={savedSelectionEnd}")
+            If HasNoteSyntax(oldText) OrElse HasNoteSyntax(newText) Then
+                Dim noteStart As System.Int32 = If(OnlySelection, savedSelectionStart, doc.Content.Start)
+                Try
+                    Dim noteSucceeded As System.Boolean = ApplyNoteReplacement(doc, doc.Range(noteStart, searchEnd),
+                        New ParsedCommand With {.Command = "replace", .Argument1 = oldText, .Argument2 = newText, .MatchSpec = matchSpec, .MatchFormatSpec = matchFormatSpec}, searchTrace)
+                    searchTraceOutcome = If(noteSucceeded, "native-notes-verified", "native-note-edit-stopped")
+                    Return noteSucceeded
+                Finally
+                    Try
+                        If IsSameChatWordDocument(doc.Application.ActiveDocument, doc) Then
+                            Dim upper As System.Int32 = doc.Content.End
+                            Dim selectionDelta As System.Int32 = If(OnlySelection, upper - originalSearchDocEnd, 0)
+                            Dim restoreStart As System.Int32 = System.Math.Min(savedSelectionStart, upper)
+                            doc.Application.Selection.SetRange(restoreStart, System.Math.Max(restoreStart, System.Math.Min(savedSelectionEnd + selectionDelta, upper)))
+                        End If
+                    Catch restoreEx As System.Exception
+                        SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb("WordChat", "Could not restore note edit selection: " & restoreEx.Message)
+                    End Try
+                End Try
+            End If
+
             ' PASS 1: COLLECT ALL MATCH POSITIONS (forward scan)
             ' ─────────────────────────────────────────────────────────────────────
             Dim matchPositions As New List(Of (Start As Integer, [End] As Integer))
             Dim maxIterations As Integer = 5000
             Dim iterationCount As Integer = 0
             Dim lastFoundEnd As Integer = -1
-            Dim requestedSearchStart As Integer = doc.Application.Selection.Start
+            Dim requestedSearchStart As Integer = If(OnlySelection, savedSelectionStart, doc.Application.Selection.Start)
 
             Debug.WriteLine("ExecuteReplaceCommand: PASS 1 - scanning for matches...")
 
             Do
                 LogReplaceDiag($"PASS1 before Find: nextIteration={iterationCount + 1}; searchEnd={searchEnd}; requestedSearchStart={requestedSearchStart}; lastFoundEnd={lastFoundEnd}; {DescribeSelectionState(doc.Application.Selection)}")
 
+                If OnlySelection AndAlso requestedSearchStart >= searchEnd Then Exit Do
+                Dim boundedStart As System.Int32 = -1
+                Dim boundedEnd As System.Int32 = -1
                 Dim findReturned As Boolean = False
+                searchTraceAttempts += 1
+                Dim findTraceClock As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
                 Try
-                    findReturned = Globals.ThisAddIn.FindLongTextInChunks(oldText, doc.Application.Selection, True)
-                Catch ex As Exception
+                    If OnlySelection Then
+                        Dim area As Microsoft.Office.Interop.Word.Range = doc.Range(requestedSearchStart, searchEnd)
+                        Dim scopedSearchHit As Microsoft.Office.Interop.Word.Range = Nothing
+                        Try
+                            findReturned = WordSearchHelper.FindLongTextAnchoredFastRange(area, oldText, scopedSearchHit, viewOverride:=view)
+                            If findReturned Then
+                                If scopedSearchHit Is Nothing OrElse scopedSearchHit.Start < requestedSearchStart OrElse scopedSearchHit.End > searchEnd OrElse scopedSearchHit.End <= scopedSearchHit.Start Then Throw New System.InvalidOperationException("Search returned a hit outside the pinned range.")
+                                boundedStart = scopedSearchHit.Start
+                                boundedEnd = scopedSearchHit.End
+                            End If
+                        Finally
+                            ReleaseWordRange(scopedSearchHit)
+                            ReleaseWordRange(area)
+                        End Try
+                    Else
+                        findReturned = Globals.ThisAddIn.FindLongTextInChunks(oldText, doc.Application.Selection, True)
+                    End If
+                Catch ex As System.Exception
+                    searchTraceOutcome = "search-exception:" & ex.GetType().Name
+                    searchTrace.AppendLine("FIND exception at attempt=" & searchTraceAttempts.ToString(System.Globalization.CultureInfo.InvariantCulture) & " type=" & ex.GetType().Name)
                     LogReplaceDiag($"PASS1 FindLongTextInChunks THREW: {ex.GetType().Name}: {ex.Message}")
                     Throw
+                Finally
+                    findTraceClock.Stop()
                 End Try
+
+                ' Bounded trace: the first attempts and periodic samples are sufficient
+                ' to locate stalls without large logs or continuous disk I/O.
+                If searchTraceAttempts <= 16 OrElse searchTraceAttempts Mod 25 = 0 Then
+                    searchTrace.AppendLine("FIND attempt=" & searchTraceAttempts.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                           " from=" & requestedSearchStart.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                           " found=" & findReturned.ToString() &
+                                           " ms=" & findTraceClock.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                End If
 
                 LogReplaceDiag($"PASS1 after Find: returned={findReturned}; {DescribeSelectionState(doc.Application.Selection)}")
 
@@ -4146,10 +7396,11 @@ Public Class frmAIChat
                 End If
 
                 ' Check for user abort
-                System.Windows.Forms.Application.DoEvents()
+                If Not OnlySelection Then System.Windows.Forms.Application.DoEvents()
                 If (GetAsyncKeyState(System.Windows.Forms.Keys.Escape) And &H8000) <> 0 Then
                     CommandsList = $"Operation cancelled by user (ESC)." & Environment.NewLine & CommandsList
                     Debug.WriteLine("ExecuteReplaceCommand: ESC pressed, aborting")
+                    searchTraceOutcome = "cancelled-by-escape"
                     LogReplaceDiag("PASS1 ESC pressed, aborting")
                     Return False
                 End If
@@ -4158,20 +7409,40 @@ Public Class frmAIChat
                 If iterationCount > maxIterations Then
                     CommandsList = $"Warning: Max search iterations ({maxIterations}) reached." & Environment.NewLine & CommandsList
                     Debug.WriteLine("ExecuteReplaceCommand: Max iterations reached")
+                    searchTraceOutcome = "iteration-guard"
+                    searchTrace.AppendLine("GUARD count=" & iterationCount.ToString(System.Globalization.CultureInfo.InvariantCulture))
                     LogReplaceDiag($"PASS1 maxIterations reached ({maxIterations})")
                     Exit Do
                 End If
 
-                Dim selStart As Integer = doc.Application.Selection.Start
-                Dim selEnd As Integer = doc.Application.Selection.End
+                If Not IsSameChatWordDocument(doc.Application.ActiveDocument, doc) Then Throw New System.InvalidOperationException("The active document changed during the replacement scan.")
+                Dim selStart As Integer = If(OnlySelection, boundedStart, doc.Application.Selection.Start)
+                Dim selEnd As Integer = If(OnlySelection, boundedEnd, doc.Application.Selection.End)
                 Debug.WriteLine($"ExecuteReplaceCommand: PASS1 iteration {iterationCount}, found at [{selStart},{selEnd}] (requestedSearchStart={requestedSearchStart})")
                 LogReplaceDiag($"PASS1 iteration={iterationCount}; found=[{selStart},{selEnd}]; requestedSearchStart={requestedSearchStart}; lastFoundEnd={lastFoundEnd}")
 
                 ' Validate match is within search bounds
+                If OnlySelection AndAlso (selStart < savedSelectionStart OrElse selEnd > searchEnd) Then
+                    searchTraceOutcome = "selection-boundary"
+                    Exit Do
+                End If
                 If selStart >= searchEnd Then
                     Debug.WriteLine($"ExecuteReplaceCommand: match start {selStart} >= searchEnd {searchEnd}, exiting")
                     LogReplaceDiag($"PASS1 exiting because selStart {selStart} >= searchEnd {searchEnd}")
                     Exit Do
+                End If
+
+                ' Word.Find may match text retained only in tracked deletions. Check the
+                ' current visible source before counting occurrences or planning any edit.
+                Dim visibleMatchText As System.String = Globals.ThisAddIn.GetVisibleText(doc.Range(selStart, selEnd))
+                If Not WordSearchHelper.IsEquivalentSearchText(visibleMatchText, oldText) Then
+                    LogReplaceDiag($"PASS1 rejecting non-current visible match [{selStart},{selEnd}]")
+                    Dim nextVisibleSearch As System.Int32 = System.Math.Max(selEnd, requestedSearchStart + 1)
+                    If nextVisibleSearch >= searchEnd Then Exit Do
+                    doc.Application.Selection.SetRange(nextVisibleSearch, searchEnd)
+                    requestedSearchStart = nextVisibleSearch
+                    lastFoundEnd = System.Math.Max(lastFoundEnd, selEnd)
+                    Continue Do
                 End If
 
                 ' Reject matches that cross a table-cell boundary.
@@ -4227,6 +7498,13 @@ Public Class frmAIChat
                 If hitWentBackwards OrElse hitDidNotAdvance Then
                     Debug.WriteLine($"ExecuteReplaceCommand: rejecting stale/backward hit [{selStart},{selEnd}] (requestedSearchStart={requestedSearchStart}, lastFoundEnd={lastFoundEnd})")
                     LogReplaceDiag($"PASS1 rejecting stale/backward hit; hitWentBackwards={hitWentBackwards}; hitDidNotAdvance={hitDidNotAdvance}; {DescribeSelectionState(doc.Application.Selection)}")
+                    searchTraceRejected += 1
+                    If searchTraceRejected <= 16 OrElse searchTraceRejected Mod 25 = 0 Then
+                        searchTrace.AppendLine("REJECT no-forward-progress attempt=" & searchTraceAttempts.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                               " start=" & selStart.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                               " end=" & selEnd.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                               " requested=" & requestedSearchStart.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                    End If
 
                     Dim forcePos As Integer = System.Math.Max(requestedSearchStart + 1, lastFoundEnd + 1)
 
@@ -4243,11 +7521,34 @@ Public Class frmAIChat
                     Continue Do
                 End If
 
-                ' Record this match
+                ' Record only text matches that also satisfy the optional formatting filter.
+                ' lastFoundEnd still advances for filtered-out matches so the forward scanner
+                ' cannot re-return the same textual hit.
                 lastFoundEnd = selEnd
-                matchPositions.Add((selStart, selEnd))
-                Debug.WriteLine($"ExecuteReplaceCommand: stored match #{matchPositions.Count} at [{selStart},{selEnd}]")
-                LogReplaceDiag($"PASS1 stored match #{matchPositions.Count} at [{selStart},{selEnd}]")
+                Dim candidateRange As Microsoft.Office.Interop.Word.Range = Nothing
+                Dim matchesFormat As Boolean = False
+                Try
+                    candidateRange = doc.Range(selStart, selEnd)
+                    matchesFormat = RangeMatchesFormatSpec(candidateRange, matchFormatSpec)
+                Finally
+                    If candidateRange IsNot Nothing Then ReleaseWordRange(candidateRange)
+                End Try
+
+                If matchesFormat Then
+                    matchPositions.Add((selStart, selEnd))
+                    Debug.WriteLine($"ExecuteReplaceCommand: stored eligible match #{matchPositions.Count} at [{selStart},{selEnd}]")
+                    LogReplaceDiag($"PASS1 stored eligible match #{matchPositions.Count} at [{selStart},{selEnd}]")
+                Else
+                    LogReplaceDiag($"PASS1 skipped text match [{selStart},{selEnd}] because match_format did not match")
+                End If
+
+                ' A range-bound scan never borrows the UI caret or expands a collapsed
+                ' selection. The next eligible start is exactly the verified hit end.
+                If OnlySelection Then
+                    requestedSearchStart = selEnd
+                    If requestedSearchStart >= searchEnd Then Exit Do
+                    Continue Do
+                End If
 
                 ' Advance past current match
                 doc.Application.Selection.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
@@ -4328,9 +7629,23 @@ Public Class frmAIChat
             Loop
 
             Debug.WriteLine($"ExecuteReplaceCommand: PASS 1 complete, found {matchPositions.Count} matches")
+            searchTrace.AppendLine("SCAN matches=" & matchPositions.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                   " iterations=" & iterationCount.ToString(System.Globalization.CultureInfo.InvariantCulture))
 
             If matchPositions.Count = 0 Then
-                CommandsList = $"Note: The search term '{oldText}' was not found." & Environment.NewLine & CommandsList
+                CommandsList = $"Note: The search term '{oldText}' was not found." & System.Environment.NewLine & CommandsList
+                Try
+                    doc.Application.Selection.SetRange(savedSelectionStart, savedSelectionEnd)
+                Catch
+                End Try
+                Return False
+            End If
+
+            Dim selectedMatchPositions As System.Collections.Generic.List(Of (Start As Integer, [End] As Integer)) =
+                SelectMatchPositions(matchPositions, matchSpec, System.Int32.MaxValue)
+
+            If selectedMatchPositions.Count = 0 Then
+                CommandsList = $"Note: The requested occurrence(s) of '{oldText}' were not found." & System.Environment.NewLine & CommandsList
                 Try
                     doc.Application.Selection.SetRange(savedSelectionStart, savedSelectionEnd)
                 Catch
@@ -4339,15 +7654,53 @@ Public Class frmAIChat
             End If
 
             ' ─────────────────────────────────────────────────────────────────────
-            ' PASS 2: REPLACE IN REVERSE ORDER (last match first)
+            ' Canonical Word.Find intentionally ignores some control characters. Do
+            ' not let a fuzzy/legacy hit route a native note into Selection.Text.
+            For Each hit In selectedMatchPositions
+                If HasNativeNote(doc.Range(hit.Start, hit.End)) Then
+                    _lastReplaceFailureMessage = "This replacement crosses a native note without a verified anchor. No text was written by this command."
+                    searchTraceOutcome = "unbound-native-note"
+                    doc.Application.Selection.SetRange(savedSelectionStart, savedSelectionEnd)
+                    Return False
+                End If
+            Next
+
+            ' PASS 2: REPLACE SELECTED MATCHES IN REVERSE ORDER (last match first)
             ' ─────────────────────────────────────────────────────────────────────
-            Debug.WriteLine("ExecuteReplaceCommand: PASS 2 - replacing in reverse order...")
+            Debug.WriteLine($"ExecuteReplaceCommand: PASS 2 - replacing {selectedMatchPositions.Count} selected match(es) in reverse order...")
             Dim replaceCount As Integer = 0
 
             Using ThisAddIn.BeginMarkupAuthorScope(doc.Application)
-                For i As Integer = matchPositions.Count - 1 To 0 Step -1
-                    Dim mStart As Integer = matchPositions(i).Start
-                    Dim mEnd As Integer = matchPositions(i).End
+                For i As Integer = selectedMatchPositions.Count - 1 To 0 Step -1
+                    Dim mStart As Integer = selectedMatchPositions(i).Start
+                    Dim mEnd As Integer = selectedMatchPositions(i).End
+
+                    ' Earlier tracked changes (or a live UI event) may have invalidated
+                    ' integer coordinates collected during pass 1. Check the actual final-
+                    ' view source again BEFORE writing, not just when Find first located it.
+                    ' Never re-target a nearby similar paragraph on a stale coordinate.
+                    Dim currentMatchRange As Microsoft.Office.Interop.Word.Range = Nothing
+                    Dim currentMatchIsValid As System.Boolean = False
+                    Try
+                        currentMatchRange = doc.Range(mStart, mEnd)
+                        currentMatchIsValid = Not HasNativeNote(currentMatchRange) AndAlso WordSearchHelper.IsEquivalentSearchText(
+                            Globals.ThisAddIn.GetVisibleText(currentMatchRange), oldText)
+                    Catch ex As System.Exception
+                        LogReplaceDiag($"PASS2 source revalidation failed at [{mStart},{mEnd}]: {ex.GetType().Name}: {ex.Message}")
+                    Finally
+                        If currentMatchRange IsNot Nothing Then ReleaseWordRange(currentMatchRange)
+                    End Try
+                    If Not currentMatchIsValid Then
+                        searchTraceOutcome = "source-changed"
+                        searchTrace.AppendLine($"REPLACE source-changed at match={i} range=[{mStart},{mEnd}]")
+                        LogReplaceDiag($"PASS2 refused stale target at [{mStart},{mEnd}]")
+                        _lastReplaceMayHavePartialChanges = replaceCount > 0
+                        _lastReplaceFailureMessage =
+                            "Replacement target changed since the initial search (" & replaceCount.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                            "/" & selectedMatchPositions.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                            " applied). Search: '" & PreviewForLog(oldText, 90) & "'. Review the current text before retrying."
+                        Exit For
+                    End If
 
                     ' Avoid replacing the cell's terminal paragraph mark.
                     ' If the match ends one character before the cell end (i.e. on
@@ -4390,15 +7743,31 @@ Public Class frmAIChat
 
                     Debug.WriteLine($"ExecuteReplaceCommand: PASS2 replacing match #{i} at [{mStart},{mEnd}]")
 
+                    Dim replacementAttemptStarted As System.Boolean = False
                     Try
                         ' Select the matched text using stored positions
                         Debug.WriteLine($"ExecuteReplaceCommand: calling SetRange({mStart},{mEnd})")
                         doc.Application.Selection.SetRange(mStart, mEnd)
                         Debug.WriteLine($"ExecuteReplaceCommand: SetRange OK, selection=[{doc.Application.Selection.Start},{doc.Application.Selection.End}]")
 
-                        If chkConvertMarkdown.Checked AndAlso newText.Length > 0 Then
+                        If doc.Application.Selection.Start <> mStart OrElse doc.Application.Selection.End <> mEnd OrElse
+                           HasNativeNote(doc.Application.Selection.Range) Then
+                            Throw New System.InvalidOperationException("Word selected a different range or a protected note reference.")
+                        End If
+                        Dim plainTarget As Microsoft.Office.Interop.Word.Range = doc.Range(mStart, mEnd)
+                        Dim needRenderer As System.Boolean = chkConvertMarkdown.Checked AndAlso adjustedNewText.Length > 0 AndAlso Not IsPlainChatReplacement(adjustedNewText)
+                        If Not needRenderer AndAlso plainTarget.Fields.Count = 0 AndAlso plainTarget.InlineShapes.Count = 0 AndAlso Not ThisAddIn.ContainsChatWordStructure(Globals.ThisAddIn.GetVisibleText(plainTarget)) AndAlso Not ThisAddIn.ContainsChatWordStructure(adjustedNewText) Then
+                            Dim exactOriginal As System.String = Globals.ThisAddIn.GetVisibleText(plainTarget)
+                            Dim exactNew As System.String = If(chkConvertMarkdown.Checked, NormalizeWordReplacementPlanText(adjustedNewText), ThisAddIn.PrepareChatPlainTarget(exactOriginal, adjustedNewText))
+                            If Not ApplyVerifiedChatBlock(plainTarget, exactOriginal, exactNew, searchTrace, replacementAttemptStarted) Then
+                                _lastReplaceMayHavePartialChanges = replacementAttemptStarted OrElse replaceCount > 0
+                                searchTraceOutcome = "block-not-verified"
+                                Exit For
+                            End If
+                        ElseIf chkConvertMarkdown.Checked AndAlso newText.Length > 0 Then
                             ' Old replacement path so Markdown can be converted afterwards.
                             Debug.WriteLine($"ExecuteReplaceCommand: assigning Selection.Text = '{adjustedNewText}'")
+                            replacementAttemptStarted = True
                             doc.Application.Selection.Text = adjustedNewText
                             Debug.WriteLine($"ExecuteReplaceCommand: Selection.Text assigned OK, selection=[{doc.Application.Selection.Start},{doc.Application.Selection.End}]")
 
@@ -4406,72 +7775,133 @@ Public Class frmAIChat
                             RememberLastActionRange(mStart, actionEnd)
 
                             Try
+                                If HasNativeNote(doc.Application.Selection.Range) Then Throw New System.InvalidOperationException("The Markdown rendering selection contains a native note reference.")
                                 Debug.WriteLine("ExecuteReplaceCommand: applying ConvertMarkdownToWord")
                                 Globals.ThisAddIn.ConvertMarkdownToWord()
                                 Debug.WriteLine("ExecuteReplaceCommand: ConvertMarkdownToWord OK")
-                            Catch ex As Exception
+                            Catch ex As System.Exception
                                 Debug.WriteLine($"ExecuteReplaceCommand: ConvertMarkdownToWord failed: {ex.Message}")
+                                _lastReplaceMayHavePartialChanges = True
+                                _lastReplaceFailureMessage = "Markdown conversion failed after Word text was modified. Review the affected passage before retrying."
+                                searchTraceOutcome = "markdown-conversion-incomplete"
+                                Exit For
                             End Try
                         Else
                             ' Surgical replacement path for plain-text tracked edits.
                             Dim patchRange As Word.Range = doc.Range(mStart, mEnd)
-                            Dim originalPatchText As String = patchRange.Text
+                            ' Use the same explicit revision projection as surgical mapping, not Range.Text
+                            ' (which can still contain earlier tracked deletions in Final view).
+                            Dim originalPatchText As String = Globals.ThisAddIn.GetVisibleText(patchRange)
                             Dim preserveTrailingCr As Boolean =
                                 originalPatchText.EndsWith(vbCr, StringComparison.Ordinal) OrElse
                                 originalPatchText.EndsWith(vbLf, StringComparison.Ordinal)
 
                             Debug.WriteLine("ExecuteReplaceCommand: applying surgical replacement")
-                            Globals.ThisAddIn.ApplySurgicalReplacement(
+                            replacementAttemptStarted = True
+                            If Not Globals.ThisAddIn.ApplySurgicalReplacement(
                                 originalPatchText,
                                 adjustedNewText,
                                 patchRange,
-                                preserveTrailingCr)
+                                preserveTrailingCr,
+                                showFailureNotice:=False) Then
+
+                                ' The surgical engine can return False after applying a subset of
+                                ' tracked changes. Continuing with another match or command could
+                                ' then compound an overlap. Never retry an uncertain write in place.
+                                _lastReplaceMayHavePartialChanges = True
+                                _lastReplaceFailureMessage =
+                                    "Surgical replacement incomplete (" & replaceCount.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                    "/" & selectedMatchPositions.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                    " fully applied). Search: '" & PreviewForLog(oldText, 90) &
+                                    "'. Partial tracked changes may remain; review the passage before retrying."
+                                searchTraceOutcome = "surgical-incomplete"
+                                searchTrace.AppendLine($"REPLACE surgical-incomplete at match={i} range=[{mStart},{mEnd}]")
+                                LogReplaceDiag($"PASS2 surgical replacement incomplete at [{mStart},{mEnd}]; search='{PreviewForLog(oldText)}'")
+                                Exit For
+                            End If
 
                             RememberLastActionRange(patchRange.Start, patchRange.End)
                         End If
 
                         replaceCount += 1
-                    Catch ex As Exception
+                        replacementAttemptStarted = False
+                    Catch ex As System.Exception
+                        _lastReplaceMayHavePartialChanges = replacementAttemptStarted OrElse replaceCount > 0
+                        _lastReplaceFailureMessage =
+                            "Replacement failed during Word editing (" & replaceCount.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                            "/" & selectedMatchPositions.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                            " fully applied). Search: '" & PreviewForLog(oldText, 90) & "'. Review tracked changes before retrying."
+                        searchTraceOutcome = "word-edit-exception:" & ex.GetType().Name
+                        searchTrace.AppendLine($"REPLACE exception at match={i} type={ex.GetType().Name}")
                         Debug.WriteLine($"ExecuteReplaceCommand: ERROR replacing match #{i} at ({mStart},{mEnd}): {ex.GetType().Name}: {ex.Message}")
                         Debug.WriteLine($"ExecuteReplaceCommand: StackTrace: {ex.StackTrace}")
+                        Exit For
                     End Try
                 Next
             End Using
 
-            Debug.WriteLine($"ExecuteReplaceCommand: PASS 2 complete, replaced {replaceCount} of {matchPositions.Count}")
+            Debug.WriteLine($"ExecuteReplaceCommand: PASS 2 complete, replaced {replaceCount} of {selectedMatchPositions.Count} selected match(es)")
+            searchTrace.AppendLine("REPLACE completed=" & replaceCount.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                   " planned=" & selectedMatchPositions.Count.ToString(System.Globalization.CultureInfo.InvariantCulture))
 
             ' ─────────────────────────────────────────────────────────────────────
             ' RESTORE SELECTION
             ' ─────────────────────────────────────────────────────────────────────
             Try
                 Dim safeStart As Integer = System.Math.Max(doc.Content.Start, System.Math.Min(savedSelectionStart, doc.Content.End))
-                Dim safeEnd As Integer = System.Math.Max(doc.Content.Start, System.Math.Min(savedSelectionEnd, doc.Content.End))
+                ' All writes in selection mode are inside its boundaries. Track the actual
+                ' physical shift (including revisions) so later commands see the whole selection.
+                Dim scopeShift As System.Int32 = If(OnlySelection, doc.Content.End - originalSearchDocEnd, 0)
+                Dim safeEnd As Integer = System.Math.Max(safeStart, System.Math.Min(savedSelectionEnd + scopeShift, doc.Content.End))
                 Debug.WriteLine($"ExecuteReplaceCommand: restoring selection to [{safeStart},{safeEnd}]")
                 doc.Application.Selection.SetRange(safeStart, safeEnd)
                 doc.Application.Selection.Select()
             Catch ex As Exception
                 Debug.WriteLine($"ExecuteReplaceCommand: restore selection failed: {ex.Message}")
                 Try
-                    doc.Application.Selection.SetRange(doc.Content.Start, doc.Content.Start)
+                    If Not OnlySelection AndAlso IsSameChatWordDocument(doc.Application.ActiveDocument, doc) Then doc.Application.Selection.SetRange(doc.Content.Start, doc.Content.Start)
                 Catch
                 End Try
             End Try
 
-            Debug.WriteLine($"ExecuteReplaceCommand: END (success={replaceCount > 0})")
-            Return replaceCount > 0
+            Dim allReplacementsApplied As System.Boolean = replaceCount = selectedMatchPositions.Count
+            Debug.WriteLine($"ExecuteReplaceCommand: END (success={allReplacementsApplied})")
+            If Not allReplacementsApplied Then
+                _lastReplaceMayHavePartialChanges = _lastReplaceMayHavePartialChanges OrElse replaceCount > 0
+                If System.String.IsNullOrWhiteSpace(_lastReplaceFailureMessage) Then
+                    _lastReplaceFailureMessage =
+                        "Replacement incomplete (" & replaceCount.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                        "/" & selectedMatchPositions.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                        " fully applied). Search: '" & PreviewForLog(oldText, 90) & "'. Review the passage before retrying."
+                End If
+            End If
+            If System.String.Equals(searchTraceOutcome, "not-completed", System.StringComparison.Ordinal) Then
+                searchTraceOutcome = If(allReplacementsApplied, "success", "incomplete")
+            End If
+            Return allReplacementsApplied
 
         Catch ex As System.Exception
+            searchTraceOutcome = "exception:" & ex.GetType().Name
+            If System.String.IsNullOrWhiteSpace(_lastReplaceFailureMessage) Then
+                _lastReplaceFailureMessage = "Replacement aborted by a Word error. Review any tracked changes before retrying."
+            End If
             Debug.WriteLine($"ExecuteReplaceCommand: OUTER CATCH: {ex.GetType().Name}: {ex.Message}")
             Debug.WriteLine($"ExecuteReplaceCommand: StackTrace: {ex.StackTrace}")
 #If DEBUG Then
             System.Diagnostics.Debugger.Break()
 #End If
-            ShowCustomMessageBox("Error in ExecuteReplaceCommand: " & ex.Message)
+            ShowWordChatOperationError("ExecuteReplaceCommand", ex, WordEditFailureUserMessage)
             Return False
 
         Finally
+            searchTraceClock.Stop()
+            searchTrace.AppendLine("END outcome=" & searchTraceOutcome &
+                                   " attempts=" & searchTraceAttempts.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                   " rejected=" & searchTraceRejected.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                   " elapsedMs=" & searchTraceClock.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            SaveWordSearchTrace(searchTrace.ToString())
             Try
-                If view IsNot Nothing Then
+                If viewCaptured AndAlso view IsNot Nothing Then
                     view.RevisionsView = originalRevisionsView
                     view.ShowRevisionsAndComments = originalShowRevisions
                 End If
@@ -4479,7 +7909,7 @@ Public Class frmAIChat
                 Debug.WriteLine($"ExecuteReplaceCommand: FINALLY view restore failed: {ex.Message}")
             End Try
             Try
-                If doc IsNot Nothing Then
+                If trackingCaptured AndAlso doc IsNot Nothing Then
                     doc.TrackRevisions = trackChangesEnabled
                 End If
             Catch ex As Exception
@@ -4487,6 +7917,32 @@ Public Class frmAIChat
             End Try
         End Try
     End Function
+
+    ''' <summary>
+    ''' Writes bounded, content-free replacement diagnostics after each operation,
+    ''' only when the Word host has INI_APIDebug enabled.
+    ''' Diagnostic failures must never alter document editing or recovery behavior.
+    ''' </summary>
+    Private Shared Sub SaveWordSearchTrace(trace As System.String)
+        Try
+            ' Only persist Word search diagnostics when API debugging is enabled.
+            ' Do not create directories, rotate or write log files otherwise.
+            If Not ThisAddIn.INI_APIDebug Then Return
+            If System.String.IsNullOrWhiteSpace(trace) Then Return
+            Dim diagnosticDirectory As System.String = System.IO.Path.Combine(
+                System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
+                "RedInk")
+            System.IO.Directory.CreateDirectory(diagnosticDirectory)
+            Dim diagnosticPath As System.String = System.IO.Path.Combine(diagnosticDirectory, "RI_WordSearch.log")
+            If System.IO.File.Exists(diagnosticPath) AndAlso
+               (New System.IO.FileInfo(diagnosticPath)).Length > 524288 Then
+                System.IO.File.WriteAllText(diagnosticPath, System.String.Empty, System.Text.Encoding.UTF8)
+            End If
+            System.IO.File.AppendAllText(diagnosticPath, trace & System.Environment.NewLine, System.Text.Encoding.UTF8)
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine("Word search diagnostic logging failed: " & ex.GetType().Name)
+        End Try
+    End Sub
 
     Private Shared Function PreviewForLog(value As String, Optional maxLen As Integer = 120) As String
         If value Is Nothing Then Return "<null>"
@@ -4543,17 +7999,143 @@ Public Class frmAIChat
     End Function
 
 
+    ''' <summary>
+    ''' Materializes an explicit JSON insertion-boundary request against the actual Word
+    ''' characters immediately outside the collapsed insertion range. Unspecified or
+    ''' verbatim boundaries preserve the source text exactly. Never infer intent from dots,
+    ''' language, document template or filename extensions.
+    ''' </summary>
+    Private Function PrepareWordInsertionText(
+        doc As Microsoft.Office.Interop.Word.Document,
+        insertPosition As Integer,
+        sourceText As System.String,
+        joinBefore As System.String,
+        joinAfter As System.String,
+        ByRef replacementStart As Integer,
+        ByRef replacementEnd As Integer) As System.String
+
+        ' The default mutation remains a collapsed insertion. When an explicitly
+        ' requested paragraph boundary meets an existing manual line break, replace
+        ' that one character atomically with the paragraph mark in the new text.
+        ' Leaving the manual break outside the insertion would create a blank line.
+        replacementStart = insertPosition
+        replacementEnd = insertPosition
+        Dim result As System.String = If(sourceText, System.String.Empty)
+        If result.Length = 0 OrElse
+           ((System.String.IsNullOrEmpty(joinBefore) OrElse joinBefore = "verbatim") AndAlso
+            (System.String.IsNullOrEmpty(joinAfter) OrElse joinAfter = "verbatim")) Then
+            Return result
+        End If
+
+        ' With explicit semantics, incidental model-supplied spaces/tabs must not create
+        ' extra whitespace at paragraph starts or double the requested separator.
+        If Not System.String.IsNullOrEmpty(joinBefore) AndAlso joinBefore <> "verbatim" Then
+            result = result.TrimStart(" "c, ChrW(9))
+        End If
+        If Not System.String.IsNullOrEmpty(joinAfter) AndAlso joinAfter <> "verbatim" Then
+            result = result.TrimEnd(" "c, ChrW(9))
+        End If
+        If result.Length = 0 Then Return result
+
+        Dim leftCharacter As System.String = System.String.Empty
+        Dim rightCharacter As System.String = System.String.Empty
+        Dim adjacentRange As Microsoft.Office.Interop.Word.Range = Nothing
+        Try
+            If insertPosition > doc.Content.Start AndAlso
+               joinBefore <> "verbatim" AndAlso
+               Not System.String.IsNullOrEmpty(joinBefore) Then
+                adjacentRange = doc.Range(insertPosition - 1, insertPosition)
+                leftCharacter = If(adjacentRange.Text, System.String.Empty)
+                ReleaseWordRange(adjacentRange)
+                adjacentRange = Nothing
+            End If
+            If insertPosition < doc.Content.End AndAlso
+               joinAfter <> "verbatim" AndAlso
+               Not System.String.IsNullOrEmpty(joinAfter) Then
+                adjacentRange = doc.Range(insertPosition, insertPosition + 1)
+                rightCharacter = If(adjacentRange.Text, System.String.Empty)
+            End If
+        Finally
+            If adjacentRange IsNot Nothing Then ReleaseWordRange(adjacentRange)
+        End Try
+
+        ' A soft line break is not a paragraph boundary. If it is exactly adjacent
+        ' and a real paragraph is explicitly required, consume ONLY the soft break
+        ' in the same Word Range replacement. Other breaks and literal text stay put.
+        ' A single mutation also prevents partial insertion/deletion on failure.
+        If joinBefore = "paragraph_if_needed" AndAlso leftCharacter = ChrW(11) Then
+            replacementStart = insertPosition - 1
+        End If
+        If joinAfter = "paragraph_if_needed" AndAlso rightCharacter = ChrW(11) Then
+            replacementEnd = insertPosition + 1
+        End If
+
+        ' For an explicitly requested single paragraph boundary, do not retain two
+        ' identical paragraph marks when the text and adjacent Word paragraph both
+        ' supply that boundary. Verbatim mode still preserves deliberate blank lines.
+        If joinBefore = "paragraph_if_needed" AndAlso
+           leftCharacter = vbCr AndAlso result.StartsWith(vbCr, System.StringComparison.Ordinal) Then
+            result = result.Substring(1)
+        End If
+        If result.Length = 0 Then Return result
+        If joinAfter = "paragraph_if_needed" AndAlso
+           rightCharacter = vbCr AndAlso result.EndsWith(vbCr, System.StringComparison.Ordinal) Then
+            result = result.Substring(0, result.Length - 1)
+        End If
+        If result.Length = 0 Then Return result
+
+        Select Case joinBefore
+            Case "space_if_needed"
+                If leftCharacter.Length > 0 AndAlso
+                   Not IsWordInsertionBoundarySeparator(leftCharacter(leftCharacter.Length - 1)) AndAlso
+                   Not IsWordInsertionBoundarySeparator(result(0)) Then
+                    result = " " & result
+                End If
+            Case "paragraph_if_needed"
+                If leftCharacter.Length > 0 AndAlso
+                   Not IsWordInsertionParagraphBoundary(leftCharacter(leftCharacter.Length - 1)) AndAlso
+                   Not IsWordInsertionParagraphBoundary(result(0)) Then
+                    result = vbCr & result
+                End If
+        End Select
+
+        Select Case joinAfter
+            Case "space_if_needed"
+                If rightCharacter.Length > 0 AndAlso
+                   Not IsWordInsertionBoundarySeparator(result(result.Length - 1)) AndAlso
+                   Not IsWordInsertionBoundarySeparator(rightCharacter(0)) Then
+                    result &= " "
+                End If
+            Case "paragraph_if_needed"
+                If rightCharacter.Length > 0 AndAlso
+                   Not IsWordInsertionParagraphBoundary(result(result.Length - 1)) AndAlso
+                   Not IsWordInsertionParagraphBoundary(rightCharacter(0)) Then
+                    result &= vbCr
+                End If
+        End Select
+        Return result
+    End Function
+
+    Private Function IsWordInsertionParagraphBoundary(value As System.Char) As Boolean
+        Return value = ChrW(13) OrElse value = ChrW(10) OrElse value = ChrW(7)
+    End Function
+
+    Private Function IsWordInsertionBoundarySeparator(value As System.Char) As Boolean
+        Return System.Char.IsWhiteSpace(value) OrElse value = ChrW(7)
+    End Function
+
     ' =========================================================================
     ' Insert Before/After Command
     ' =========================================================================
 
     ''' <summary>
-    ''' Inserts newText before or after all occurrences of searchText anchor.
+    ''' Inserts newText before or after selected occurrences of searchText anchor.
+    ''' Without occurrence/max_matches it preserves the historic all-occurrences behavior.
     ''' Tries multiple search variants (original, trimmed) for flexibility.
     ''' Skips TOC ranges to prevent corruption.
     ''' </summary>
-    ''' <param name="searchText">Anchor text to find (normalized via DecodeParagraphMarks)</param>
-    ''' <param name="newText">Text to insert (normalized via DecodeParagraphMarks)</param>
+    ''' <param name="searchText">Parser-normalized anchor text to find</param>
+    ''' <param name="newText">Parser-normalized text to insert</param>
     ''' <param name="OnlySelection">True to restrict to current selection</param>
     ''' <param name="InsertBefore">True for insertbefore, False for insertafter</param>
     ''' <returns>True if at least one insertion made</returns>
@@ -4571,30 +8153,32 @@ Public Class frmAIChat
     ''' - Document end boundary guards (End-1 for insertion)
     ''' - Fallback to Selection.Text if Range creation fails
     ''' </remarks>
-    Private Function ExecuteInsertBeforeAfterCommand(searchText As String, newText As String, Optional OnlySelection As Boolean = False, Optional InsertBefore As Boolean = False) As Boolean
-        Dim doc As Word.Document = Globals.ThisAddIn.Application.ActiveDocument
+    Private Function ExecuteInsertBeforeAfterCommand(
+        searchText As System.String,
+        newText As System.String,
+        Optional OnlySelection As Boolean = False,
+        Optional InsertBefore As Boolean = False,
+        Optional matchSpec As ParsedCommandMatchSpec = Nothing,
+        Optional matchFormatSpec As ParsedCommandFormat = Nothing,
+        Optional joinBefore As System.String = Nothing,
+        Optional joinAfter As System.String = Nothing) As Boolean
 
+        Dim doc As Microsoft.Office.Interop.Word.Document = Globals.ThisAddIn.Application.ActiveDocument
         Dim trackChangesEnabled As Boolean = doc.TrackRevisions
-        Dim originalAuthor As String = doc.Application.UserName
 
         Try
-            ' Normalize inputs
-            searchText = DecodeParagraphMarks(searchText)
-            newText = DecodeParagraphMarks(newText)
-
-            If String.IsNullOrWhiteSpace(searchText) Then
-                CommandsList = $"Note: Empty insertion anchor (ignored)." & Environment.NewLine & CommandsList
+            ' ParsedCommand arguments are normalized by the protocol parser before execution.
+            If System.String.IsNullOrWhiteSpace(searchText) Then
+                CommandsList = "Note: Empty insertion anchor (ignored)." & System.Environment.NewLine & CommandsList
                 Return False
             End If
 
             doc.TrackRevisions = True
 
-            ' Determine working range
-            Dim workrange As Word.Range
+            Dim workrange As Microsoft.Office.Interop.Word.Range
             If OnlySelection Then
                 If doc.Application.Selection Is Nothing OrElse doc.Application.Selection.Range.Text = "" Then
-                    OnlySelection = False
-                    workrange = doc.Content
+                    Return False
                 Else
                     workrange = doc.Application.Selection.Range
                 End If
@@ -4602,175 +8186,210 @@ Public Class frmAIChat
                 workrange = doc.Content
             End If
 
-            Dim found As Boolean = False
+            Dim insertedAny As Boolean = False
+            Dim matchedAnyEligibleAnchor As Boolean = False
             Dim selectionStart As Integer = doc.Application.Selection.Start
             Dim selectionEnd As Integer = doc.Application.Selection.End
 
-            ' Build list of search variants (handle whitespace issues)
-            Dim searchAttempts As New List(Of String)
+            ' Preserve the pre-existing tolerant whitespace fallback. A later variant is tried
+            ' only when the earlier variant has no eligible match at all. Once an exact variant
+            ' exists, occurrence/max_matches is evaluated solely within that variant.
+            Dim searchAttempts As New System.Collections.Generic.List(Of System.String)()
             searchAttempts.Add(searchText)
-            If searchText.EndsWith(" ") Then searchAttempts.Add(searchText.TrimEnd())
-            If searchText.StartsWith(" ") Then searchAttempts.Add(searchText.TrimStart())
-            If searchText.StartsWith(" ") OrElse searchText.EndsWith(" ") Then searchAttempts.Add(searchText.Trim())
+            If searchText.EndsWith(" ", System.StringComparison.Ordinal) Then searchAttempts.Add(searchText.TrimEnd())
+            If searchText.StartsWith(" ", System.StringComparison.Ordinal) Then searchAttempts.Add(searchText.TrimStart())
+            If searchText.StartsWith(" ", System.StringComparison.Ordinal) OrElse searchText.EndsWith(" ", System.StringComparison.Ordinal) Then searchAttempts.Add(searchText.Trim())
             searchAttempts = searchAttempts.Distinct().ToList()
 
             Using ThisAddIn.BeginMarkupAuthorScope(doc.Application)
-                ' Try each search variant until match found
-                For Each currentSearchText In searchAttempts
-                    If found Then Exit For
+                For Each currentSearchText As System.String In searchAttempts
+                    Dim variantMatchedAny As Boolean = False
+                    Dim eligibleOrdinal As Integer = 0
+                    Dim insertedCount As Integer = 0
 
-                    Debug.WriteLine($"Trying search variant: '{currentSearchText}'")
+                    System.Diagnostics.Debug.WriteLine($"Trying search variant: '{currentSearchText}'")
                     doc.Application.Selection.SetRange(workrange.Start, workrange.End)
 
                     Dim maxIterations As Integer = 1000
                     Dim iterationCount As Integer = 0
                     Dim lastProcessedPosition As Integer = -1
 
-                    Do While Globals.ThisAddIn.FindLongTextInChunks(currentSearchText, doc.Application.Selection, True) = True
-
+                    Do While Globals.ThisAddIn.FindLongTextInChunks(currentSearchText, doc.Application.Selection, True)
                         If doc.Application.Selection Is Nothing Then Exit Do
 
                         System.Windows.Forms.Application.DoEvents()
                         If (GetAsyncKeyState(System.Windows.Forms.Keys.Escape) And &H8000) <> 0 Then
-                            CommandsList = $"Operation cancelled by user (ESC)." & Environment.NewLine & CommandsList
+                            CommandsList = "Operation cancelled by user (ESC)." & System.Environment.NewLine & CommandsList
                             Exit Do
                         End If
 
-                        ' Safety: prevent infinite loops
                         iterationCount += 1
                         If iterationCount > maxIterations Then
-                            Debug.WriteLine($"ExecuteInsertBeforeAfterCommand: Max iterations ({maxIterations}) reached")
+                            System.Diagnostics.Debug.WriteLine($"ExecuteInsertBeforeAfterCommand: Max iterations ({maxIterations}) reached")
                             Exit Do
                         End If
 
-                        ' Detect stuck state (same position)
                         If doc.Application.Selection.Start = lastProcessedPosition Then
-                            Debug.WriteLine("ExecuteInsertBeforeAfterCommand: Stuck at same position, advancing")
-                            doc.Application.Selection.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
-                            doc.Application.Selection.Move(Word.WdUnits.wdCharacter, 1)
+                            System.Diagnostics.Debug.WriteLine("ExecuteInsertBeforeAfterCommand: Stuck at same position, advancing")
+                            doc.Application.Selection.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
+                            doc.Application.Selection.Move(Microsoft.Office.Interop.Word.WdUnits.wdCharacter, 1)
                             Continue Do
                         End If
                         lastProcessedPosition = doc.Application.Selection.Start
 
-                        Dim foundRange As Word.Range = doc.Application.Selection.Range.Duplicate
+                        Dim foundRange As Microsoft.Office.Interop.Word.Range = Nothing
+                        Try
+                            foundRange = doc.Application.Selection.Range.Duplicate
 
-                        ' Skip TOC ranges to prevent corruption
-                        Dim tocEnd As Integer = TocEndIfInside(foundRange, doc)
-                        If tocEnd > 0 Then
-                            Debug.WriteLine("ExecuteInsertBeforeAfterCommand: Match in TOC -> skipping")
-                            Dim searchLimit As Integer = If(OnlySelection, selectionEnd, doc.Content.End)
-                            Dim continuePos As Integer = System.Math.Min(tocEnd, searchLimit)
-                            If continuePos >= searchLimit Then
-                                Exit Do
-                            Else
+                            Dim tocEnd As Integer = TocEndIfInside(foundRange, doc)
+                            If tocEnd > 0 Then
+                                System.Diagnostics.Debug.WriteLine("ExecuteInsertBeforeAfterCommand: Match in TOC -> skipping")
+                                Dim searchLimit As Integer = If(OnlySelection, selectionEnd, doc.Content.End)
+                                Dim continuePos As Integer = System.Math.Min(tocEnd, searchLimit)
+                                If continuePos >= searchLimit Then
+                                    Exit Do
+                                End If
                                 doc.Application.Selection.SetRange(continuePos, searchLimit)
                                 Continue Do
                             End If
-                        End If
 
-                        found = True
-                        Debug.WriteLine($"Found match at position {foundRange.Start}")
+                            Dim foundStart As Integer = foundRange.Start
+                            Dim foundEnd As Integer = foundRange.End
+                            If OnlySelection AndAlso (foundStart < selectionStart OrElse foundEnd > selectionEnd) Then Return False
 
-                        Dim foundStart As Integer = foundRange.Start
-                        Dim foundEnd As Integer = foundRange.End
-                        Dim insertPosition As Integer = If(InsertBefore, foundStart, foundEnd)
-
-                        ' Handle document end boundary (End includes final paragraph mark)
-                        Dim docContentEnd As Integer = doc.Content.End
-                        If insertPosition >= docContentEnd Then
-                            If Not InsertBefore Then
-                                insertPosition = docContentEnd - 1
-                            End If
-                        End If
-                        insertPosition = System.Math.Max(doc.Content.Start, System.Math.Min(insertPosition, docContentEnd - 1))
-
-                        Try
-                            ' Primary method: create Range and insert
-                            Dim insertRange As Word.Range = doc.Range(insertPosition, insertPosition)
-                            insertRange.Text = newText
-
-                            RememberLastActionRange(insertPosition, System.Math.Min(insertPosition + Len(newText), doc.Content.End))
-
-                            ' Apply Markdown if enabled
-                            If chkConvertMarkdown.Checked AndAlso newText.Length > 0 Then
-                                Try
-                                    Dim conversionStart As Integer = insertPosition
-                                    Dim conversionEnd As Integer = System.Math.Min(insertPosition + Len(newText), doc.Content.End)
-                                    doc.Range(conversionStart, conversionEnd).Select()
-                                    Globals.ThisAddIn.ConvertMarkdownToWord()
-                                Catch
-                                    ' Best effort
-                                End Try
-                            End If
-                        Catch rangeEx As Exception
-                            ' Fallback: use Selection to insert
-                            Debug.WriteLine($"Range creation failed at {insertPosition}, trying alternative")
-                            Try
-                                doc.Application.Selection.SetRange(insertPosition, insertPosition)
-                                doc.Application.Selection.Text = newText
-                                If chkConvertMarkdown.Checked AndAlso newText.Length > 0 Then
-                                    Globals.ThisAddIn.ConvertMarkdownToWord()
+                            If Not RangeMatchesFormatSpec(foundRange, matchFormatSpec) Then
+                                Dim filteredContinuePosition As Integer = System.Math.Max(foundEnd, lastProcessedPosition + 1)
+                                If OnlySelection Then
+                                    If filteredContinuePosition >= selectionEnd Then Exit Do
+                                    Dim filteredSafeEnd As Integer = System.Math.Min(selectionEnd, doc.Content.End)
+                                    doc.Application.Selection.SetRange(filteredContinuePosition, filteredSafeEnd)
+                                Else
+                                    If filteredContinuePosition >= doc.Content.End Then Exit Do
+                                    doc.Application.Selection.SetRange(filteredContinuePosition, doc.Content.End)
                                 End If
-                            Catch altEx As Exception
-                                Debug.WriteLine($"Alternative insertion failed: {altEx.Message}")
                                 Continue Do
-                            End Try
+                            End If
+
+                            variantMatchedAny = True
+                            matchedAnyEligibleAnchor = True
+                            eligibleOrdinal += 1
+
+                            Dim shouldInsert As Boolean = IsMatchOrdinalSelected(eligibleOrdinal, matchSpec, System.Int32.MaxValue)
+                            Dim continuePosition As Integer
+
+                            If shouldInsert Then
+                                Dim insertPosition As Integer = If(InsertBefore, foundStart, foundEnd)
+                                Dim docContentEnd As Integer = doc.Content.End
+                                If insertPosition >= docContentEnd AndAlso Not InsertBefore Then insertPosition = docContentEnd - 1
+                                insertPosition = System.Math.Max(doc.Content.Start, System.Math.Min(insertPosition, docContentEnd - 1))
+
+                                Dim replacementStart As Integer = insertPosition
+                                Dim replacementEnd As Integer = insertPosition
+                                Dim actualText As System.String = PrepareWordInsertionText(
+                                    doc, insertPosition, newText, joinBefore, joinAfter,
+                                    replacementStart, replacementEnd)
+                                If OnlySelection AndAlso (replacementStart < selectionStart OrElse replacementEnd > selectionEnd) Then Return False
+                                Dim beforeInsertDocEnd As System.Int32 = doc.Content.End
+                                Dim netInsertedLength As Integer = actualText.Length - (replacementEnd - replacementStart)
+                                Dim insertionSucceeded As Boolean = False
+                                Dim insertRange As Microsoft.Office.Interop.Word.Range = Nothing
+                                Try
+                                    insertRange = doc.Range(replacementStart, replacementEnd)
+                                    ' Do not assign Font/Style here. A collapsed Word Range inherits
+                                    ' the native formatting at the insertion point; explicit deviations
+                                    ' are applied separately through the JSON format operation.
+                                    insertRange.Text = actualText
+                                    insertionSucceeded = True
+                                Catch rangeEx As System.Exception
+                                    System.Diagnostics.Debug.WriteLine($"Range insertion failed at {insertPosition}: {rangeEx.Message}; trying Selection fallback")
+                                    Try
+                                        doc.Application.Selection.SetRange(replacementStart, replacementEnd)
+                                        doc.Application.Selection.Text = actualText
+                                        insertionSucceeded = True
+                                    Catch altEx As System.Exception
+                                        System.Diagnostics.Debug.WriteLine($"Alternative insertion failed: {altEx.Message}")
+                                    End Try
+                                Finally
+                                    If insertRange IsNot Nothing Then ReleaseWordRange(insertRange)
+                                End Try
+
+                                If insertionSucceeded Then
+                                    insertedAny = True
+                                    insertedCount += 1
+                                    RememberLastActionRange(replacementStart, System.Math.Min(replacementStart + actualText.Length, doc.Content.End))
+
+                                    If chkConvertMarkdown.Checked AndAlso actualText.Length > 0 Then
+                                        Try
+                                            Dim conversionStart As Integer = replacementStart
+                                            Dim conversionEnd As Integer = System.Math.Min(replacementStart + actualText.Length, doc.Content.End)
+                                            doc.Range(conversionStart, conversionEnd).Select()
+                                            Globals.ThisAddIn.ConvertMarkdownToWord()
+                                        Catch
+                                            ' Best effort; insertion itself already succeeded.
+                                        End Try
+                                    End If
+
+                                    If OnlySelection Then selectionEnd += doc.Content.End - beforeInsertDocEnd
+
+                                    If InsertBefore Then
+                                        continuePosition = insertPosition + netInsertedLength + (foundEnd - foundStart)
+                                    Else
+                                        continuePosition = insertPosition + netInsertedLength
+                                    End If
+
+                                    If HasReachedSelectedMatchLimit(insertedCount, matchSpec, System.Int32.MaxValue) Then Exit Do
+                                Else
+                                    continuePosition = System.Math.Max(foundEnd, lastProcessedPosition + 1)
+                                End If
+                            Else
+                                continuePosition = System.Math.Max(foundEnd, lastProcessedPosition + 1)
+                            End If
+
+                            If continuePosition <= lastProcessedPosition Then continuePosition = lastProcessedPosition + 1
+
+                            If OnlySelection Then
+                                If continuePosition >= selectionEnd Then Exit Do
+                                Dim safeEnd As Integer = System.Math.Min(selectionEnd, doc.Content.End)
+                                doc.Application.Selection.SetRange(continuePosition, safeEnd)
+                            Else
+                                If continuePosition >= doc.Content.End Then Exit Do
+                                doc.Application.Selection.SetRange(continuePosition, doc.Content.End)
+                            End If
+                        Finally
+                            If foundRange IsNot Nothing Then ReleaseWordRange(foundRange)
                         End Try
-
-                        ' Calculate next search position
-                        Dim continuePosition As Integer
-                        If InsertBefore Then
-                            continuePosition = insertPosition + Len(newText) + (foundEnd - foundStart)
-                        Else
-                            continuePosition = insertPosition + Len(newText)
-                        End If
-
-                        ' Ensure forward progress
-                        If continuePosition <= lastProcessedPosition Then
-                            continuePosition = lastProcessedPosition + 1
-                        End If
-
-                        ' Adjust selection end if text inserted
-                        If OnlySelection Then
-                            selectionEnd = selectionEnd + Len(newText)
-                        End If
-
-                        ' Check if reached end of search range
-                        If OnlySelection Then
-                            If continuePosition >= selectionEnd Then Exit Do
-                            Dim safeEnd As Integer = System.Math.Min(selectionEnd, doc.Content.End)
-                            doc.Application.Selection.SetRange(continuePosition, safeEnd)
-                        Else
-                            If continuePosition >= doc.Content.End Then Exit Do
-                            doc.Application.Selection.SetRange(continuePosition, doc.Content.End)
-                        End If
                     Loop
+
+                    If variantMatchedAny Then Exit For
                 Next
             End Using
 
-            If Not found Then
-                CommandsList = $"Note: The search term was not found." & Environment.NewLine & CommandsList
+            If Not insertedAny Then
+                If matchedAnyEligibleAnchor Then
+                    CommandsList = "Note: The requested insertion occurrence(s) were not found." & System.Environment.NewLine & CommandsList
+                Else
+                    CommandsList = "Note: The search term was not found." & System.Environment.NewLine & CommandsList
+                End If
             End If
 
-            ' Restore original selection with boundary guards
             Try
                 Dim safeStart As Integer = System.Math.Max(doc.Content.Start, System.Math.Min(selectionStart, doc.Content.End))
                 Dim safeEnd As Integer = System.Math.Max(doc.Content.Start, System.Math.Min(selectionEnd, doc.Content.End))
                 doc.Application.Selection.SetRange(safeStart, safeEnd)
                 doc.Application.Selection.Select()
             Catch
-                doc.Application.Selection.Collapse(Word.WdCollapseDirection.wdCollapseStart)
+                doc.Application.Selection.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseStart)
             End Try
 
-            Return found
+            Return insertedAny
 
         Catch ex As System.Exception
 #If DEBUG Then
-            Debug.WriteLine("Error: " & ex.Message)
-            Debug.WriteLine("Stacktrace: " & ex.StackTrace)
+            System.Diagnostics.Debug.WriteLine("Error: " & ex.Message)
+            System.Diagnostics.Debug.WriteLine("Stacktrace: " & ex.StackTrace)
             System.Diagnostics.Debugger.Break()
 #End If
-            ShowCustomMessageBox("Error in ExecuteInsertBeforeAfterCommand: " & ex.Message)
+            ShowWordChatOperationError("ExecuteInsertBeforeAfterCommand", ex, WordEditFailureUserMessage)
             Return False
 
         Finally
@@ -4787,21 +8406,121 @@ Public Class frmAIChat
     ''' Collapses selection to start before insertion.
     ''' Applies Markdown formatting if chkConvertMarkdown enabled.
     ''' </summary>
-    ''' <param name="newText">Text to insert (normalized via DecodeParagraphMarks)</param>
+    ''' <param name="newText">Parser-normalized text to insert</param>
     ''' <returns>True on success, False on error</returns>
     ''' <remarks>
     ''' Simplest command - no search, just inserts at current caret position.
     ''' Normalizes line breaks to vbCr (Word's internal format).
     ''' Restores original TrackRevisions state in Finally block.
     ''' </remarks>
-    Private Function ExecuteInsertCommand(newText As String) As Boolean
+    ''' <summary>
+    '' Inserts a real Word table at an explicit anchor or at a collapsed caret. The
+    '' input has already passed batch-wide JSON validation. Nothing is overwritten.
+    ''' </summary>
+    Private Function ExecuteInsertTableCommand(command As ParsedCommand, onlySelection As System.Boolean) As System.Boolean
+        Dim app As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
+        Dim doc As Microsoft.Office.Interop.Word.Document = app.ActiveDocument
+        If doc Is Nothing OrElse command Is Nothing OrElse command.TableRows Is Nothing Then Return False
+        Dim tracking As System.Boolean = doc.TrackRevisions
+        Dim insertionRange As Microsoft.Office.Interop.Word.Range = Nothing
+        Dim createdTable As Microsoft.Office.Interop.Word.Table = Nothing
+        Try
+            Dim insertionPoint As Integer = -1
+            If command.TablePosition = "cursor" Then
+                If app.Selection Is Nothing OrElse app.Selection.Start <> app.Selection.End Then
+                    Return False ' Never replace a non-collapsed selection with a table.
+                End If
+                insertionPoint = app.Selection.Start
+            Else
+                Dim limitStart As Integer = doc.Content.Start
+                Dim limitEnd As Integer = doc.Content.End
+                If onlySelection Then
+                    If app.Selection Is Nothing OrElse app.Selection.Start = app.Selection.End Then Return False
+                    limitStart = app.Selection.Start
+                    limitEnd = app.Selection.End
+                End If
+                Dim searchRange As Microsoft.Office.Interop.Word.Range = doc.Range(limitStart, limitEnd)
+                Dim found As Integer = 0
+                Dim requested As Integer = If(command.MatchSpec IsNot Nothing AndAlso command.MatchSpec.Occurrence.HasValue,
+                                               command.MatchSpec.Occurrence.Value, 0)
+                Dim uniquePosition As Integer = -1
+                Try
+                    Do While searchRange.Start < limitEnd
+                        Dim matchFound As System.Boolean = searchRange.Find.Execute(
+                            FindText:=command.Argument1, MatchCase:=False,
+                            MatchWholeWord:=False, Forward:=True,
+                            Wrap:=Microsoft.Office.Interop.Word.WdFindWrap.wdFindStop)
+                        If Not matchFound Then Exit Do
+                        found += 1
+                        If found > 10000 Then Return False
+                        If requested = 0 OrElse found = requested Then
+                            uniquePosition = If(command.TablePosition = "before", searchRange.Start, searchRange.End)
+                            If requested > 0 Then Exit Do
+                        End If
+                        Dim continueAt As Integer = System.Math.Max(searchRange.End, searchRange.Start + 1)
+                        If continueAt >= limitEnd Then Exit Do
+                        searchRange.SetRange(continueAt, limitEnd)
+                    Loop
+                Finally
+                    ReleaseWordRange(searchRange)
+                End Try
+                ' Without a specified occurrence, refuse ambiguous anchors.
+                If uniquePosition < 0 OrElse (requested = 0 AndAlso found <> 1) Then Return False
+                insertionPoint = uniquePosition
+            End If
+            insertionPoint = System.Math.Max(doc.Content.Start, System.Math.Min(insertionPoint, doc.Content.End - 1))
+            insertionRange = doc.Range(insertionPoint, insertionPoint)
+            If CBool(insertionRange.Information(Microsoft.Office.Interop.Word.WdInformation.wdWithInTable)) Then
+                Return False ' A new table must not silently split an existing table cell.
+            End If
+            If insertionRange.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory Then Return False
+
+            doc.TrackRevisions = True
+            Using ThisAddIn.BeginMarkupAuthorScope(app)
+                createdTable = doc.Tables.Add(insertionRange, command.TableRows.Count, command.TableRows(0).Count)
+                For rowIndex As Integer = 1 To command.TableRows.Count
+                    For columnIndex As Integer = 1 To command.TableRows(rowIndex - 1).Count
+                        Dim cellContent As Microsoft.Office.Interop.Word.Range = createdTable.Cell(rowIndex, columnIndex).Range
+                        Try
+                            cellContent.End -= 1 ' Preserve native Word end-of-cell marker.
+                            cellContent.Text = command.TableRows(rowIndex - 1)(columnIndex - 1)
+                        Finally
+                            ReleaseWordRange(cellContent)
+                        End Try
+                    Next
+                Next
+                If command.TableHeaderRow Then
+                    createdTable.Rows(1).HeadingFormat = -1
+                End If
+                RememberLastActionRange(createdTable.Range.Start, createdTable.Range.End)
+            End Using
+            Return True
+        Catch ex As System.Exception
+            ShowWordChatOperationError("ExecuteInsertTableCommand", ex, WordEditFailureUserMessage)
+            Return False
+        Finally
+            doc.TrackRevisions = tracking
+            If createdTable IsNot Nothing Then
+                Try
+                    System.Runtime.InteropServices.Marshal.ReleaseComObject(createdTable)
+                Catch
+                End Try
+            End If
+            If insertionRange IsNot Nothing Then ReleaseWordRange(insertionRange)
+        End Try
+    End Function
+
+    Private Function ExecuteInsertCommand(
+        newText As String,
+        Optional joinBefore As System.String = Nothing,
+        Optional joinAfter As System.String = Nothing,
+        Optional scopeStart As System.Int32 = -1, Optional scopeEnd As System.Int32 = -1) As Boolean
         Dim doc = Globals.ThisAddIn.Application.ActiveDocument
         Dim trackChangesEnabled = doc.TrackRevisions
 
         Try
-            ' Normalize line breaks to Word format
-            newText = DecodeParagraphMarks(newText)
-            newText = newText.Replace(vbCrLf, vbCr).Replace(vbLf, vbCr)
+            ' ParsedCommand arguments are normalized by the protocol parser before execution.
+            newText = If(newText, String.Empty)
 
             doc.TrackRevisions = True
             Using ThisAddIn.BeginMarkupAuthorScope(doc.Application)
@@ -4809,9 +8528,20 @@ Public Class frmAIChat
                 selection.Collapse(Word.WdCollapseDirection.wdCollapseStart)
 
                 Dim insertStart As Integer = selection.Start
-                selection.Text = newText
+                Dim replacementStart As Integer = insertStart
+                Dim replacementEnd As Integer = insertStart
+                Dim actualText As System.String = PrepareWordInsertionText(
+                    doc, insertStart, newText, joinBefore, joinAfter,
+                    replacementStart, replacementEnd)
+                ' Preserve Word's native insertion-point formatting. Only an explicit
+                ' paragraph request can widen the range to an adjacent soft break.
+                If scopeStart >= 0 AndAlso (replacementStart < scopeStart OrElse replacementEnd > scopeEnd) Then Return False
+                If replacementStart <> insertStart OrElse replacementEnd <> insertStart Then
+                    selection.SetRange(replacementStart, replacementEnd)
+                End If
+                selection.Text = actualText
 
-                RememberLastActionRange(insertStart, System.Math.Min(insertStart + newText.Length, doc.Content.End))
+                RememberLastActionRange(replacementStart, System.Math.Min(replacementStart + actualText.Length, doc.Content.End))
 
                 If chkConvertMarkdown.Checked Then
                     Globals.ThisAddIn.ConvertMarkdownToWord()
@@ -4820,7 +8550,7 @@ Public Class frmAIChat
 
             Return True
         Catch ex As Exception
-            ShowCustomMessageBox("Error in ExecuteInsertCommand: " & ex.Message)
+            ShowWordChatOperationError("ExecuteInsertCommand", ex, WordEditFailureUserMessage)
             Return False
         Finally
             doc.TrackRevisions = trackChangesEnabled

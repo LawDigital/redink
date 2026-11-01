@@ -12,6 +12,10 @@
 '  - BeginScope() for scoped, per-call activation (preferred for tool calls).
 '  - IsActive property reflects both persistent and scoped states.
 '  - Consumed by PathPolicy and SkillAuthorPathPolicy for read/write enforcement.
+'
+' KEY ARCHITECTURE
+'   • Surface: SkillAuthorMode, Releaser (VB implementation).
+'   • Entry points/helpers: Enable, PersistState, RestorePersistedState.
 ' =============================================================================
 
 Option Strict On

@@ -167,6 +167,7 @@ Partial Public Class ThisAddIn
     Public Function GetInternalWebTool() As ModelConfig
         Return New ModelConfig() With {
             .ToolName = InternalWebToolName,
+            .CapabilityTags = "source_retrieval",
             .ToolInstructionsPrompt = InternalWebToolInstructionsPrompt,
             .ToolDefinition = InternalWebToolDefinition,
             .ModelDescription = "Web Content Retriever" & InternalToolSuffix,
@@ -281,37 +282,9 @@ Partial Public Class ThisAddIn
     End Function
 
     Private Function ResolveDownloadTargetDirectory(requestedDirectory As String) As String
-        If String.IsNullOrWhiteSpace(requestedDirectory) Then
-            Dim workspaceRoot = GetSafeDownloadRoot()
-            If Not Directory.Exists(workspaceRoot) Then Directory.CreateDirectory(workspaceRoot)
-            Return workspaceRoot
-        End If
-
-        Dim root As String = GetSafeDownloadRoot()
-
-        If Path.IsPathRooted(requestedDirectory) Then
-            Dim absoluteTarget As String = Path.GetFullPath(requestedDirectory)
-
-            If Not absoluteTarget.Equals(root, StringComparison.OrdinalIgnoreCase) AndAlso
-               Not absoluteTarget.StartsWith(root & Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) Then
-
-                Throw New UnauthorizedAccessException(
-                    "Absolute target_directory is outside the active writable workspace/session staging root.")
-            End If
-
-            If Not Directory.Exists(absoluteTarget) Then Directory.CreateDirectory(absoluteTarget)
-            Return absoluteTarget
-        End If
-
-        Dim fullPath As String = Path.GetFullPath(Path.Combine(root, requestedDirectory))
-
-        If Not fullPath.Equals(root, StringComparison.OrdinalIgnoreCase) AndAlso
-           Not fullPath.StartsWith(root & Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) Then
-            Throw New UnauthorizedAccessException("Download target directory is outside the permitted workspace/session staging root.")
-        End If
-
-        If Not Directory.Exists(fullPath) Then Directory.CreateDirectory(fullPath)
-        Return fullPath
+        Dim target As System.String = SharedLibrary.Agents.PathPolicy.ResolveDownloadDirectory(requestedDirectory)
+        System.IO.Directory.CreateDirectory(target)
+        Return target
     End Function
 
     Private Function SanitizeDownloadFileName(name As String) As String
@@ -641,6 +614,7 @@ Partial Public Class ThisAddIn
 
         Return New ModelConfig() With {
             .ToolName = InternalSearchToolName,
+            .CapabilityTags = "source_retrieval",
             .ToolInstructionsPrompt = instructions,
             .ToolDefinition = definition,
             .ModelDescription = "Internet Search (" & If(Not String.IsNullOrWhiteSpace(INI_ISearch_Name), INI_ISearch_Name, "Search") & ")" & InternalToolSuffix,
@@ -794,6 +768,7 @@ Partial Public Class ThisAddIn
             context.Log($"Retrieving content from {urls.Count} URL(s)...")
 
             Dim results As New StringBuilder()
+            Dim retrievedCount As System.Int32 = 0
 
             If UseWebView2 Then
                 For i = 0 To urls.Count - 1
@@ -816,10 +791,13 @@ Partial Public Class ThisAddIn
                         results.AppendLine($"<URL_{i + 1}>{resolvedUrl}</URL_{i + 1}>")
 
                         If Not String.IsNullOrWhiteSpace(content) Then
+                            Dim preparedContent As System.String = SharedLibrary.SharedLibrary.SharedMethods.PrepareWebToolTextForReplay(content, requestedUrl)
                             results.AppendLine($"<CONTENT_{i + 1}>")
-                            results.AppendLine(content)
+                            results.AppendLine(preparedContent)
+                            retrievedCount += 1
                             results.AppendLine($"</CONTENT_{i + 1}>")
                         Else
+                            If includeLinks AndAlso Not System.String.IsNullOrWhiteSpace(linksJson) AndAlso linksJson.Trim() <> "[]" Then retrievedCount += 1
                             results.AppendLine($"<CONTENT_{i + 1}>No content retrieved</CONTENT_{i + 1}>")
                             ToolingFileLogger.LogWarn("Internal web tool: No content retrieved.", details:=$"url={requestedUrl}")
                         End If
@@ -872,8 +850,10 @@ Partial Public Class ThisAddIn
                             results.AppendLine($"<URL_{i + 1}>{requestedUrl}</URL_{i + 1}>")
 
                             If Not String.IsNullOrWhiteSpace(content) Then
+                                Dim preparedContent As System.String = SharedLibrary.SharedLibrary.SharedMethods.PrepareWebToolTextForReplay(content, requestedUrl)
                                 results.AppendLine($"<CONTENT_{i + 1}>")
-                                results.AppendLine(content)
+                                results.AppendLine(preparedContent)
+                                retrievedCount += 1
                                 results.AppendLine($"</CONTENT_{i + 1}>")
                             Else
                                 results.AppendLine($"<CONTENT_{i + 1}>No content retrieved</CONTENT_{i + 1}>")
@@ -917,8 +897,18 @@ Partial Public Class ThisAddIn
                 End Using
             End If
 
+            If retrievedCount < urls.Count Then
+                results.AppendLine("<RETRIEVAL_STATUS>" & If(retrievedCount = 0, "failed", "partial") &
+                    "; retrieved=" & retrievedCount.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    "; requested=" & urls.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    "; inspect each URL result; missing content was not retrieved.</RETRIEVAL_STATUS>")
+            End If
             response.Response = results.ToString()
-            response.Success = True
+            response.Success = retrievedCount > 0
+            If Not response.Success Then
+                response.ErrorCode = "web_content_unavailable"
+                response.ErrorMessage = "No requested source content or usable link result was retrieved. Inspect the per-URL errors and use the stated download/extraction or retrieval alternative."
+            End If
 
         Catch ex As Exception
             response.Success = False

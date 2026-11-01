@@ -22,6 +22,10 @@
 '   - All semantic-search logic uses SharedMethods.SemanticSearch.* shared helpers.
 '   - No WinForms interactive APIs are used here.
 '   - LLM-dependent operations require an ISharedContext supplied by the host.
+'
+' KEY ARCHITECTURE
+'   • Surface: TextTools, SemanticConversationStateItem (VB implementation).
+'   • Entry points/helpers: IsExtendedTextTool, BuildExtendedTools, BuildToolConfig.
 ' =============================================================================
 
 Option Strict On
@@ -54,6 +58,8 @@ Namespace Agents
         Public Const ToolSemanticIndexRetrieveAfterVerification As String = "semantic_index_retrieve_after_verification"
         Public Const ToolSemanticIndexResetConversation As String = "semantic_index_reset_conversation"
         Public Const ToolSemanticIndexInvalidateCache As String = "semantic_index_invalidate_cache"
+
+        Private Const TextExportAdapterVersion As System.String = "text-export-v3"
 
         Private Const SemanticSearchTaskName As String = "SemanticSearch"
         Private Const SemanticIndexGenerationTaskName As String = "SemanticSearchIndex"
@@ -142,6 +148,16 @@ Namespace Agents
             Public Property Content As String = ""
             Public Property ErrorCode As String = ""
             Public Property Message As String = ""
+            Public Property PageCount As System.Nullable(Of System.Int32) = Nothing
+            Public Property OcrUsed As System.Nullable(Of System.Boolean) = Nothing
+            Public Property OcrAttempted As System.Nullable(Of System.Boolean) = Nothing
+            Public Property OcrSkipped As System.Nullable(Of System.Boolean) = Nothing
+            Public Property OcrDurationMilliseconds As System.Nullable(Of System.Int64) = Nothing
+            Public Property ExtractionComplete As System.Nullable(Of System.Boolean) = Nothing
+            Public Property ExtractionCoverageBasis As System.String = "unverified"
+            Public Property ExtractionWarnings As New System.Collections.Generic.List(Of System.String)()
+            Public Property ContentFormat As System.String = "unknown"
+            Public Property ProcessedRanges As New System.Collections.Generic.List(Of TextExtractionProcessedRange)()
         End Class
 
         Friend Shared Function IsExtendedTextTool(name As String) As Boolean
@@ -172,16 +188,18 @@ Namespace Agents
             Return New List(Of ModelConfig) From {
                 BuildToolConfig(
                     ToolExportToText,
-                    "Silently extracts readable text from a supported file or from all supported files in a directory and saves UTF-8 .txt files without using host UI prompts. For directory input, subdirectories can be included and structure is preserved under the output directory.",
+                    "Silently extracts readable text to UTF-8 .txt files by default. Optional output_format=markdown writes PDF/DOCX/DOCM/MD to .md through existing structured readers without model copying; other formats retain .txt and their actual content_format. Markdown PDF extraction is text-only: ocr_pdf=true is rejected for this combination, scanned PDFs fail explicitly. No plain-text fallback is silently labelled Markdown. Items retain source_path/output_path/status and add char_count (UTF-16), byte_count, snapshot_sha256 (exact output bytes/BOM), source_sha256, resource_id/resource_reuse, secret-free adapter/config fingerprints and observed PDF page/OCR fields. Successful extraction uses an immutable captured source and a session-scoped single-flight resource: identical source bytes plus identical effective adapter/options reuse the same successful extraction instead of rerunning OCR. Failed/cancelled extraction is never cached. overwrite=false still checks an existing output before extraction; an output published by this session is provenance-verified against its resource, while an unrelated pre-existing .txt remains reuse_validation=not_verified. processed_ranges are host-known ranges only and do not claim paragraph-to-page mapping. Null metadata means unknown, not false or complete. output_path can feed create_word_document.markdown_path when explicitly interpreted as Markdown. Newly written exports are published atomically. Hashes prove byte identity, not OCR accuracy. For directories, structure is preserved.",
                     "{""type"":""object"",""properties"":{" &
                         """input_path"":{""type"":""string"",""description"":""Required file or directory path.""}," &
                         """output_directory"":{""type"":""string"",""description"":""Optional output directory. For directory input, relative paths are preserved under this root.""}," &
+                        """output_format"":{""type"":""string"",""enum"":[""text"",""markdown""],""description"":""Default text. Markdown for PDF/DOCX/DOCM/MD; other formats retain text outputs. PDF Markdown does not support OCR.""}," &
                         """recursive"":{""type"":""boolean"",""description"":""For directory input, include subdirectories. Default true.""}," &
-                        """overwrite"":{""type"":""boolean"",""description"":""Overwrite existing .txt outputs only when true. Default false.""}," &
+                        """overwrite"":{""type"":""boolean"",""description"":""Overwrite existing outputs only when true. Default false.""}," &
                         """ocr_pdf"":{""type"":""boolean"",""description"":""Enable silent OCR heuristics for PDFs when a suitable model is configured. Default false.""}}," &
                         """required"":[""input_path""]}",
                     923,
-                    "Text (export to text)"),
+                    "Text (export to text)",
+                    allowRepeatedIdenticalCalls:=True),
                 BuildToolConfig(
                     ToolSemanticIndexCreateFromFile,
                     "Create a self-indexed semantic-search UTF-8 text file from an existing source text file.",
@@ -313,7 +331,8 @@ Namespace Agents
                                                 description As String,
                                                 parametersJson As String,
                                                 priority As Integer,
-                                                modelDescription As String) As ModelConfig
+                                                modelDescription As String,
+                                                Optional allowRepeatedIdenticalCalls As System.Boolean = False) As ModelConfig
             Dim def As String =
                 "{""name"":""" & toolName & """," &
                 """description"":""" & EscapeToolJson(description) & """," &
@@ -326,7 +345,8 @@ Namespace Agents
                 .ModelDescription = modelDescription,
                 .Tool = True,
                 .ToolPriority = priority,
-                .ToolErrorHandling = "skip"
+                .ToolErrorHandling = "skip",
+                .AllowRepeatedIdenticalCalls = allowRepeatedIdenticalCalls
             }
         End Function
 
@@ -426,7 +446,8 @@ Namespace Agents
                 Key .content_byte_length = result.ContentByteLength,
                 Key .document_count = result.DocumentCount,
                 Key .segment_count = result.SegmentCount,
-                Key .content_sha256 = result.ContentSha256
+                Key .content_sha256 = result.ContentSha256,
+                Key .metadata_generation_warnings = result.MetadataGenerationWarnings
             })
         End Function
 
@@ -465,7 +486,8 @@ Namespace Agents
                 Key .content_byte_length = result.ContentByteLength,
                 Key .document_count = result.DocumentCount,
                 Key .segment_count = result.SegmentCount,
-                Key .content_sha256 = result.ContentSha256
+                Key .content_sha256 = result.ContentSha256,
+                Key .metadata_generation_warnings = result.MetadataGenerationWarnings
             })
         End Function
 
@@ -810,6 +832,11 @@ Namespace Agents
             Dim overwrite As Boolean = GetBool(args, "overwrite", False)
             Dim ocrPdf As Boolean = GetBool(args, "ocr_pdf", False)
             Dim outputDirectoryArg As String = GetStr(args, "output_directory")
+            Dim outputFormat As System.String = GetStr(args, "output_format").Trim().ToLowerInvariant()
+            If outputFormat = "" Then outputFormat = "text"
+            If outputFormat <> "text" AndAlso outputFormat <> "markdown" Then
+                Return BuildError("invalid_output_format", "output_format must be text or markdown.")
+            End If
 
             Dim inputIsFile As Boolean = File.Exists(inputPath)
             Dim inputIsDirectory As Boolean = Directory.Exists(inputPath)
@@ -825,40 +852,11 @@ Namespace Agents
 
             If inputIsFile Then
                 cancellationToken.ThrowIfCancellationRequested()
-
-                Dim outputPath As String =
-                    ResolveSingleFileTextOutputPath(inputPath, outputDirectoryArg)
-
-                Dim result As TextExtractionOutcome =
-                    Await TryExtractTextForExportAsync(inputPath, context, ocrPdf).ConfigureAwait(False)
-
-                If File.Exists(outputPath) AndAlso Not overwrite Then
-                    skippedCount += 1
-                    items.Add(New With {
-                        Key .source_path = inputPath,
-                        Key .output_path = outputPath,
-                        Key .status = "skipped_existing"
-                    })
-                ElseIf Not result.Success Then
-                    failedCount += 1
-                    items.Add(New With {
-                        Key .source_path = inputPath,
-                        Key .output_path = outputPath,
-                        Key .status = "failed",
-                        Key .error = result.ErrorCode,
-                        Key .message = result.Message
-                    })
-                Else
-                    Directory.CreateDirectory(Path.GetDirectoryName(outputPath))
-                    File.WriteAllText(outputPath, result.Content, Encoding.UTF8)
-                    convertedCount += 1
-                    items.Add(New With {
-                        Key .source_path = inputPath,
-                        Key .output_path = outputPath,
-                        Key .status = "converted"
-                    })
-                End If
-
+                Dim outputPath As System.String = ResolveSingleFileTextOutputPath(inputPath, outputDirectoryArg, outputFormat)
+                Dim item As Newtonsoft.Json.Linq.JObject = Await ExportSingleTextFileAsync(
+                    inputPath, outputPath, overwrite, ocrPdf, context, cancellationToken, outputFormat).ConfigureAwait(False)
+                items.Add(item)
+                CountTextExportItem(item, convertedCount, skippedCount, failedCount)
                 Return JsonConvert.SerializeObject(New With {
                     Key .input_path = inputPath,
                     Key .output_root = Path.GetDirectoryName(outputPath),
@@ -875,7 +873,7 @@ Namespace Agents
             For Each sourcePath As String In Directory.GetFiles(inputPath, "*", searchOption).OrderBy(Function(p) p)
                 cancellationToken.ThrowIfCancellationRequested()
 
-                If IsUnderPath(sourcePath, outputRoot) Then
+                If IsUnderPath(sourcePath, outputRoot) OrElse Global.SharedLibrary.SharedLibrary.GeneratedOutputRegistry.IsGeneratedPath(sourcePath) Then
                     Continue For
                 End If
 
@@ -890,42 +888,12 @@ Namespace Agents
                 End If
 
                 Dim relativePath As String = sourcePath.Substring(inputPath.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
-                Dim outputPath As String = PathPolicy.Resolve(Path.Combine(outputRoot, relativePath & ".txt"), PathAccess.Write)
+                Dim outputPath As String = PathPolicy.Resolve(Path.Combine(outputRoot, relativePath & TextExportOutputExtension(sourcePath, outputFormat)), PathAccess.Write)
 
-                If File.Exists(outputPath) AndAlso Not overwrite Then
-                    skippedCount += 1
-                    items.Add(New With {
-                        Key .source_path = sourcePath,
-                        Key .output_path = outputPath,
-                        Key .status = "skipped_existing"
-                    })
-                    Continue For
-                End If
-
-                Dim result As TextExtractionOutcome =
-                    Await TryExtractTextForExportAsync(sourcePath, context, ocrPdf).ConfigureAwait(False)
-
-                If Not result.Success Then
-                    failedCount += 1
-                    items.Add(New With {
-                        Key .source_path = sourcePath,
-                        Key .output_path = outputPath,
-                        Key .status = "failed",
-                        Key .error = result.ErrorCode,
-                        Key .message = result.Message
-                    })
-                    Continue For
-                End If
-
-                Directory.CreateDirectory(Path.GetDirectoryName(outputPath))
-                File.WriteAllText(outputPath, result.Content, Encoding.UTF8)
-
-                convertedCount += 1
-                items.Add(New With {
-                    Key .source_path = sourcePath,
-                    Key .output_path = outputPath,
-                    Key .status = "converted"
-                })
+                Dim item As Newtonsoft.Json.Linq.JObject = Await ExportSingleTextFileAsync(
+                    sourcePath, outputPath, overwrite, ocrPdf, context, cancellationToken, outputFormat).ConfigureAwait(False)
+                items.Add(item)
+                CountTextExportItem(item, convertedCount, skippedCount, failedCount)
             Next
 
             Return JsonConvert.SerializeObject(New With {
@@ -938,26 +906,403 @@ Namespace Agents
             })
         End Function
 
+        Private Shared Sub CountTextExportItem(item As Newtonsoft.Json.Linq.JObject,
+                                               ByRef converted As System.Int32, ByRef skipped As System.Int32,
+                                               ByRef failed As System.Int32)
+            Select Case item.Value(Of System.String)("status")
+                Case "converted" : converted += 1
+                Case "skipped_existing", "skipped_unsupported" : skipped += 1
+                Case Else : failed += 1
+            End Select
+        End Sub
+
+        ' Both directory and single-file exports use this one side-effect boundary.
+        ' Existing-file reuse is provenance-verified only when this session published the exact output from the same extraction resource.
+        Private Shared Async Function ExportSingleTextFileAsync(sourcePath As System.String,
+                                                                 outputPath As System.String,
+                                                                 overwrite As System.Boolean,
+                                                                 ocrPdf As System.Boolean,
+                                                                 context As ISharedContext,
+                                                                 cancellationToken As System.Threading.CancellationToken,
+                                                                 Optional outputFormat As System.String = "text") As System.Threading.Tasks.Task(Of Newtonsoft.Json.Linq.JObject)
+            Dim result As TextExportResult = Await TextExportService.ExportFileAsync(
+                context, sourcePath, outputPath, New TextExportOptions With {.Overwrite = overwrite, .OcrPdf = ocrPdf, .OutputFormat = outputFormat},
+                cancellationToken).ConfigureAwait(False)
+            Return result.LegacyItem
+        End Function
+
+        Friend Shared Function GetTextExportSupportedExtensions() As System.Collections.Generic.IReadOnlyCollection(Of System.String)
+            Return New System.Collections.ObjectModel.ReadOnlyCollection(Of System.String)(
+                SupportedTextExportExtensions.OrderBy(Function(value As System.String) value, System.StringComparer.OrdinalIgnoreCase).ToList())
+        End Function
+
+        Friend Shared Function CreateTextExportCallContext(sourcePath As System.String, context As ISharedContext,
+                                                          options As TextExportOptions) As ISharedContext
+            If context Is Nothing Then Return Nothing
+            Dim isolated As ISharedContext = SharedMethods.CreateIsolatedModelCallContext(context)
+            Dim extension As System.String = System.IO.Path.GetExtension(sourcePath).ToLowerInvariant()
+            Dim taskName As System.String = System.String.Empty
+            If extension = ".pdf" AndAlso options.OcrPdf Then taskName = "OCR"
+            If SharedMethods.IsBinaryMediaExtension(extension) Then taskName = SharedMethods.TaskFlagForExtension(extension)
+            If Not System.String.IsNullOrEmpty(taskName) Then
+                isolated = SharedMethods.CreateIsolatedModelCallContext(SharedMethods.ResolveIsolatedSpecialTaskModel(isolated, taskName).Context)
+            End If
+            Return isolated
+        End Function
+
+        Friend Shared Function GetTextExportProcessingSignature(sourcePath As System.String, context As ISharedContext,
+                                                                 options As TextExportOptions) As System.String
+            Dim isolatedContext As ISharedContext = CreateTextExportCallContext(sourcePath, context, options)
+            Return BuildTextExportProcessingSignature(GetExtractionAdapterId(sourcePath), TextExportAdapterVersion,
+                GetExtractionConfigurationFingerprint(sourcePath, isolatedContext, options.OcrPdf),
+                TextExportOptionsFingerprint(options, options.OcrPdf))
+        End Function
+
+        Friend Shared Function BuildTextExportProcessingSignature(adapterId As System.String, adapterVersion As System.String,
+                                                                  configurationFingerprint As System.String, optionsFingerprint As System.String) As System.String
+            If System.String.IsNullOrWhiteSpace(adapterVersion) OrElse System.String.IsNullOrWhiteSpace(configurationFingerprint) OrElse
+                System.String.IsNullOrWhiteSpace(optionsFingerprint) Then Return System.String.Empty
+            Return TextExtractionResourceRegistry.HashString(adapterVersion & "|typed-adapter-v1|" & adapterId & "|" &
+                configurationFingerprint & "|text-export-options-v1|" & optionsFingerprint)
+        End Function
+
+        Friend Shared Async Function ExportSingleTextFileCoreAsync(sourcePath As System.String,
+                                                                 outputPath As System.String,
+                                                                 overwrite As System.Boolean,
+                                                                 ocrPdf As System.Boolean,
+                                                                 context As ISharedContext,
+                                                                 cancellationToken As System.Threading.CancellationToken,
+                                                                 Optional executionOptions As TextExportOptions = Nothing) As System.Threading.Tasks.Task(Of Newtonsoft.Json.Linq.JObject)
+            Dim item As New Newtonsoft.Json.Linq.JObject From {
+                {"source_path", sourcePath}, {"output_path", outputPath}, {"status", "failed"},
+                {"char_count", Newtonsoft.Json.Linq.JValue.CreateNull()},
+                {"byte_count", Newtonsoft.Json.Linq.JValue.CreateNull()},
+                {"page_count", Newtonsoft.Json.Linq.JValue.CreateNull()},
+                {"ocr_used", Newtonsoft.Json.Linq.JValue.CreateNull()},
+                {"ocr_attempted", Newtonsoft.Json.Linq.JValue.CreateNull()},
+                {"ocr_skipped_due_to_heuristics", Newtonsoft.Json.Linq.JValue.CreateNull()},
+                {"ocr_duration_ms", Newtonsoft.Json.Linq.JValue.CreateNull()},
+                {"extraction_complete", Newtonsoft.Json.Linq.JValue.CreateNull()},
+                {"completeness_status", "not_verified"}, {"content_format", "unknown"},
+                {"source_association_verified", False}, {"extraction_duration_ms", 0}
+            }
+            Try
+                Dim outputFormat As System.String = NormalizeTextExportFormat(If(executionOptions, New TextExportOptions()).OutputFormat)
+                item("output_format") = outputFormat
+                sourcePath = PathPolicy.Resolve(sourcePath, PathAccess.Read)
+                outputPath = PathPolicy.Resolve(outputPath, PathAccess.Write)
+                item("source_path") = sourcePath
+                item("output_path") = outputPath
+                cancellationToken.ThrowIfCancellationRequested()
+
+                If System.IO.File.Exists(outputPath) AndAlso Not overwrite Then
+                    item("status") = "skipped_existing"
+                    Try
+                        Dim existing As TextFileSnapshot = TextFileSnapshot.Read(outputPath)
+                        AddTextSnapshotMetadata(item, existing)
+
+                        Dim knownResource As TextExtractionResource = Nothing
+                        If TextExtractionResourceRegistry.HasPublishedOutput(outputPath) Then
+                            Dim currentSourceHash As System.String = TextFileSnapshot.ComputeFileHash(sourcePath)
+                            Dim knownAdapterId As System.String = GetExtractionAdapterId(sourcePath)
+                            Dim knownAdapterVersion As System.String = TextExportAdapterVersion
+                            Dim knownConfigurationFingerprint As System.String = GetExtractionConfigurationFingerprint(sourcePath, context, ocrPdf)
+                            Dim knownOptionsFingerprint As System.String = TextExportOptionsFingerprint(executionOptions, ocrPdf)
+                            If TextExtractionResourceRegistry.TryGetVerifiedPublishedOutput(
+                                outputPath, currentSourceHash, knownAdapterId, knownAdapterVersion,
+                                knownConfigurationFingerprint, knownOptionsFingerprint, knownResource) Then
+                            item("reuse_validation") = "session_resource_verified"
+                            item("source_association_verified") = True
+                            item("source_sha256") = knownResource.SourceSha256
+                            item("source_byte_count") = knownResource.SourceByteCount
+                            item("resource_id") = knownResource.ResourceId
+                            item("resource_reuse") = knownResource.ReuseStatus
+                            item("adapter_id") = knownResource.AdapterId
+                            item("adapter_version") = knownResource.AdapterVersion
+                            item("configuration_fingerprint") = knownResource.ConfigurationFingerprint
+                            item("options_fingerprint") = knownResource.OptionsFingerprint
+                            If knownResource.Payload IsNot Nothing Then
+                                item("page_count") = If(knownResource.Payload.PageCount.HasValue, New Newtonsoft.Json.Linq.JValue(knownResource.Payload.PageCount.Value), Newtonsoft.Json.Linq.JValue.CreateNull())
+                                item("ocr_used") = If(knownResource.Payload.OcrUsed.HasValue, New Newtonsoft.Json.Linq.JValue(knownResource.Payload.OcrUsed.Value), Newtonsoft.Json.Linq.JValue.CreateNull())
+                                item("ocr_attempted") = If(knownResource.Payload.OcrAttempted.HasValue, New Newtonsoft.Json.Linq.JValue(knownResource.Payload.OcrAttempted.Value), Newtonsoft.Json.Linq.JValue.CreateNull())
+                                item("ocr_skipped_due_to_heuristics") = If(knownResource.Payload.OcrSkipped.HasValue, New Newtonsoft.Json.Linq.JValue(knownResource.Payload.OcrSkipped.Value), Newtonsoft.Json.Linq.JValue.CreateNull())
+                                item("ocr_duration_ms") = If(knownResource.Payload.OcrDurationMilliseconds.HasValue, New Newtonsoft.Json.Linq.JValue(knownResource.Payload.OcrDurationMilliseconds.Value), Newtonsoft.Json.Linq.JValue.CreateNull())
+                                item("content_format") = knownResource.Payload.ContentFormat
+                                item("extraction_coverage_basis") = knownResource.Payload.ExtractionCoverageBasis
+                                item("extraction_warnings") = Newtonsoft.Json.Linq.JArray.FromObject(TextExtractionDiagnostics.CopyWarnings(knownResource.Payload.ExtractionWarnings))
+                                item("extraction_complete") = If(knownResource.Payload.ExtractionComplete.HasValue,
+                                    New Newtonsoft.Json.Linq.JValue(knownResource.Payload.ExtractionComplete.Value), Newtonsoft.Json.Linq.JValue.CreateNull())
+                                item("completeness_status") = If(knownResource.Payload.ExtractionComplete.HasValue,
+                                    If(knownResource.Payload.ExtractionComplete.GetValueOrDefault(), "complete", "incomplete"), "not_verified")
+                                AddProcessedRangesMetadata(item, knownResource.Payload.ProcessedRanges)
+                            End If
+                            Else
+                                item("reuse_validation") = "not_verified"
+                                item("warning") = "Existing output left unchanged without extraction. Its association with the current source/options has not been verified."
+                            End If
+                        Else
+                            item("reuse_validation") = "not_verified"
+                            item("warning") = "Existing output left unchanged without extraction. Its association with the current source/options has not been verified."
+                        End If
+                    Catch ex As System.Exception
+                        ' Metadata must not break legacy skip semantics, e.g. a write-only
+                        ' workspace or an output exceeding the configured text-read limit.
+                        item("reuse_validation") = "not_verified"
+                        item("metadata_warning") = "Existing output metadata unavailable: " & ex.GetType().Name
+                        System.Diagnostics.Debug.WriteLine("Text export skipped-existing metadata: " & ex.GetType().FullName)
+                    End Try
+                    Return item
+                End If
+
+                ' Capture the effective extractor model after the legacy overwrite=false
+                ' precheck, then keep its fingerprint and all nested reader calls pinned together.
+                context = CreateTextExportCallContext(sourcePath, context, If(executionOptions, New TextExportOptions With {.OcrPdf = ocrPdf}))
+                Dim adapterId As System.String = GetExtractionAdapterId(sourcePath)
+                Dim adapterVersion As System.String = TextExportAdapterVersion
+                Dim configurationFingerprint As System.String = GetExtractionConfigurationFingerprint(sourcePath, context, ocrPdf)
+                Dim optionsFingerprint As System.String = TextExportOptionsFingerprint(executionOptions, ocrPdf)
+
+                Dim timer As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
+                Dim result As TextExtractionOutcome = Nothing
+                Dim resource As TextExtractionResource = Nothing
+                Try
+                    resource = Await TextExtractionResourceRegistry.ResolveAsync(
+                        sourcePath,
+                        System.IO.Path.GetDirectoryName(outputPath),
+                        adapterId,
+                        adapterVersion,
+                        configurationFingerprint,
+                        optionsFingerprint,
+                        Async Function(snapshotPath As System.String, token As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of TextExtractionPayload)
+                            Dim localResult As TextExtractionOutcome =
+                                Await TryExtractTextForExportAsync(snapshotPath, context, ocrPdf, token, executionOptions).ConfigureAwait(False)
+                            Return ConvertToExtractionPayload(localResult)
+                        End Function,
+                        cancellationToken,
+                        forceFresh:=executionOptions IsNot Nothing AndAlso executionOptions.ForceFreshExtraction).ConfigureAwait(False)
+
+                    result = ConvertFromExtractionPayload(If(resource Is Nothing, Nothing, resource.Payload))
+                Finally
+                    timer.Stop()
+                    item("extraction_duration_ms") = timer.ElapsedMilliseconds
+                End Try
+                cancellationToken.ThrowIfCancellationRequested()
+                item("page_count") = If(result.PageCount.HasValue, New Newtonsoft.Json.Linq.JValue(result.PageCount.Value), Newtonsoft.Json.Linq.JValue.CreateNull())
+                item("ocr_used") = If(result.OcrUsed.HasValue, New Newtonsoft.Json.Linq.JValue(result.OcrUsed.Value), Newtonsoft.Json.Linq.JValue.CreateNull())
+                item("ocr_attempted") = If(result.OcrAttempted.HasValue, New Newtonsoft.Json.Linq.JValue(result.OcrAttempted.Value), Newtonsoft.Json.Linq.JValue.CreateNull())
+                item("ocr_skipped_due_to_heuristics") = If(result.OcrSkipped.HasValue, New Newtonsoft.Json.Linq.JValue(result.OcrSkipped.Value), Newtonsoft.Json.Linq.JValue.CreateNull())
+                item("ocr_duration_ms") = If(result.OcrDurationMilliseconds.HasValue, New Newtonsoft.Json.Linq.JValue(result.OcrDurationMilliseconds.Value), Newtonsoft.Json.Linq.JValue.CreateNull())
+                item("extraction_coverage_basis") = result.ExtractionCoverageBasis
+                item("extraction_warnings") = Newtonsoft.Json.Linq.JArray.FromObject(TextExtractionDiagnostics.CopyWarnings(result.ExtractionWarnings))
+                item("extraction_complete") = If(result.ExtractionComplete.HasValue, New Newtonsoft.Json.Linq.JValue(result.ExtractionComplete.Value), Newtonsoft.Json.Linq.JValue.CreateNull())
+                item("completeness_status") = If(result.ExtractionComplete.HasValue,
+                    If(result.ExtractionComplete.GetValueOrDefault(), "complete", "incomplete"), "not_verified")
+                item("content_format") = result.ContentFormat
+                If resource IsNot Nothing Then
+                    item("resource_id") = resource.ResourceId
+                    item("resource_reuse") = resource.ReuseStatus
+                    item("adapter_id") = resource.AdapterId
+                    item("adapter_version") = resource.AdapterVersion
+                    item("configuration_fingerprint") = resource.ConfigurationFingerprint
+                    item("options_fingerprint") = resource.OptionsFingerprint
+                    item("source_sha256") = resource.SourceSha256
+                    item("source_byte_count") = resource.SourceByteCount
+                End If
+                AddProcessedRangesMetadata(item, result.ProcessedRanges)
+                If Not result.Success Then
+                    item("error") = result.ErrorCode
+                    item("message") = result.Message
+                    Return item
+                End If
+                cancellationToken.ThrowIfCancellationRequested()
+                Dim snapshot As TextFileSnapshot = TextFileSnapshot.WriteUtf8Atomic(outputPath, result.Content, overwrite)
+                AddTextSnapshotMetadata(item, snapshot)
+                If resource IsNot Nothing Then
+                    TextExtractionResourceRegistry.RegisterPublishedOutput(outputPath, resource, snapshot.Sha256)
+                End If
+                item("status") = "converted"
+                If resource IsNot Nothing Then item("source_sha256") = resource.SourceSha256
+                item("source_association_verified") = resource IsNot Nothing
+                item("publication") = "atomic"
+                If result.ExtractionComplete.HasValue AndAlso Not result.ExtractionComplete.Value Then
+                    item("warning") = "The importer reported a potentially incomplete extraction. Do not treat this as a complete document basis."
+                End If
+                System.Diagnostics.Debug.WriteLine("Text export: status=converted; chars=" & snapshot.Content.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    "; duration_ms=" & timer.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    "; snapshot_sha256=" & snapshot.Sha256)
+                Return item
+            Catch ex As System.OperationCanceledException
+                Throw
+            Catch ex As TextFileInputException
+                item("error") = ex.ErrorCode
+                item("message") = ex.Message
+                Return item
+            Catch ex As System.Exception
+                item("error") = "text_export_failed"
+                item("message") = ex.Message
+                System.Diagnostics.Debug.WriteLine("Text export failed: " & ex.GetType().FullName)
+                Return item
+            End Try
+        End Function
+
+        Private Shared Sub AddTextSnapshotMetadata(item As Newtonsoft.Json.Linq.JObject, snapshot As TextFileSnapshot)
+            item("char_count") = snapshot.Content.Length
+            item("byte_count") = snapshot.SizeBytes
+            item("snapshot_sha256") = snapshot.Sha256
+            item("char_count_unit") = "utf16_code_units"
+            item("within_text_read_limit") = snapshot.SizeBytes <= PathPolicy.MaxFileSizeBytes
+        End Sub
+
+        Private Shared Function ConvertToExtractionPayload(result As TextExtractionOutcome) As TextExtractionPayload
+            If result Is Nothing Then
+                Return New TextExtractionPayload With {
+                    .Success = False,
+                    .ErrorCode = "empty_extraction_result",
+                    .Message = "The extraction adapter returned no result."
+                }
+            End If
+            Return New TextExtractionPayload With {
+                .Success = result.Success,
+                .Content = If(result.Content, System.String.Empty),
+                .ErrorCode = If(result.ErrorCode, System.String.Empty),
+                .Message = If(result.Message, System.String.Empty),
+                .PageCount = result.PageCount,
+                .OcrUsed = result.OcrUsed,
+                .OcrAttempted = result.OcrAttempted,
+                .OcrSkipped = result.OcrSkipped,
+                .OcrDurationMilliseconds = result.OcrDurationMilliseconds,
+                .ExtractionComplete = result.ExtractionComplete,
+                .ExtractionCoverageBasis = result.ExtractionCoverageBasis,
+                .ExtractionWarnings = TextExtractionDiagnostics.CopyWarnings(result.ExtractionWarnings),
+                .ContentFormat = If(result.ContentFormat, "unknown"),
+                .ProcessedRanges = If(result.ProcessedRanges, New System.Collections.Generic.List(Of TextExtractionProcessedRange)())
+            }
+        End Function
+
+        Private Shared Function ConvertFromExtractionPayload(payload As TextExtractionPayload) As TextExtractionOutcome
+            If payload Is Nothing Then
+                Return New TextExtractionOutcome With {
+                    .Success = False,
+                    .ErrorCode = "empty_extraction_resource",
+                    .Message = "The extraction resource returned no payload."
+                }
+            End If
+            Return New TextExtractionOutcome With {
+                .Success = payload.Success,
+                .Content = If(payload.Content, System.String.Empty),
+                .ErrorCode = If(payload.ErrorCode, System.String.Empty),
+                .Message = If(payload.Message, System.String.Empty),
+                .PageCount = payload.PageCount,
+                .OcrUsed = payload.OcrUsed,
+                .OcrAttempted = payload.OcrAttempted,
+                .OcrSkipped = payload.OcrSkipped,
+                .OcrDurationMilliseconds = payload.OcrDurationMilliseconds,
+                .ExtractionComplete = payload.ExtractionComplete,
+                .ExtractionCoverageBasis = payload.ExtractionCoverageBasis,
+                .ExtractionWarnings = TextExtractionDiagnostics.CopyWarnings(payload.ExtractionWarnings),
+                .ContentFormat = If(payload.ContentFormat, "unknown"),
+                .ProcessedRanges = If(payload.ProcessedRanges, New System.Collections.Generic.List(Of TextExtractionProcessedRange)())
+            }
+        End Function
+
+        Private Shared Function GetExtractionAdapterId(sourcePath As System.String) As System.String
+            Dim extension As System.String = System.IO.Path.GetExtension(sourcePath).ToLowerInvariant()
+            Select Case extension
+                Case ".pdf" : Return "pdf"
+                Case ".doc", ".docx", ".docm" : Return "word"
+                Case ".xlsx", ".xlsm" : Return "excel"
+                Case ".pptx", ".pptm" : Return "powerpoint"
+                Case ".eml", ".msg" : Return "mail"
+                Case Else : Return "text-or-binary"
+            End Select
+        End Function
+
+        Private Shared Function GetExtractionConfigurationFingerprint(sourcePath As System.String,
+                                                                      context As ISharedContext,
+                                                                      ocrPdf As System.Boolean) As System.String
+            Dim extension As System.String = System.IO.Path.GetExtension(sourcePath).ToLowerInvariant()
+            If extension = ".pdf" Then
+                ' Version the PDF extraction contract only. Existing non-PDF extracts
+                ' do not become stale merely because PDF reading/OCR was corrected.
+                Dim ocrFingerprint As System.String = "disabled"
+                If ocrPdf Then
+                    If context IsNot Nothing Then SharedMethods.ResolveIsolatedSpecialTaskModel(context, "OCR")
+                    ocrFingerprint = SharedMethods.GetOcrConfigurationFingerprint(context)
+                End If
+                Return TextExtractionResourceRegistry.HashString("pdf-layout-and-page-ocr-v1|" & ocrFingerprint)
+            End If
+            If SharedMethods.IsBinaryMediaExtension(extension) AndAlso context IsNot Nothing Then
+                Dim resolved As SharedMethods.IsolatedSpecialTaskModel = SharedMethods.ResolveIsolatedSpecialTaskModel(
+                    context, SharedMethods.TaskFlagForExtension(extension))
+                Return TextExtractionResourceRegistry.HashString("media-adapter-v1|" & resolved.Signature & "|" & If(context.SP_InsertClipboard, System.String.Empty))
+            End If
+            If extension = ".doc" Then
+                Return TextExtractionResourceRegistry.HashString("legacy-word|enabled=" &
+                    (context IsNot Nothing AndAlso context.INI_AllowLegacyDocFiles).ToString(System.Globalization.CultureInfo.InvariantCulture))
+            End If
+            If extension = ".docx" OrElse extension = ".docm" Then
+                ' The sandboxed DOCX reader either parses the complete declared Word
+                ' package successfully or returns a structured reader error. Version
+                ' this coverage contract without invalidating unrelated file formats.
+                Return TextExtractionResourceRegistry.HashString("openxml-word-full-coverage-v2")
+            End If
+            Return TextExtractionResourceRegistry.HashString(
+                "adapter=" & GetExtractionAdapterId(sourcePath) & "|ocr_pdf=" &
+                ocrPdf.ToString(System.Globalization.CultureInfo.InvariantCulture))
+        End Function
+
+        Private Shared Sub AddProcessedRangesMetadata(item As Newtonsoft.Json.Linq.JObject,
+                                                      ranges As System.Collections.Generic.List(Of TextExtractionProcessedRange))
+            Dim array As New Newtonsoft.Json.Linq.JArray()
+            If ranges IsNot Nothing Then
+                For Each range As TextExtractionProcessedRange In ranges
+                    If range Is Nothing Then Continue For
+                    array.Add(New Newtonsoft.Json.Linq.JObject From {
+                        {"start_page", range.StartPage},
+                        {"end_page", range.EndPage},
+                        {"association", If(range.Association, "range_only")}
+                    })
+                Next
+            End If
+            item("processed_ranges") = array
+            item("page_mapping_verified") = False
+        End Sub
+
         Private Shared Async Function TryExtractTextForExportAsync(filePath As String,
                                                                    context As ISharedContext,
-                                                                   ocrPdf As Boolean) As Task(Of TextExtractionOutcome)
+                                                                   ocrPdf As Boolean,
+                                                                   Optional cancellationToken As System.Threading.CancellationToken = Nothing,
+                                                                   Optional executionOptions As TextExportOptions = Nothing) As System.Threading.Tasks.Task(Of TextExtractionOutcome)
             Dim ext As String = Path.GetExtension(filePath).ToLowerInvariant()
+            Dim markdown As System.Boolean = NormalizeTextExportFormat(If(executionOptions, New TextExportOptions()).OutputFormat) = "markdown"
 
             Select Case ext
                 Case ".txt", ".ini", ".csv", ".log", ".json", ".xml", ".html", ".htm",
                      ".md", ".yaml", ".yml",
                      ".vb", ".cs", ".js", ".ts", ".py", ".java", ".cpp", ".c", ".h", ".sql"
 
-                    Return New TextExtractionOutcome() With {
-                        .Success = True,
-                        .Content = SharedMethods.ReadTextFile(filePath, False)
-                    }
+                    Dim plainError As System.String = Nothing
+                    Dim plainText As System.String = SharedMethods.ReadTextFile(filePath, False, plainError)
+                    Dim plainResult As TextExtractionOutcome = NormalizeLegacyExtractionResult(plainText, "text", plainError)
+                    plainResult.ContentFormat = If(ext = ".md", "markdown", "plain_text")
+                    plainResult.OcrUsed = False
+                    plainResult.OcrAttempted = False
+                    If plainResult.Success Then
+                        plainResult.ExtractionComplete = True
+                        plainResult.ExtractionCoverageBasis = "plain_text_full_read"
+                    End If
+                    Return plainResult
 
                 Case ".rtf"
-                    Return New TextExtractionOutcome() With {
-                        .Success = True,
-                        .Content = SharedMethods.ReadRtfAsText(filePath, False)
-                    }
+                    Dim rtfText As System.String
+                    Dim rtfError As System.String = Nothing
+                    If System.Threading.Thread.CurrentThread.GetApartmentState() = System.Threading.ApartmentState.STA Then
+                        rtfText = SharedMethods.ReadRtfAsText(filePath, True, rtfError)
+                    Else
+                        rtfText = Await TextExportService.RunStaReaderAsync(
+                            Function() SharedMethods.ReadRtfAsText(filePath, True, rtfError), cancellationToken).ConfigureAwait(False)
+                    End If
+                    Return NormalizeLegacyExtractionResult(rtfText, "rtf", rtfError)
 
                 Case ".doc"
                     If context Is Nothing OrElse Not context.INI_AllowLegacyDocFiles Then
@@ -968,52 +1313,101 @@ Namespace Agents
                         }
                     End If
 
-                    Return New TextExtractionOutcome() With {
-                        .Success = True,
-                        .Content = SharedMethods.ReadWordDocument(filePath, False)
-                    }
+                    Dim legacyError As System.String = Nothing
+                    If executionOptions IsNot Nothing AndAlso executionOptions.HostReaderDispatcher IsNot Nothing Then
+                        Dim legacyText As System.String = Await executionOptions.HostReaderDispatcher.Invoke(
+                            Function()
+                                If System.Threading.Thread.CurrentThread.GetApartmentState() <> System.Threading.ApartmentState.STA Then
+                                    Throw New System.InvalidOperationException("The configured host reader dispatcher did not enter an STA thread.")
+                                End If
+                                Return SharedMethods.ReadWordDocument(filePath, True, legacyError)
+                            End Function, cancellationToken).ConfigureAwait(False)
+                        Return NormalizeLegacyExtractionResult(legacyText, "word", legacyError)
+                    End If
+                    If System.Threading.Thread.CurrentThread.GetApartmentState() <> System.Threading.ApartmentState.STA Then
+                        Return New TextExtractionOutcome With {.ErrorCode = "requires_sta", .Message = "Legacy Word extraction requires the foreground host reader dispatcher; extraction was deferred."}
+                    End If
+                    Return NormalizeLegacyExtractionResult(SharedMethods.ReadWordDocument(filePath, True, legacyError), "word", legacyError)
 
                 Case ".docx", ".docm"
-                    Return New TextExtractionOutcome() With {
-                        .Success = True,
-                        .Content = SharedMethods.ReadDocxSandboxed(filePath)
-                    }
+                    Dim docxError As System.String = Nothing
+                    Dim docxCoverageComplete As System.Nullable(Of System.Boolean) = Nothing
+                    Dim docxText As System.String = SharedMethods.ReadDocxSandboxed(filePath, markdown, docxError, docxCoverageComplete)
+                    Dim docxResult As TextExtractionOutcome = NormalizeLegacyExtractionResult(docxText, "word", docxError)
+                    If markdown Then docxResult.ContentFormat = "markdown"
+                    If docxResult.Success Then
+                        docxResult.ExtractionComplete = docxCoverageComplete
+                        If docxCoverageComplete.HasValue Then
+                            docxResult.ExtractionCoverageBasis = If(docxCoverageComplete.Value, "openxml_docx_full_read", "openxml_docx_partial_optional_parts")
+                        Else
+                            docxResult.ExtractionCoverageBasis = "reader_coverage_unverified"
+                        End If
+                    End If
+                    Return docxResult
 
                 Case ".xlsx", ".xlsm"
-                    Return New TextExtractionOutcome() With {
-                        .Success = True,
-                        .Content = SharedMethods.ReadXlsxSandboxed(filePath, silent:=True, askWorksheetSelection:=False)
-                    }
+                    Dim xlsxError As System.String = Nothing
+                    Dim xlsxText As System.String = SharedMethods.ReadXlsxSandboxed(filePath, silent:=True, askWorksheetSelection:=False, readError:=xlsxError)
+                    Return NormalizeLegacyExtractionResult(xlsxText, "excel", xlsxError)
 
                 Case ".pptx", ".pptm"
-                    Return New TextExtractionOutcome() With {
-                        .Success = True,
-                        .Content = SharedMethods.ReadPptxSandboxed(filePath)
-                    }
+                    Dim pptxError As System.String = Nothing
+                    Dim pptxText As System.String = SharedMethods.ReadPptxSandboxed(filePath, readError:=pptxError)
+                    Return NormalizeLegacyExtractionResult(pptxText, "powerpoint", pptxError)
 
                 Case ".pdf"
+                    If markdown Then
+                        If ocrPdf Then Return New TextExtractionOutcome With {
+                            .ErrorCode = "markdown_pdf_ocr_unsupported",
+                            .Message = "PDF Markdown uses the text-only layout reader. Use output_format=text with ocr_pdf=true for OCR; no plain-text fallback was written."
+                        }
+                        Dim markdownError As System.String = Nothing
+                        Dim markdownText As System.String = SharedMethods.PdfMarkdownExtractor.ReadPdfAsMarkdown(filePath, Nothing, markdownError)
+                        Dim markdownResult As TextExtractionOutcome = NormalizeLegacyExtractionResult(markdownText, "pdf-markdown", markdownError)
+                        markdownResult.ContentFormat = "markdown"
+                        markdownResult.OcrUsed = False
+                        markdownResult.OcrAttempted = False
+                        ' Layout heuristics do not prove complete coverage or page-to-text mapping.
+                        markdownResult.ExtractionCoverageBasis = "pdf_markdown_layout_heuristics_unverified"
+                        Return markdownResult
+                    End If
+                    Dim pdf As SharedMethods.PdfReadResult = Await SharedMethods.ReadPdfAsTextEx(
+                        pdfPath:=filePath,
+                        ReturnErrorInsteadOfEmpty:=False,
+                        DoOCR:=ocrPdf AndAlso context IsNot Nothing,
+                        AskUser:=False,
+                        context:=context,
+                        ShowOcrProgressWindow:=False,
+                        OcrBatchPages:=If(executionOptions, New TextExportOptions()).OcrBatchPages,
+                        CancellationToken:=cancellationToken).ConfigureAwait(False)
+                    Dim succeeded As System.Boolean = System.String.IsNullOrWhiteSpace(pdf.ErrorCode) AndAlso
+                        Not System.String.IsNullOrWhiteSpace(pdf.Content)
                     Return New TextExtractionOutcome() With {
-                        .Success = True,
-                        .Content = Await SharedMethods.ReadPdfAsText(
-                            pdfPath:=filePath,
-                            ReturnErrorInsteadOfEmpty:=True,
-                            DoOCR:=ocrPdf AndAlso context IsNot Nothing,
-                            AskUser:=False,
-                            context:=context,
-                            ShowOcrProgressWindow:=False).ConfigureAwait(False)
+                        .Success = succeeded,
+                        .Content = pdf.Content,
+                        .ErrorCode = If(succeeded, System.String.Empty, If(System.String.IsNullOrWhiteSpace(pdf.ErrorCode), "empty_pdf_extraction", pdf.ErrorCode)),
+                        .Message = If(succeeded, System.String.Empty, If(System.String.IsNullOrWhiteSpace(pdf.ErrorMessage), "No readable PDF content was extracted.", pdf.ErrorMessage)),
+                        .PageCount = pdf.PageCount,
+                        .OcrUsed = pdf.OcrUsed,
+                        .OcrAttempted = pdf.OcrAttempted,
+                        .OcrSkipped = pdf.OcrWasSkippedDueToHeuristics,
+                        .OcrDurationMilliseconds = pdf.OcrDurationMilliseconds,
+                        .ExtractionComplete = If(Not succeeded, CType(False, System.Nullable(Of System.Boolean)), pdf.ExtractionComplete),
+                        .ExtractionCoverageBasis = pdf.ExtractionCoverageBasis,
+                        .ExtractionWarnings = TextExtractionDiagnostics.CopyWarnings(pdf.ExtractionWarnings),
+                        .ContentFormat = If(pdf.OcrUsed, "ocr_model_text", "plain_text"),
+                        .ProcessedRanges = BuildPdfProcessedRanges(pdf)
                     }
 
                 Case ".eml"
-                    Return New TextExtractionOutcome() With {
-                        .Success = True,
-                        .Content = SharedMethods.ReadEmlSandboxed(filePath)
-                    }
+                    Dim emlError As System.String = Nothing
+                    Dim emlText As System.String = SharedMethods.ReadEmlSandboxed(filePath, readError:=emlError)
+                    Return NormalizeLegacyExtractionResult(emlText, "mail", emlError)
 
                 Case ".msg"
-                    Return New TextExtractionOutcome() With {
-                        .Success = True,
-                        .Content = SharedMethods.ReadMsgSandboxed(filePath)
-                    }
+                    Dim msgError As System.String = Nothing
+                    Dim msgText As System.String = SharedMethods.ReadMsgSandboxed(filePath, readError:=msgError)
+                    Return NormalizeLegacyExtractionResult(msgText, "mail", msgError)
 
                 Case Else
                     If SharedMethods.IsBinaryMediaExtension(ext) Then
@@ -1031,11 +1425,18 @@ Namespace Agents
                                 filePath:=filePath,
                                 context:=context,
                                 askUser:=False,
-                                taskFlag:=taskFlag).ConfigureAwait(False)
+                                taskFlag:=taskFlag,
+                                cancellationToken:=cancellationToken).ConfigureAwait(False)
 
+                        Dim mediaFailed As System.Boolean = System.String.IsNullOrWhiteSpace(content) OrElse
+                            content.StartsWith("HTTP Error ", System.StringComparison.OrdinalIgnoreCase) OrElse
+                            content.StartsWith("An unexpected error occurred when accessing the LLM endpoint:", System.StringComparison.OrdinalIgnoreCase) OrElse
+                            content = "Aborted by user."
                         Return New TextExtractionOutcome() With {
-                            .Success = True,
-                            .Content = content
+                            .Success = Not mediaFailed,
+                            .Content = If(mediaFailed, System.String.Empty, content),
+                            .ErrorCode = If(mediaFailed, "media_extraction_failed", System.String.Empty),
+                            .Message = If(mediaFailed, "The media adapter returned no usable extraction.", System.String.Empty)
                         }
                     End If
 
@@ -1045,6 +1446,50 @@ Namespace Agents
                         .Message = "The file type is not supported for text export."
                     }
             End Select
+        End Function
+
+        ' Consume reader-reported status at the adapter boundary. Document contents that
+        ' literally start with Error: or Error reading remain ordinary source text.
+        Private Shared Function NormalizeLegacyExtractionResult(content As System.String, adapterId As System.String,
+                                                                readError As System.String) As TextExtractionOutcome
+            Dim value As System.String = If(content, System.String.Empty)
+            If Not System.String.IsNullOrEmpty(readError) Then
+                Dim empty As System.Boolean = readError = "Error: No data found in .xlsx." OrElse
+                    readError = "Error: No text content found in .pptx." OrElse readError = "Error: No text content found in .docx." OrElse
+                    readError = "Error: Empty .eml file."
+                Return New TextExtractionOutcome With {
+                    .Success = False, .ErrorCode = If(empty, "empty_extraction", "reader_failed"),
+                    .Message = "The " & adapterId & " reader reported: " & readError,
+                    .ExtractionComplete = False
+                }
+            End If
+            If readError Is Nothing Then
+                Return New TextExtractionOutcome With {.Success = False, .ErrorCode = "reader_status_unknown",
+                    .Message = "The reader returned no structured completion status."}
+            End If
+            Dim incomplete As System.Boolean = adapterId = "mail" AndAlso
+                System.Text.RegularExpressions.Regex.IsMatch(value, "(?im)^\[Skipped: (?:failed to extract|PDF extraction failed|max nesting depth reached)")
+            Return New TextExtractionOutcome With {
+                .Success = True, .Content = value,
+                .ExtractionComplete = If(incomplete, CType(False, System.Nullable(Of System.Boolean)), Nothing),
+                .ExtractionCoverageBasis = If(incomplete, "reader_reported_gaps", "reader_coverage_unverified")
+            }
+        End Function
+
+        Private Shared Function BuildPdfProcessedRanges(pdf As SharedMethods.PdfReadResult) As System.Collections.Generic.List(Of TextExtractionProcessedRange)
+            Dim ranges As New System.Collections.Generic.List(Of TextExtractionProcessedRange)()
+            If pdf Is Nothing Then Return ranges
+            If pdf.TextPageSequenceComplete AndAlso pdf.TextProcessedPageCount > 0 AndAlso System.String.IsNullOrWhiteSpace(pdf.ErrorCode) Then
+                ranges.Add(New TextExtractionProcessedRange With {
+                    .StartPage = 1,
+                    .EndPage = pdf.TextProcessedPageCount,
+                    .Association = "text_extraction_range"
+                })
+            End If
+            If pdf.OcrProcessedRanges IsNot Nothing AndAlso pdf.OcrProcessedRanges.Count > 0 Then
+                ranges.AddRange(pdf.OcrProcessedRanges)
+            End If
+            Return ranges
         End Function
 
         Private Shared Function ResolveMetadataProfile(value As String) As SharedMethods.SemanticSearchMetadataProfile
@@ -1271,14 +1716,39 @@ Namespace Agents
             Next
         End Sub
 
+        Private Shared Function NormalizeTextExportFormat(value As System.String) As System.String
+            Dim normalized As System.String = If(value, "").Trim().ToLowerInvariant()
+            If normalized = "" Then normalized = "text"
+            If normalized <> "text" AndAlso normalized <> "markdown" Then Throw New System.ArgumentException("output_format must be text or markdown.")
+            Return normalized
+        End Function
+
+        Private Shared Function TextExportOutputExtension(sourcePath As System.String, outputFormat As System.String) As System.String
+            Dim ext As System.String = System.IO.Path.GetExtension(sourcePath).ToLowerInvariant()
+            If NormalizeTextExportFormat(outputFormat) = "markdown" AndAlso
+               (ext = ".pdf" OrElse ext = ".docx" OrElse ext = ".docm" OrElse ext = ".md") Then Return ".md"
+            Return ".txt"
+        End Function
+
+        Private Shared Function TextExportOptionsFingerprint(options As TextExportOptions, ocrPdf As System.Boolean) As System.String
+            Dim effective As TextExportOptions = If(options, New TextExportOptions())
+            ' Keep the default text signature byte-for-byte: existing Semantic Archive
+            ' representations are not invalidated by adding an opt-in output format.
+            Dim value As System.String = "ocr_pdf=" & ocrPdf.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                "|ocr_batch_pages=" & effective.OcrBatchPages.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            If NormalizeTextExportFormat(effective.OutputFormat) = "markdown" Then value &= "|output_format=markdown"
+            Return TextExtractionResourceRegistry.HashString(value)
+        End Function
+
         Private Shared Function ResolveSingleFileTextOutputPath(inputPath As String,
-                                                                outputDirectoryArg As String) As String
+                                                                outputDirectoryArg As String,
+                                                                Optional outputFormat As System.String = "text") As String
             If String.IsNullOrWhiteSpace(outputDirectoryArg) Then
-                Return PathPolicy.Resolve(inputPath & ".txt", PathAccess.Write)
+                Return PathPolicy.Resolve(inputPath & TextExportOutputExtension(inputPath, outputFormat), PathAccess.Write)
             End If
 
             Dim outputRoot As String = ResolveRelativeOrAbsoluteOutputDirectory(inputPath, outputDirectoryArg, False)
-            Return PathPolicy.Resolve(Path.Combine(outputRoot, Path.GetFileName(inputPath) & ".txt"), PathAccess.Write)
+            Return PathPolicy.Resolve(Path.Combine(outputRoot, Path.GetFileName(inputPath) & TextExportOutputExtension(inputPath, outputFormat)), PathAccess.Write)
         End Function
 
         Private Shared Function ResolveDirectoryTextOutputRoot(inputDirectory As String,

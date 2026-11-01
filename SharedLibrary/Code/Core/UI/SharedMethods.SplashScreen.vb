@@ -14,6 +14,10 @@
 '       - a label showing the provided message text
 '   - The form size is calculated to fit the content tightly.
 '   - `UpdateMessage` updates the label text, re-measures size, and resizes the form.
+'
+' KEY ARCHITECTURE
+'   • Surface: SharedMethods, SplashScreen (VB implementation).
+'   • Entry points/helpers: UpdateMessage.
 ' =============================================================================
 
 Option Strict On

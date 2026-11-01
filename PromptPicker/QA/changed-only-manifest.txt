@@ -1,0 +1,14 @@
+Red Ink Prompt Picker – v4, changed-only against delivered v3
+PromptPicker/LICENSE.txt
+PromptPicker/LegalResources.vb
+PromptPicker/LicenseInfoForm.vb
+PromptPicker/PickerContext.vb
+PromptPicker/PickerForm.vb
+PromptPicker/PickerSettings.vb
+PromptPicker/QA/PromptPicker-v4.diff
+PromptPicker/QA/QA-Bericht.md
+PromptPicker/QA/run_static_checks.py
+PromptPicker/README.md
+PromptPicker/QA/changed-only-manifest.txt
+PromptPicker/QA/source-sha256.txt
+PromptPicker/QA/cumulative-source-sha256.txt

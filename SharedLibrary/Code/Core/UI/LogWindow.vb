@@ -9,10 +9,10 @@
 ' Architecture:
 '  - Public API (Module LogWindow): ShowLogWindow / HideLogWindow / CloseLogWindow /
 '    AppendLog / SetTitle / ClearLog.
-'  - Thread-safety: All access to the cached form instance is guarded by SyncLock.
-'    UI updates are marshaled to the form thread via InvokeOnForm.
-'  - Lifetime: The underlying form is created on demand (EnsureFormCreated) and is
-'    typically hidden (not disposed) when the user closes it (OnFormClosing).
+'  - Thread-safety: Producers enqueue actions; an explicitly captured Office UI
+'    dispatcher drains them in order. No lock is held across UI work or posting.
+'  - Lifetime: Create/show/dispose only on that Office UI thread, registered in
+'    its HostModelessFormRegistry. User close still hides; host shutdown disposes.
 '  - Close policy: Optional OnCloseRequested callback can veto the user-initiated close.
 '  - Non-activation: The form does not take focus when shown/clicked
 '    (ShowWithoutActivation + WM_MOUSEACTIVATE).
@@ -37,142 +37,215 @@ Namespace SharedLibrary
     ''' </summary>
     Public Module LogWindow
 
-        ''' <summary>
-        ''' Cached instance of the log window form. Created on demand and typically hidden (not disposed).
-        ''' </summary>
+        ' Only the host UI thread touches _logForm and the registry. The lock
+        ' protects queue/dispatcher metadata, never a Form or a UI invocation.
         Private _logForm As LogWindowForm = Nothing
+        Private ReadOnly _syncLock As New System.Object()
+        Private ReadOnly _pending As New System.Collections.Generic.Queue(Of System.Action)()
+        Private _uiContext As System.Threading.SynchronizationContext
+        Private _uiThreadId As System.Int32
+        Private _hostRegistry As HostModelessFormRegistry
+        Private _drainPosted As System.Boolean
+        Private _shuttingDown As System.Boolean
+        Private _closeCallback As System.Func(Of System.Boolean)
 
-        ''' <summary>
-        ''' Synchronizes access to <see cref="_logForm"/> and ensures thread-safe updates.
-        ''' </summary>
-        Private ReadOnly _syncLock As New Object()
-
-        ''' <summary>
-        ''' Callback invoked when the user attempts to close the log window (e.g., via the X button or the Close button).
-        ''' Return True to allow the close action to proceed (the window is hidden); return False to cancel the close action.
-        ''' </summary>
-        Public Property OnCloseRequested As Func(Of Boolean)
-
-        ''' <summary>
-        ''' Shows the log window (creates it if necessary) and optionally clears previous content.
-        ''' </summary>
-        ''' <param name="clearOnShow">If True, clears previous log entries when showing.</param>
-        Public Sub ShowLogWindow(Optional clearOnShow As Boolean = True)
+        ''' <summary>Called once by the owning Office host on its UI thread.</summary>
+        Public Sub InitializeUiDispatcher(context As System.Threading.SynchronizationContext,
+                                          registry As HostModelessFormRegistry)
+            If context Is Nothing Then Throw New System.ArgumentNullException(NameOf(context))
+            If registry Is Nothing Then Throw New System.ArgumentNullException(NameOf(registry))
+            If System.Threading.Thread.CurrentThread.GetApartmentState() <> System.Threading.ApartmentState.STA Then
+                Throw New System.InvalidOperationException("The log window dispatcher must be initialized on the Office UI thread.")
+            End If
+            SharedMethods.InitializeHostUiDispatcher(context, registry)
             SyncLock _syncLock
-                EnsureFormCreated()
-                If _logForm IsNot Nothing Then
-                    InvokeOnForm(Sub()
-                                     If clearOnShow Then
-                                         _logForm.ClearLog()
-                                     End If
-                                     If Not _logForm.Visible Then
-                                         _logForm.Show()
-                                     End If
-                                     _logForm.BringToFront()
-                                 End Sub)
+                If _shuttingDown Then Throw New System.InvalidOperationException("The Office host is already closing.")
+                Dim currentThreadId As System.Int32 = System.Threading.Thread.CurrentThread.ManagedThreadId
+                If _uiContext IsNot Nothing AndAlso (_uiThreadId <> currentThreadId OrElse _uiContext IsNot context OrElse _hostRegistry IsNot registry) Then
+                    Throw New System.InvalidOperationException("The log window is already assigned to another UI dispatcher.")
                 End If
+                _uiContext = context
+                _uiThreadId = currentThreadId
+                _hostRegistry = registry
             End SyncLock
         End Sub
 
-        ''' <summary>
-        ''' Hides the log window without destroying it.
-        ''' </summary>
+        Public Property OnCloseRequested As System.Func(Of System.Boolean)
+            Get
+                SyncLock _syncLock
+                    Return _closeCallback
+                End SyncLock
+            End Get
+            Set(value As System.Func(Of System.Boolean))
+                SyncLock _syncLock
+                    If Not _shuttingDown Then _closeCallback = value
+                End SyncLock
+            End Set
+        End Property
+
+        Public Sub ShowLogWindow(Optional clearOnShow As System.Boolean = True)
+            EnqueueOnUi(
+                Sub()
+                    EnsureFormCreatedOnUi()
+                    If _logForm Is Nothing Then Return
+                    If clearOnShow Then _logForm.ClearLog()
+                    _hostRegistry.Show(_logForm)
+                    _logForm.BringToFront()
+                End Sub)
+        End Sub
+
         Public Sub HideLogWindow()
-            SyncLock _syncLock
-                If _logForm IsNot Nothing AndAlso _logForm.Visible Then
-                    InvokeOnForm(Sub() _logForm.Hide())
-                End If
-            End SyncLock
+            EnqueueOnUi(Sub()
+                            If _logForm IsNot Nothing AndAlso Not _logForm.IsDisposed Then _logForm.Hide()
+                        End Sub)
         End Sub
 
-        ''' <summary>
-        ''' Closes and disposes the log window.
-        ''' </summary>
         Public Sub CloseLogWindow()
-            SyncLock _syncLock
-                If _logForm IsNot Nothing Then
-                    InvokeOnForm(Sub()
-                                     _logForm.Close()
-                                     _logForm.Dispose()
-                                 End Sub)
-                    _logForm = Nothing
-                End If
-            End SyncLock
+            EnqueueOnUi(AddressOf DisposeFormOnUi)
         End Sub
 
-        ''' <summary>
-        ''' Appends a log entry to the window. The window scrolls to show the latest entry.
-        ''' </summary>
-        ''' <param name="message">The message to append.</param>
-        ''' <param name="level">Optional log level for color coding (info, warn, error, success).</param>
-        Public Sub AppendLog(message As String, Optional level As String = "info")
-            SyncLock _syncLock
-                EnsureFormCreated()
-                If _logForm IsNot Nothing Then
-                    InvokeOnForm(Sub() _logForm.AppendLogEntry(message, level))
-                End If
-            End SyncLock
+        Public Sub AppendLog(message As System.String, Optional level As System.String = "info")
+            EnqueueOnUi(Sub()
+                            EnsureFormCreatedOnUi()
+                            If _logForm IsNot Nothing Then _logForm.AppendLogEntry(message, level)
+                        End Sub)
         End Sub
 
-        ''' <summary>
-        ''' Updates the window title.
-        ''' </summary>
-        ''' <param name="title">New title text. If empty/whitespace, defaults to the application name.</param>
-        Public Sub SetTitle(title As String)
-            SyncLock _syncLock
-                If _logForm IsNot Nothing Then
-                    InvokeOnForm(Sub() _logForm.Text = If(String.IsNullOrWhiteSpace(title), SharedMethods.AN, title))
-                End If
-            End SyncLock
+        Public Sub SetTitle(title As System.String)
+            EnqueueOnUi(Sub()
+                            If _logForm IsNot Nothing AndAlso Not _logForm.IsDisposed Then
+                                _logForm.Text = If(System.String.IsNullOrWhiteSpace(title), SharedMethods.AN, title)
+                            End If
+                        End Sub)
         End Sub
 
-        ''' <summary>
-        ''' Clears all log entries from the window.
-        ''' </summary>
         Public Sub ClearLog()
-            SyncLock _syncLock
-                If _logForm IsNot Nothing Then
-                    InvokeOnForm(Sub() _logForm.ClearLog())
-                End If
-            End SyncLock
+            EnqueueOnUi(Sub()
+                            If _logForm IsNot Nothing AndAlso Not _logForm.IsDisposed Then _logForm.ClearLog()
+                        End Sub)
         End Sub
 
-        ''' <summary>
-        ''' Ensures the log window form exists. If a main UI form exists, creation is marshaled to its UI thread.
-        ''' </summary>
-        Private Sub EnsureFormCreated()
-            If _logForm Is Nothing OrElse _logForm.IsDisposed Then
-                ' Must create on UI thread
-                If Application.OpenForms.Count > 0 Then
-                    Dim mainForm = Application.OpenForms(0)
-                    If mainForm.InvokeRequired Then
-                        mainForm.Invoke(Sub() _logForm = New LogWindowForm())
-                    Else
-                        _logForm = New LogWindowForm()
+        Private Sub EnqueueOnUi(action As System.Action)
+            Dim dispatcher As System.Threading.SynchronizationContext = Nothing
+            Dim missingDispatcher As System.Boolean
+            SyncLock _syncLock
+                If _shuttingDown Then Return
+                missingDispatcher = _uiContext Is Nothing
+                If Not missingDispatcher Then
+                    _pending.Enqueue(action)
+                    If Not _drainPosted Then
+                        _drainPosted = True
+                        dispatcher = _uiContext
                     End If
-                Else
-                    _logForm = New LogWindowForm()
                 End If
+            End SyncLock
+            If missingDispatcher Then
+                LogUiFailure("DISPATCHER_UNAVAILABLE", Nothing)
+            ElseIf dispatcher IsNot Nothing Then
+                PostDrain(dispatcher)
             End If
         End Sub
 
-        ''' <summary>
-        ''' Executes <paramref name="action"/> on the log window UI thread.
-        ''' No-op if the form instance is missing or disposed.
-        ''' </summary>
-        ''' <param name="action">Action to execute on the form thread.</param>
-        Private Sub InvokeOnForm(action As Action)
-            If _logForm Is Nothing OrElse _logForm.IsDisposed Then Return
+        Private Sub PostDrain(dispatcher As System.Threading.SynchronizationContext)
             Try
-                If _logForm.InvokeRequired Then
-                    _logForm.Invoke(action)
-                Else
-                    action()
+                ' Never use Send/Invoke or hold _syncLock while calling a dispatcher.
+                dispatcher.Post(Sub(state As System.Object) DrainOnUi(), Nothing)
+            Catch ex As System.Exception
+                SyncLock _syncLock
+                    _pending.Clear()
+                    _drainPosted = False
+                End SyncLock
+                LogUiFailure("POST_FAILED", ex)
+            End Try
+        End Sub
+
+        Private Sub DrainOnUi()
+            If System.Threading.Thread.CurrentThread.ManagedThreadId <> _uiThreadId Then
+                SyncLock _syncLock
+                    _pending.Clear()
+                    _drainPosted = False
+                End SyncLock
+                LogUiFailure("WRONG_DISPATCHER_THREAD", Nothing)
+                Return
+            End If
+            ' Bound each batch so a busy producer cannot monopolize the Office UI.
+            For count As System.Int32 = 1 To 64
+                Dim action As System.Action
+                SyncLock _syncLock
+                    If _shuttingDown OrElse _pending.Count = 0 Then
+                        _drainPosted = False
+                        Return
+                    End If
+                    action = _pending.Dequeue()
+                End SyncLock
+                Try
+                    action.Invoke()
+                Catch ex As System.Exception
+                    LogUiFailure("UPDATE_FAILED", ex)
+                End Try
+            Next
+            Dim dispatcher As System.Threading.SynchronizationContext
+            SyncLock _syncLock
+                If _shuttingDown OrElse _pending.Count = 0 Then
+                    _drainPosted = False
+                    Return
                 End If
-            Catch ex As ObjectDisposedException
-                ' Form was disposed between check and invoke
-            Catch ex As InvalidOperationException
-                ' Handle edge cases during form lifecycle
+                dispatcher = _uiContext
+            End SyncLock
+            PostDrain(dispatcher)
+        End Sub
+
+        Private Sub EnsureFormCreatedOnUi()
+            If _hostRegistry Is Nothing OrElse _hostRegistry.IsClosing Then Return
+            If _logForm IsNot Nothing AndAlso Not _logForm.IsDisposed Then Return
+            Dim created As New LogWindowForm()
+            Try
+                created.InitializeView()
+                _hostRegistry.Register(created)
+                _logForm = created
+            Catch
+                created.Dispose()
+                Throw
+            End Try
+        End Sub
+
+        Private Sub DisposeFormOnUi()
+            Dim closing As LogWindowForm = _logForm
+            _logForm = Nothing
+            If closing IsNot Nothing AndAlso Not closing.IsDisposed Then closing.ClosePermanently()
+        End Sub
+
+        ''' <summary>Called on the owning host UI thread before registry teardown; idempotent.</summary>
+        Public Sub Shutdown()
+            SyncLock _syncLock
+                If _shuttingDown Then Return
+                If _uiThreadId <> 0 AndAlso System.Threading.Thread.CurrentThread.ManagedThreadId <> _uiThreadId Then
+                    Throw New System.InvalidOperationException("The log window must shut down on its owning Office UI thread.")
+                End If
+                _shuttingDown = True
+                _pending.Clear()
+                _drainPosted = False
+                _closeCallback = Nothing
+            End SyncLock
+            Try
+                DisposeFormOnUi()
+            Finally
+                SyncLock _syncLock
+                    _uiContext = Nothing
+                    _hostRegistry = Nothing
+                End SyncLock
+            End Try
+        End Sub
+
+        Private Sub LogUiFailure(stage As System.String, failure As System.Exception)
+            Try
+                If failure Is Nothing Then
+                    RiCrashLogger.LogMarker("LOG_WINDOW_" & stage, "No UI action was performed on an unverified thread.")
+                Else
+                    RiCrashLogger.LogException("LOG_WINDOW_" & stage, failure)
+                End If
+            Catch
+                System.Diagnostics.Debug.WriteLine("Log window " & stage)
             End Try
         End Sub
 
@@ -215,18 +288,36 @@ Namespace SharedLibrary
             ''' <summary>
             ''' Standard UI font used by this form.
             ''' </summary>
-            Private ReadOnly _standardFont As New Font("Segoe UI", 9.0F, FontStyle.Regular, GraphicsUnit.Point)
+            Private _standardFont As Font
 
             ''' <summary>
             ''' Monospace font used for log output.
             ''' </summary>
-            Private ReadOnly _monoFont As New Font("Consolas", 9.0F, FontStyle.Regular, GraphicsUnit.Point)
+            Private _monoFont As Font
+            Private _ownedIcon As Icon
+            Private _contextMenu As ContextMenuStrip
+            Private _allowPermanentClose As System.Boolean
 
             ''' <summary>
             ''' Creates a new instance of the log window form and initializes its UI.
             ''' </summary>
             Public Sub New()
+                MyBase.New()
+            End Sub
+
+            Public Sub InitializeView()
+                _standardFont = New Font("Segoe UI", 9.0F, FontStyle.Regular, GraphicsUnit.Point)
+                _monoFont = New Font("Consolas", 9.0F, FontStyle.Regular, GraphicsUnit.Point)
                 InitializeComponent()
+            End Sub
+
+            Public Sub ClosePermanently()
+                _allowPermanentClose = True
+                Try
+                    Me.Close()
+                Finally
+                    If Not Me.IsDisposed Then Me.Dispose()
+                End Try
             End Sub
 
             ''' <summary>
@@ -251,16 +342,8 @@ Namespace SharedLibrary
 
                 ' (1) Use logo as icon (if available).
                 Try
-                    Using bmpIcon As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                        Dim hIcon As IntPtr = bmpIcon.GetHicon()
-                        Try
-                            Using ico As Icon = Icon.FromHandle(hIcon)
-                                Me.Icon = CType(ico.Clone(), Icon)
-                            End Using
-                        Finally
-                            DestroyIcon(hIcon)
-                        End Try
-                    End Using
+                    _ownedIcon = SharedMethods.CreateOwnedDialogIcon()
+                    Me.Icon = _ownedIcon
                 Catch
                     ' Ignore if resource not available
                 End Try
@@ -332,7 +415,8 @@ Namespace SharedLibrary
                 }
 
                 ' Context menu to allow mouse-driven copy
-                Dim cms As New ContextMenuStrip()
+                _contextMenu = New ContextMenuStrip()
+                Dim cms As ContextMenuStrip = _contextMenu
                 Dim miCopy As New ToolStripMenuItem("Copy")
                 AddHandler miCopy.Click, Sub() CopySelectionOrAllToClipboard()
                 cms.Items.Add(miCopy)
@@ -519,8 +603,10 @@ Namespace SharedLibrary
             ''' </summary>
             ''' <param name="e">Form closing event args.</param>
             Protected Overrides Sub OnFormClosing(e As FormClosingEventArgs)
-                ' Hide instead of close when user clicks X
-                If e.CloseReason = CloseReason.UserClosing Then
+                ' Preserve ordinary user-close confirmation/hide. Host exit and
+                ' explicit disposal must never display an abort question.
+                Dim hostClosing As System.Boolean = _hostRegistry IsNot Nothing AndAlso _hostRegistry.IsClosing
+                If e.CloseReason = CloseReason.UserClosing AndAlso Not _allowPermanentClose AndAlso Not hostClosing Then
                     e.Cancel = True
                     HandleCloseRequest()
                 Else
@@ -542,9 +628,31 @@ Namespace SharedLibrary
                 Me.BringToFront()
             End Sub
 
-            <DllImport("user32.dll", SetLastError:=True)>
-            Private Shared Function DestroyIcon(hIcon As IntPtr) As Boolean
-            End Function
+            Protected Overrides Sub Dispose(disposing As System.Boolean)
+                Try
+                    MyBase.Dispose(disposing)
+                Finally
+                    If disposing Then
+                        If _contextMenu IsNot Nothing Then
+                            _contextMenu.Dispose()
+                            _contextMenu = Nothing
+                        End If
+                        If _ownedIcon IsNot Nothing Then
+                            _ownedIcon.Dispose()
+                            _ownedIcon = Nothing
+                        End If
+                        If _monoFont IsNot Nothing Then
+                            _monoFont.Dispose()
+                            _monoFont = Nothing
+                        End If
+                        If _standardFont IsNot Nothing Then
+                            _standardFont.Dispose()
+                            _standardFont = Nothing
+                        End If
+                    End If
+                End Try
+            End Sub
+
         End Class
 
     End Module

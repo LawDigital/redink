@@ -75,6 +75,11 @@
 '       * Image and audio generation only proceed if alternate models are
 '         configured; otherwise, graceful error messages are returned.
 '
+'
+' KEY ARCHITECTURE
+'   • Surface: ThisAddIn (host partial/UI).
+'   • Entry points/helpers: ExecuteGenerateImageTool, ExecuteWebGroundingTool,
+'     ExecuteDescribeBinaryTool.
 ' =============================================================================
 
 
@@ -482,10 +487,6 @@ Partial Public Class ThisAddIn
                 Dim text = Await ReadSingleAttachmentText(att, context, readAsMarkdown)
 
                 If Not String.IsNullOrWhiteSpace(text) Then
-                    If text.Length > 50000 Then
-                        text = text.Substring(0, 50000) & vbCrLf & "[... content truncated at 50,000 characters ...]"
-                    End If
-
                     If fileNames.Count > 1 Then sb.AppendLine($"[{fileName}]")
                     sb.AppendLine(text)
 
@@ -815,11 +816,8 @@ Partial Public Class ThisAddIn
                 If Not String.IsNullOrWhiteSpace(msg.DateStr) Then sb.AppendLine($"Date: {msg.DateStr}")
                 sb.AppendLine()
                 If Not String.IsNullOrWhiteSpace(msg.Body) Then
-                    Dim bodyText = msg.Body
-                    If bodyText.Length > 5000 Then
-                        bodyText = bodyText.Substring(0, 5000) & vbCrLf & "[... truncated ...]"
-                    End If
-                    sb.AppendLine(bodyText)
+                    ' Preserve the complete message; replay may archive it losslessly.
+                    sb.AppendLine(msg.Body)
                 Else
                     sb.AppendLine("(no body text)")
                 End If
@@ -842,18 +840,18 @@ Partial Public Class ThisAddIn
 
 
     ' ═══════════════════════════════════════════════════════════════════════════
-    '  TOOL EXECUTION: extract_data_from_attachments
+    '  TOOL EXECUTION: extract_data_from_docs
     ' ═══════════════════════════════════════════════════════════════════════════
 
     ''' <summary>
-    ''' Extracts structured/tabular data from one or more attachments using the
+    ''' Extracts structured/tabular data from documents and attachments using the
     ''' <see cref="SharedLibrary.FactExtractionService.RunFactExtractionAsync"/> pipeline.
     ''' Returns schema + rows as JSON for downstream tool-chaining (create_excel, create_word, etc.).
     ''' </summary>
-    Private Async Function ExecuteExtractDataFromAttachmentsTool(
+    Private Async Function ExecuteExtractDataFromDocsTool(
             toolCall As ToolCall,
             context As ToolExecutionContext,
-            ct As CancellationToken) As Task(Of ToolResponse)
+            ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of ToolResponse)
 
         Dim response As New ToolResponse() With {
             .CallId = toolCall.CallId, .ToolName = toolCall.ToolName, .Timestamp = DateTime.UtcNow
@@ -874,28 +872,62 @@ Partial Public Class ThisAddIn
             If sortDirection <> "ASC" AndAlso sortDirection <> "DESC" Then sortDirection = "ASC"
             Dim dateColumnsText = If(GetArgString(toolCall.Arguments, "date_columns"), "")
 
-            ' ── Resolve attachments to process ──
-            Dim toProcess As List(Of AutoPilotAttachmentInfo)
+            Dim requestedPaths As System.Collections.Generic.List(Of System.String) = GetArgStringArray(toolCall.Arguments, "file_paths")
+            Dim inputErrors As New System.Collections.Generic.List(Of System.String)()
+            Dim toProcess As New System.Collections.Generic.List(Of AutoPilotAttachmentInfo)()
+            Dim seenPaths As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            Dim explicitInputs As System.Boolean = toolCall.Arguments.ContainsKey("file_paths") OrElse targetNames.Count > 0
+
             If targetNames.Count > 0 Then
-                toProcess = New List(Of AutoPilotAttachmentInfo)()
-                For Each name In targetNames
-                    Dim att = FindAttachment(name)
-                    If att IsNot Nothing AndAlso Not att.IsOverSizeLimit AndAlso att.TempFilePath IsNot Nothing Then
+                For Each name As System.String In targetNames
+                    Dim att As AutoPilotAttachmentInfo = FindAttachment(name)
+                    If att Is Nothing OrElse att.IsOverSizeLimit OrElse System.String.IsNullOrWhiteSpace(att.TempFilePath) Then
+                        inputErrors.Add("Attachment unavailable or over size limit: " & name)
+                    ElseIf seenPaths.Add(System.IO.Path.GetFullPath(att.TempFilePath)) Then
                         toProcess.Add(att)
                     End If
                 Next
-            Else
-                ' Process all readable non-binary attachments, plus binary media if the model supports them
-                toProcess = _apCurrentAttachments?.Where(
-                    Function(a) Not a.IsOverSizeLimit AndAlso a.TempFilePath IsNot Nothing AndAlso
-                                (Not IsBinaryMediaExtension(a.Extension) OrElse
-                                 SharedMethods.IsBinaryMediaSupported(_context, a.Extension,
-                                     SharedMethods.TaskFlagForExtension(a.Extension)))).ToList()
+            ElseIf Not explicitInputs AndAlso _apCurrentAttachments IsNot Nothing Then
+                For Each att As AutoPilotAttachmentInfo In _apCurrentAttachments
+                    If Not att.IsOverSizeLimit AndAlso Not System.String.IsNullOrWhiteSpace(att.TempFilePath) AndAlso
+                       (Not IsBinaryMediaExtension(att.Extension) OrElse
+                        SharedMethods.IsBinaryMediaSupported(_context, att.Extension, SharedMethods.TaskFlagForExtension(att.Extension))) AndAlso
+                       seenPaths.Add(System.IO.Path.GetFullPath(att.TempFilePath)) Then toProcess.Add(att)
+                Next
             End If
 
-            If toProcess Is Nothing OrElse toProcess.Count = 0 Then
+            For Each requestedPath As System.String In requestedPaths
+                ct.ThrowIfCancellationRequested()
+                Try
+                    Dim resolvedPath As System.String = SharedLibrary.Agents.PathPolicy.Resolve(requestedPath, SharedLibrary.Agents.PathAccess.Read)
+                    If Not System.IO.File.Exists(resolvedPath) Then Throw New System.IO.FileNotFoundException("File not found.")
+                    Dim fileInfo As New System.IO.FileInfo(resolvedPath)
+                    If _apConfig IsNot Nothing AndAlso _apConfig.MaxAttachmentBytes > 0 AndAlso fileInfo.Length > _apConfig.MaxAttachmentBytes Then
+                        Throw New System.IO.IOException("File exceeds the configured per-file size limit.")
+                    End If
+                    Dim extension As System.String = fileInfo.Extension.ToLowerInvariant()
+                    If extension = ".doc" AndAlso Not INI_AllowLegacyDocFiles Then Throw New System.NotSupportedException("Legacy .doc reading is disabled.")
+                    If IsBinaryMediaExtension(extension) AndAlso Not SharedMethods.IsBinaryMediaSupported(_context, extension, SharedMethods.TaskFlagForExtension(extension)) Then
+                        Throw New System.NotSupportedException("The configured model cannot read this binary media format.")
+                    End If
+                    If seenPaths.Add(resolvedPath) Then
+                        Dim existing As AutoPilotAttachmentInfo = If(_apCurrentAttachments Is Nothing, Nothing,
+                            _apCurrentAttachments.FirstOrDefault(Function(att) System.String.Equals(att.TempFilePath, resolvedPath, System.StringComparison.OrdinalIgnoreCase)))
+                        toProcess.Add(If(existing, New AutoPilotAttachmentInfo With {
+                            .OriginalFileName = fileInfo.Name, .TempFilePath = resolvedPath, .SourcePath = resolvedPath,
+                            .Extension = extension, .SizeBytes = fileInfo.Length}))
+                    End If
+                Catch ex As System.OperationCanceledException
+                    Throw
+                Catch ex As System.Exception
+                    inputErrors.Add(requestedPath & ": " & ex.Message)
+                    context.Log("Document extraction input rejected: " & requestedPath & ": " & ex.ToString())
+                End Try
+            Next
+
+            If toProcess.Count = 0 Then
                 response.Success = False
-                response.Response = "No processable attachments found for data extraction."
+                response.Response = "No processable documents found for data extraction. " & System.String.Join("; ", inputErrors)
                 Return response
             End If
 
@@ -919,7 +951,7 @@ Partial Public Class ThisAddIn
                 If Integer.TryParse(part.Trim(), n) AndAlso n > 0 Then dateCols.Add(n)
             Next
 
-            ' ── Build file path list from resolved attachments ──
+            ' ── Use the same extraction pipeline for attachments and authorized files ──
             Dim filePaths As New List(Of String)()
             For Each att In toProcess
                 filePaths.Add(att.TempFilePath)
@@ -942,6 +974,7 @@ Partial Public Class ThisAddIn
                 ' RunFactExtractionAsync expects Func(Of String, Boolean, Boolean, Boolean, Task(Of String))
                 ' Parameters: (path, silent, doOcr, askUser)
                 ' We bridge to the Outlook text extraction pipeline (ReadSingleAttachmentText cache + fallbacks)
+                Dim readerErrors As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.OrdinalIgnoreCase)
                 Dim getFileContentFunc As Func(Of String, Boolean, Boolean, Boolean, Task(Of String)) =
                     Async Function(filePath As String, silent As Boolean, doOcr As Boolean, askUser As Boolean) As Task(Of String)
                         ' First, try to find the file in the current attachments by path and reuse cached text
@@ -953,30 +986,46 @@ Partial Public Class ThisAddIn
                             If Not String.IsNullOrWhiteSpace(cachedText) Then Return cachedText
                         End If
 
+                        If System.IO.Path.GetExtension(filePath).Equals(".doc", System.StringComparison.OrdinalIgnoreCase) AndAlso Not INI_AllowLegacyDocFiles Then Return System.String.Empty
                         ' Fallback: try extraction methods directly on path
                         Dim text As String = Nothing
                         Dim label As String = Nothing
                         Try
-                            If TryExtractOfficeText(filePath, text, label) AndAlso Not String.IsNullOrWhiteSpace(text) Then Return text
+                            Dim officeRead = Await TryExtractOfficeTextAsync(filePath).ConfigureAwait(False)
+                            text = officeRead.Item2
+                            label = officeRead.Item3
+                            If officeRead.Item1 AndAlso Not String.IsNullOrWhiteSpace(text) Then Return text
                         Catch : End Try
                         Try
                             Dim ext = Path.GetExtension(filePath).ToLowerInvariant()
                             If ext = ".xlsx" OrElse ext = ".xls" Then
-                                text = ExtractExcelText(filePath)
+                                text = Await SharedMethods.PostToHostUiAsync(Of String)(Function() ExtractExcelText(filePath)).ConfigureAwait(False)
                                 If Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error") Then Return text
                             ElseIf ext = ".pptx" Then
-                                text = ExtractPowerPointText(filePath)
+                                text = Await SharedMethods.PostToHostUiAsync(Of String)(Function() ExtractPowerPointText(filePath)).ConfigureAwait(False)
                                 If Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error") Then Return text
                             End If
                         Catch : End Try
                         Try
-                            If TryExtractTextLike(filePath, text, label) AndAlso Not String.IsNullOrWhiteSpace(text) Then Return text
+                            Dim textRead = Await TryExtractTextLikeAsync(filePath).ConfigureAwait(False)
+                            text = textRead.Item2
+                            label = textRead.Item3
+                            If textRead.Item1 AndAlso Not String.IsNullOrWhiteSpace(text) Then Return text
                         Catch : End Try
                         If Path.GetExtension(filePath).ToLowerInvariant() = ".pdf" Then
                             Try
                                 text = Await SharedMethods.ReadPdfAsText(filePath, ReturnErrorInsteadOfEmpty:=True, DoOCR:=doOcr, AskUser:=False)
-                                If Not String.IsNullOrWhiteSpace(text) Then Return text
-                            Catch : End Try
+                                ' The reader's explicit failure channel must never become source text,
+                                ' even when its message is longer than the service's legacy 200-char guard.
+                                If text IsNot Nothing AndAlso text.TrimStart().StartsWith("Error reading PDF:", System.StringComparison.OrdinalIgnoreCase) Then
+                                    Throw New System.IO.InvalidDataException(text)
+                                End If
+                                If Not System.String.IsNullOrWhiteSpace(text) Then Return text
+                            Catch ex As System.Exception
+                                readerErrors(filePath) = ex.Message
+                                context.Log("Document reader failed: " & filePath & ": " & ex.ToString())
+                                Throw
+                            End Try
                         End If
                         Return ""
                     End Function
@@ -989,6 +1038,9 @@ Partial Public Class ThisAddIn
                         Return Await ThisAddIn.LLM(sysPrompt, userText, model, temp, timeout, useSecond, True, cancellationToken:=ct)
                     End Function
 
+                ' Relative display paths keep equal basenames in different folders distinct.
+                Dim extractionSourceDirectory As System.String = If(System.String.IsNullOrWhiteSpace(_apCurrentTempDir),
+                    SharedLibrary.Agents.PathPolicy.GetDefaultWritableRoot(), _apCurrentTempDir)
                 ' ── Run the extraction ──
                 Dim result = Await FactExtractionService.RunFactExtractionAsync(
                     filePaths,
@@ -998,7 +1050,7 @@ Partial Public Class ThisAddIn
                     sortDirection,
                     False,          ' doOcr — we already extracted text above
                     useSecondApi,
-                    _apCurrentTempDir,
+                    extractionSourceDirectory,
                     AddressOf InterpolateAtRuntime,
                     llmFunc,
                     getFileContentFunc,
@@ -1017,21 +1069,52 @@ Partial Public Class ThisAddIn
                                          Return Await ThisAddIn.LLM(sys, usr, mdl, tmp, tmo, use2nd, True, cancellationToken:=ct, FileObject:=fileObj)
                                      End Function)
 
-                If result Is Nothing OrElse result.Rows.Count = 0 Then
-                    Dim errMsg = "No data could be extracted from the provided file(s)."
-                    If result IsNot Nothing AndAlso result.Errors.Count > 0 Then
-                        errMsg &= " Errors: " & String.Join("; ", result.Errors.Take(5))
-                    End If
-                    If result IsNot Nothing AndAlso result.FailedFileNames.Count > 0 Then
-                        errMsg &= " Failed files: " & String.Join(", ", result.FailedFileNames)
-                    End If
+                ct.ThrowIfCancellationRequested()
+                If result Is Nothing Then
                     response.Success = False
-                    response.Response = errMsg
-                    ' The shared extraction service already emitted one compact final status line
-                    ' with processed/failed counts and structured failure reason(s). Avoid a second,
-                    ' generic dashboard warning that would duplicate and obscure that diagnosis.
+                    response.ErrorCode = "document_extraction_no_result"
+                    response.ErrorMessage = "The extraction service returned no result."
+                    response.Response = response.ErrorMessage
                     Return response
                 End If
+
+                Dim fileResults As New Newtonsoft.Json.Linq.JArray()
+                Dim technicalFailure As System.Boolean = False
+                Dim reportedFailures As System.Int32 = 0
+                For Each att As AutoPilotAttachmentInfo In toProcess
+                    Dim failureKey As System.String = Nothing
+                    For Each failure As System.Collections.Generic.KeyValuePair(Of System.String, System.String) In result.FailedFilePaths
+                        If System.String.Equals(System.IO.Path.GetFullPath(failure.Value), System.IO.Path.GetFullPath(att.TempFilePath), System.StringComparison.OrdinalIgnoreCase) Then
+                            failureKey = failure.Key
+                            Exit For
+                        End If
+                    Next
+                    Dim reason As System.String = System.String.Empty
+                    Dim status As System.String = "extracted"
+                    Dim inputFailure As System.Boolean = False
+                    If failureKey IsNot Nothing Then
+                        reportedFailures += 1
+                        If Not result.FailedFileReasons.TryGetValue(failureKey, reason) Then reason = "UNKNOWN_FAILURE"
+                        inputFailure = IsDocumentExtractionInputFailure(reason)
+                        status = If(inputFailure, "unavailable_content", "extraction_failed")
+                        If Not inputFailure Then technicalFailure = True
+                    End If
+                    Dim readerError As System.String = System.String.Empty
+                    readerErrors.TryGetValue(att.TempFilePath, readerError)
+                    Dim fileResult As New Newtonsoft.Json.Linq.JObject From {
+                        {"file_name", att.OriginalFileName}, {"file_path", att.TempFilePath},
+                        {"status", status}, {"error_code", reason}, {"error_message", If(readerError, System.String.Empty)},
+                        {"automatic_retry", False},
+                        {"requires_technical_recovery", failureKey IsNot Nothing AndAlso Not inputFailure}
+                    }
+                    If inputFailure Then
+                        fileResult("notice") = "No content was extracted from this file. Disclose this gap; do not infer facts or repeat this unchanged input automatically. A corrected/readable source or resolved access is needed."
+                    End If
+                    fileResults.Add(fileResult)
+                Next
+                ' Missing/ambiguous provenance is a technical failure, never fabricated success.
+                If reportedFailures <> result.FailedFiles OrElse result.ProcessedFiles + result.FailedFiles <> toProcess.Count Then technicalFailure = True
+                If result.Rows.Count = 0 AndAlso result.FailedFiles = 0 Then technicalFailure = True
 
                 ' ── Format result as JSON for the LLM ──
                 Dim jResult As New JObject()
@@ -1061,40 +1144,36 @@ Partial Public Class ThisAddIn
                 jResult("total_rows") = result.Rows.Count
                 jResult("total_columns") = result.Schema.Count
                 jResult("files_processed") = result.ProcessedFiles
-                jResult("files_failed") = result.FailedFiles
+                jResult("files_failed") = result.FailedFiles + inputErrors.Count
+                jResult("input_errors") = New Newtonsoft.Json.Linq.JArray(inputErrors.ToArray())
+                jResult("complete") = result.FailedFiles = 0 AndAlso inputErrors.Count = 0 AndAlso Not technicalFailure
+                jResult("processing_complete") = Not technicalFailure
+                jResult("outcome") = If(technicalFailure, "technical_failure",
+                    If(result.FailedFiles > 0 OrElse inputErrors.Count > 0, "completed_with_file_errors", "completed"))
+                jResult("file_results") = fileResults
                 If result.FailedFileNames.Count > 0 Then
                     jResult("failed_files") = New JArray(result.FailedFileNames.ToArray())
                 End If
                 If result.Errors.Count > 0 Then
-                    jResult("errors") = New JArray(result.Errors.Take(10).ToArray())
+                    jResult("errors") = New JArray(result.Errors.ToArray())
                 End If
 
                 Dim jsonString = jResult.ToString(Newtonsoft.Json.Formatting.None)
 
-                ' Truncate if extremely large to stay within LLM context limits
-                If jsonString.Length > 200000 Then
-                    ' Rebuild with fewer rows
-                    Dim maxRows = Math.Max(1, CInt(result.Rows.Count * (200000.0 / jsonString.Length)))
-                    Dim jRowsTruncated As New JArray()
-                    For i = 0 To Math.Min(maxRows - 1, result.Rows.Count - 1)
-                        Dim jRow As New JArray()
-                        For Each cellVal In result.Rows(i).Values
-                            jRow.Add(If(cellVal Is Nothing, "", cellVal.ToString()))
-                        Next
-                        jRowsTruncated.Add(jRow)
-                    Next
-                    jResult("rows") = jRowsTruncated
-                    jResult("total_rows") = result.Rows.Count
-                    jResult("rows_returned") = jRowsTruncated.Count
-                    jResult("truncated") = True
-                    jsonString = jResult.ToString(Newtonsoft.Json.Formatting.None)
-                End If
+                ' Preserve every extracted row; replay storage handles large results.
 
-                response.Success = True
+                ' A diagnosed source-file problem is a valid report, including an all-unreadable batch.
+                ' Technical/model failures remain failures with all successful rows still retained.
+                response.Success = Not technicalFailure
                 response.Response = jsonString
+                If technicalFailure Then
+                    response.ErrorCode = "document_extraction_technical_failure"
+                    response.ErrorMessage = "Some extraction steps failed technically; retain existing rows and recover only the affected files."
+                End If
+                context.Log("Document extraction outcome=" & jResult.Value(Of System.String)("outcome") & "; extracted=" & result.ProcessedFiles.ToString(System.Globalization.CultureInfo.InvariantCulture) & "; failed=" & result.FailedFiles.ToString(System.Globalization.CultureInfo.InvariantCulture))
 
                 Dim schemaNames = String.Join(", ", result.Schema.Select(Function(c) c.Name))
-                ApDashboardLog($"✓ Fact extraction: {result.Rows.Count} rows, {result.Schema.Count} columns ({schemaNames}), {result.ProcessedFiles} file(s)", "info")
+                ApDashboardLog($"📊 Fact extraction report: {result.Rows.Count} rows, {result.Schema.Count} columns ({schemaNames}), {result.ProcessedFiles} file(s) extracted, {result.FailedFiles + inputErrors.Count} unavailable/failed", If(technicalFailure, "warn", "info"))
 
             Finally
                 OtherPrompt = savedOtherPrompt
@@ -1108,12 +1187,23 @@ Partial Public Class ThisAddIn
         Catch ex As System.Exception
             response.Success = False
             response.ErrorMessage = ex.Message
-            response.Response = $"Error extracting data from attachments: {ex.Message}"
+            response.Response = $"Error extracting data from documents: {ex.Message}"
         End Try
 
         Return response
     End Function
 
+
+    Private Shared Function IsDocumentExtractionInputFailure(reason As System.String) As System.Boolean
+        Select Case reason
+            Case FactExtractionService.FailReason_ReadError,
+                 FactExtractionService.FailReason_EmptyContent,
+                 FactExtractionService.FailReason_FileNotFound
+                Return True
+            Case Else
+                Return False
+        End Select
+    End Function
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL EXECUTION: report_inability

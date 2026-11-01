@@ -6,6 +6,10 @@
 ' Purpose: Queries the configured knowledge stores and injects context into
 '          the system prompt for non-tooling Freestyle (kb) trigger processing.
 ' Note:    Mirrors the Word add-in's KnowledgeRAG logic.
+'
+' KEY ARCHITECTURE
+'   • Surface: ThisAddIn (host partial/UI).
+'   • Entry points/helpers: ConsultKnowledgeStore.
 ' =============================================================================
 
 Option Explicit On

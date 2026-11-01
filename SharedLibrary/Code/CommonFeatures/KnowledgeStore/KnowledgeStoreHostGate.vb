@@ -74,6 +74,10 @@ Namespace SharedLibrary
                                                             Optional statusCallback As Action(Of String) = Nothing,
                                                             Optional cancellationToken As CancellationToken = Nothing) As Task(Of IDisposable)
 
+            ' Automatic callers inherit the generic coordinator cancellation checkpoint.
+            If Not cancellationToken.CanBeCanceled Then cancellationToken = BackgroundMaintenanceCoordinator.CurrentCancellationToken
+            cancellationToken.ThrowIfCancellationRequested()
+
             Dim effectiveOperationName = If(String.IsNullOrWhiteSpace(operationName),
                                             "Knowledge Store AI step",
                                             operationName.Trim())

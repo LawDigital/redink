@@ -77,8 +77,13 @@ Partial Public Class ThisAddIn
 
             Return True
 
+        Catch ex As System.Exception When IsWordCommandCancellation(ex)
+            InfoBox.ShowInfoBox("")
+            Throw
         Catch ex As System.Exception
-            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in ConsultLibrary: " & ex.Message, "Error")
+            InfoBox.ShowInfoBox("")
+            ReportWordCommandFailure("ConsultLibrary", ex,
+                "Inky could not search the instruction library. Please try again.")
             Return False
         End Try
 

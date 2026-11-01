@@ -20,6 +20,10 @@
 '     special-task-model and using it for this run only (restoring the previous
 '     model afterwards), falling back to "agentdefaultmodel".
 '   - Return the final assistant text (the runner will try to parse it as JSON).
+'
+' KEY ARCHITECTURE
+'   • Surface: SubAgentRunRequest, ISubAgentHost (VB implementation).
+'   • Entry points/helpers: RunIsolatedToolingLoopAsync.
 ' =============================================================================
 
 Option Strict On
@@ -53,6 +57,15 @@ Namespace Agents
         ''' empty-response recovery run. This is runtime state, not model input.
         ''' </summary>
         Public Property RunnerRetryIndex As Integer
+
+        ''' <summary>
+        ''' Diagnostic-only excerpt from the unusable response that caused the
+        ''' immediately preceding internal runner retry. Never changes task identity.
+        ''' </summary>
+        Public Property PreviousDiscardedResponseExcerpt As String
+
+        ''' <summary>Original character count of the discarded response.</summary>
+        Public Property PreviousDiscardedResponseLength As Integer
 
         ''' <summary>
         ''' Exact JSON array supplied by the parent agent_<name> invocation.

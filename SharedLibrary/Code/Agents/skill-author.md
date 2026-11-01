@@ -163,7 +163,7 @@ AutoPilot). Before putting any tool in `allowed-tools`:
    - Generic `file_*` vs. document-specific create/convert tools (`create_word_document`,
      `word_to_pdf`, `pdf_to_word`, `complete_word_tables`, `create_powerpoint`, etc.).
 5. In the **Word chatbot**, edits to the open document normally go through the inline
-   `[#REPLACE …]` / `[#INSERTAFTER …]` command channel, which takes precedence over tool calls.
+   host-defined JSON Word command channel, which takes precedence over tool calls.
 6. Online sources must be listed in `allowed-tools` to be usable (a wildcard such as
    `swiss-caselaw*` or the placeholder `selected_online_sources` is acceptable).
 

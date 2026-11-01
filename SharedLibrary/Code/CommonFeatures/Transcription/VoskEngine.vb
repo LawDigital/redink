@@ -1,4 +1,4 @@
-﻿' Part of "Red Ink for Word"
+﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
 ' =============================================================================
@@ -123,9 +123,16 @@ Namespace Transcription
             If _similarityThreshold > 2.5 Then _similarityThreshold = 2.5
         End Sub
 
-        Public Function StartLiveAsync(opts As TranscriptionOptions, ct As CancellationToken) As Task Implements ITranscriptionEngine.StartLiveAsync
-            Init(opts)
-            Return Task.CompletedTask
+        Public Function StartLiveAsync(opts As TranscriptionOptions, ct As CancellationToken) As System.Threading.Tasks.Task Implements ITranscriptionEngine.StartLiveAsync
+            ' Loading a local model can take seconds. Keep this work off the WinForms UI thread
+            ' so the widget remains responsive and its "Starting…" state can be painted.
+            Return System.Threading.Tasks.Task.Run(
+                Sub()
+                    ct.ThrowIfCancellationRequested()
+                    Init(opts)
+                    ct.ThrowIfCancellationRequested()
+                End Sub,
+                ct)
         End Function
 
         Public Function PushAudioAsync(pcm As Byte(), bytesValid As Integer, ct As CancellationToken) As Task Implements ITranscriptionEngine.PushAudioAsync

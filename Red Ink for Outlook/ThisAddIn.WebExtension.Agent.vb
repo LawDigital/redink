@@ -75,6 +75,19 @@ Partial Public Class ThisAddIn
     ''' <summary>Prefix for chat agent temp directories.</summary>
     Private Const CA_TempPrefix As String = AN2 & "_chatagent_"
 
+    Private Const CA_ContinuationInputManifestName As System.String = "inputs.json"
+
+    Private Class LocalChatContinuationInputManifest
+        Public Property UpdatedUtc As System.DateTime = System.DateTime.UtcNow
+        Public Property RequestFileCachedName As System.String = System.String.Empty
+        Public Property Files As System.Collections.Generic.List(Of LocalChatContinuationInputFile) = New System.Collections.Generic.List(Of LocalChatContinuationInputFile)()
+    End Class
+
+    Private Class LocalChatContinuationInputFile
+        Public Property OriginalFileName As System.String = System.String.Empty
+        Public Property CachedFileName As System.String = System.String.Empty
+    End Class
+
     Private Const CA_Tool_WorkspaceList As String = "agent_workspace_list"
     Private Const CA_Tool_WorkspaceRead As String = "agent_workspace_read"
     Private Const CA_Tool_WorkspaceWrite As String = "agent_workspace_write"
@@ -885,6 +898,309 @@ Partial Public Class ThisAddIn
         Catch ex As Exception
             ' Never throw from delivery promotion. Worst case the scan behaves exactly as before.
             ToolingFileLogger.LogWarn("PromoteRegisteredDeliverablesToForcedDelivery failed.", ex:=ex)
+        End Try
+    End Sub
+
+    Private Function GetLocalChatWorkspaceContinuationFingerprint() As System.String
+        Try
+            LoadChatAgentWorkspaceIfNeeded()
+            If _chatAgentWorkspace Is Nothing OrElse
+               System.String.IsNullOrWhiteSpace(_chatAgentWorkspace.RootPath) OrElse
+               Not System.IO.Directory.Exists(_chatAgentWorkspace.RootPath) Then
+                Return System.String.Empty
+            End If
+
+            Dim canonicalRoot As System.String =
+                System.IO.Path.GetFullPath(_chatAgentWorkspace.RootPath).
+                    TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar).
+                    ToUpperInvariant()
+
+            Dim payload As System.String =
+                canonicalRoot & "|" &
+                _chatAgentWorkspace.AllowRead.ToString(System.Globalization.CultureInfo.InvariantCulture) & "|" &
+                _chatAgentWorkspace.AllowWrite.ToString(System.Globalization.CultureInfo.InvariantCulture) & "|" &
+                _chatAgentWorkspace.AllowMoveCopyRename.ToString(System.Globalization.CultureInfo.InvariantCulture) & "|" &
+                _chatAgentWorkspace.AllowDelete.ToString(System.Globalization.CultureInfo.InvariantCulture) & "|" &
+                _chatAgentWorkspace.SaveDroppedFilesToWorkspace.ToString(System.Globalization.CultureInfo.InvariantCulture) & "|" &
+                _chatAgentWorkspace.IncludeHiddenSystem.ToString(System.Globalization.CultureInfo.InvariantCulture)
+
+            Using sha As System.Security.Cryptography.SHA256 = System.Security.Cryptography.SHA256.Create()
+                Dim hash() As System.Byte = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(payload))
+                Return System.BitConverter.ToString(hash).Replace("-", System.String.Empty)
+            End Using
+        Catch ex As System.Exception
+            ToolingFileLogger.LogWarn("GetLocalChatWorkspaceContinuationFingerprint failed.", ex:=ex)
+            Return System.String.Empty
+        End Try
+    End Function
+
+    Private Function GetLocalChatContinuationInputRoot() As System.String
+        Dim root As System.String = INI_AgentResourcesPathLocal
+        If Not System.String.IsNullOrWhiteSpace(root) Then
+            root = SharedLibrary.SharedLibrary.SharedMethods.ExpandEnvironmentVariables(root)
+        End If
+        If System.String.IsNullOrWhiteSpace(root) Then
+            root = System.IO.Path.Combine(
+                System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
+                "RedInk")
+        End If
+        Return System.IO.Path.Combine(root, ".session", "local_chat_continuation_inputs")
+    End Function
+
+    Private Function GetLocalChatContinuationInputDirectory(sessionId As System.String) As System.String
+        Dim parsed As System.Guid
+        If Not System.Guid.TryParse(If(sessionId, System.String.Empty).Trim(), parsed) Then Return Nothing
+        Return System.IO.Path.Combine(GetLocalChatContinuationInputRoot(), parsed.ToString("N"))
+    End Function
+
+    Private Sub CleanupStaleLocalChatContinuationInputs()
+        Try
+            Dim root As System.String = GetLocalChatContinuationInputRoot()
+            If Not System.IO.Directory.Exists(root) Then Return
+            Dim cutoff As System.DateTime = System.DateTime.UtcNow.AddDays(-SharedLibrary.Agents.WorkflowContinuity.DefaultContinuationRetentionDays)
+            For Each directoryPath As System.String In System.IO.Directory.GetDirectories(root)
+                Try
+                    If System.IO.Directory.GetLastWriteTimeUtc(directoryPath) <= cutoff Then
+                        System.IO.Directory.Delete(directoryPath, recursive:=True)
+                    End If
+                Catch
+                End Try
+            Next
+        Catch
+        End Try
+    End Sub
+
+    Private Function PersistLocalChatContinuationInputs(sessionId As System.String, requestFilePath As System.String) As System.Boolean
+        Dim directoryPath As System.String = Nothing
+        Dim temporaryDirectoryPath As System.String = Nothing
+        Dim backupDirectoryPath As System.String = Nothing
+
+        Try
+            CleanupStaleLocalChatContinuationInputs()
+            directoryPath = GetLocalChatContinuationInputDirectory(sessionId)
+            If System.String.IsNullOrWhiteSpace(directoryPath) Then Return False
+
+            Dim root As System.String = System.IO.Path.GetDirectoryName(directoryPath)
+            If System.String.IsNullOrWhiteSpace(root) Then Return False
+            System.IO.Directory.CreateDirectory(root)
+
+            temporaryDirectoryPath = directoryPath & ".tmp_" & System.Guid.NewGuid().ToString("N")
+            backupDirectoryPath = directoryPath & ".bak_" & System.Guid.NewGuid().ToString("N")
+            System.IO.Directory.CreateDirectory(temporaryDirectoryPath)
+
+            Dim manifest As New LocalChatContinuationInputManifest()
+            Dim copiedSources As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            Dim index As System.Int32 = 0
+
+            If _chatAgentFiles IsNot Nothing Then
+                For Each attachment As AutoPilotAttachmentInfo In _chatAgentFiles.ToList()
+                    If attachment Is Nothing OrElse attachment.IsToolOutput Then Continue For
+                    Dim hydrated As AutoPilotAttachmentInfo = EnsureSessionAttachmentAvailable(attachment)
+                    If hydrated Is Nothing OrElse System.String.IsNullOrWhiteSpace(hydrated.TempFilePath) OrElse Not System.IO.File.Exists(hydrated.TempFilePath) Then Continue For
+
+                    Dim sourceFull As System.String = System.IO.Path.GetFullPath(hydrated.TempFilePath)
+                    If Not copiedSources.Add(sourceFull) Then Continue For
+                    index += 1
+                    Dim cachedName As System.String = index.ToString("D4", System.Globalization.CultureInfo.InvariantCulture) & "_" & System.IO.Path.GetFileName(hydrated.TempFilePath)
+                    System.IO.File.Copy(hydrated.TempFilePath, System.IO.Path.Combine(temporaryDirectoryPath, cachedName), overwrite:=True)
+                    manifest.Files.Add(New LocalChatContinuationInputFile() With {
+                        .OriginalFileName = If(hydrated.OriginalFileName, System.IO.Path.GetFileName(hydrated.TempFilePath)),
+                        .CachedFileName = cachedName
+                    })
+                Next
+            End If
+
+            If Not System.String.IsNullOrWhiteSpace(requestFilePath) AndAlso System.IO.File.Exists(requestFilePath) Then
+                Dim requestFull As System.String = System.IO.Path.GetFullPath(requestFilePath)
+                index += 1
+                Dim cachedName As System.String = index.ToString("D4", System.Globalization.CultureInfo.InvariantCulture) & "_request_" & System.IO.Path.GetFileName(requestFilePath)
+                System.IO.File.Copy(requestFilePath, System.IO.Path.Combine(temporaryDirectoryPath, cachedName), overwrite:=True)
+                manifest.RequestFileCachedName = cachedName
+
+                If copiedSources.Add(requestFull) Then
+                    manifest.Files.Add(New LocalChatContinuationInputFile() With {
+                        .OriginalFileName = System.IO.Path.GetFileName(requestFilePath),
+                        .CachedFileName = cachedName
+                    })
+                End If
+            End If
+
+            manifest.UpdatedUtc = System.DateTime.UtcNow
+            System.IO.File.WriteAllText(
+                System.IO.Path.Combine(temporaryDirectoryPath, CA_ContinuationInputManifestName),
+                Newtonsoft.Json.JsonConvert.SerializeObject(manifest),
+                New System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier:=False))
+            System.IO.Directory.SetLastWriteTimeUtc(temporaryDirectoryPath, System.DateTime.UtcNow)
+
+            If System.IO.Directory.Exists(directoryPath) Then
+                System.IO.Directory.Move(directoryPath, backupDirectoryPath)
+            End If
+
+            Try
+                System.IO.Directory.Move(temporaryDirectoryPath, directoryPath)
+                temporaryDirectoryPath = Nothing
+            Catch moveEx As System.Exception
+                If Not System.IO.Directory.Exists(directoryPath) AndAlso
+                   Not System.String.IsNullOrWhiteSpace(backupDirectoryPath) AndAlso
+                   System.IO.Directory.Exists(backupDirectoryPath) Then
+                    System.IO.Directory.Move(backupDirectoryPath, directoryPath)
+                    backupDirectoryPath = Nothing
+                End If
+                Throw
+            End Try
+
+            If Not System.String.IsNullOrWhiteSpace(backupDirectoryPath) AndAlso System.IO.Directory.Exists(backupDirectoryPath) Then
+                Try
+                    System.IO.Directory.Delete(backupDirectoryPath, recursive:=True)
+                Catch cleanupEx As System.Exception
+                    ToolingFileLogger.LogWarn("Failed to remove previous Local Chat continuation input cache.", ex:=cleanupEx)
+                End Try
+            End If
+            backupDirectoryPath = Nothing
+
+            System.IO.Directory.SetLastWriteTimeUtc(directoryPath, System.DateTime.UtcNow)
+            Return True
+        Catch ex As System.Exception
+            If Not System.String.IsNullOrWhiteSpace(backupDirectoryPath) AndAlso
+               Not System.String.IsNullOrWhiteSpace(directoryPath) AndAlso
+               System.IO.Directory.Exists(backupDirectoryPath) AndAlso
+               Not System.IO.Directory.Exists(directoryPath) Then
+                Try
+                    System.IO.Directory.Move(backupDirectoryPath, directoryPath)
+                    backupDirectoryPath = Nothing
+                Catch restoreEx As System.Exception
+                    ToolingFileLogger.LogWarn("Failed to restore previous Local Chat continuation input cache.", ex:=restoreEx)
+                End Try
+            End If
+            If Not System.String.IsNullOrWhiteSpace(temporaryDirectoryPath) Then
+                Try
+                    If System.IO.Directory.Exists(temporaryDirectoryPath) Then System.IO.Directory.Delete(temporaryDirectoryPath, recursive:=True)
+                Catch
+                End Try
+            End If
+            ToolingFileLogger.LogWarn("PersistLocalChatContinuationInputs failed.", ex:=ex)
+            Return False
+        End Try
+    End Function
+
+    Private Function RestoreLocalChatContinuationInputs(sessionId As System.String, ByRef requestFilePath As System.String) As System.Boolean
+        requestFilePath = Nothing
+        Dim createdPaths As New System.Collections.Generic.List(Of System.String)()
+
+        Try
+            CleanupStaleLocalChatContinuationInputs()
+            Dim directoryPath As System.String = GetLocalChatContinuationInputDirectory(sessionId)
+            If System.String.IsNullOrWhiteSpace(directoryPath) OrElse Not System.IO.Directory.Exists(directoryPath) Then Return False
+
+            Dim manifestPath As System.String = System.IO.Path.Combine(directoryPath, CA_ContinuationInputManifestName)
+            If Not System.IO.File.Exists(manifestPath) Then Return False
+            Dim manifest As LocalChatContinuationInputManifest =
+                Newtonsoft.Json.JsonConvert.DeserializeObject(Of LocalChatContinuationInputManifest)(System.IO.File.ReadAllText(manifestPath, System.Text.Encoding.UTF8))
+            If manifest Is Nothing Then Return False
+
+            Dim manifestFiles As System.Collections.Generic.List(Of LocalChatContinuationInputFile) =
+                If(manifest.Files, New System.Collections.Generic.List(Of LocalChatContinuationInputFile)())
+
+            ' Strict preflight: validate the complete persisted input set before changing
+            ' the active Local Chat staging area.
+            For Each item As LocalChatContinuationInputFile In manifestFiles
+                If item Is Nothing OrElse System.String.IsNullOrWhiteSpace(item.CachedFileName) Then Return False
+                Dim cachedPath As System.String = System.IO.Path.Combine(directoryPath, item.CachedFileName)
+                If Not System.IO.File.Exists(cachedPath) Then Return False
+            Next
+            If Not System.String.IsNullOrWhiteSpace(manifest.RequestFileCachedName) Then
+                Dim cachedRequestPreflight As System.String = System.IO.Path.Combine(directoryPath, manifest.RequestFileCachedName)
+                If Not System.IO.File.Exists(cachedRequestPreflight) Then Return False
+            End If
+
+            Dim tempDir As System.String = EnsureChatAgentTempDir()
+            For Each item As LocalChatContinuationInputFile In manifestFiles
+                Dim cachedPath As System.String = System.IO.Path.Combine(directoryPath, item.CachedFileName)
+
+                Dim existing As AutoPilotAttachmentInfo = _chatAgentFiles.FirstOrDefault(
+                    Function(a) a IsNot Nothing AndAlso
+                                Not a.IsToolOutput AndAlso
+                                System.String.Equals(If(a.OriginalFileName, System.String.Empty), If(item.OriginalFileName, System.String.Empty), System.StringComparison.OrdinalIgnoreCase) AndAlso
+                                Not System.String.IsNullOrWhiteSpace(a.TempFilePath) AndAlso System.IO.File.Exists(a.TempFilePath))
+                If existing IsNot Nothing Then Continue For
+
+                Dim fileName As System.String = If(System.String.IsNullOrWhiteSpace(item.OriginalFileName), System.IO.Path.GetFileName(cachedPath), item.OriginalFileName)
+                Dim destPath As System.String = System.IO.Path.Combine(tempDir, fileName)
+                Dim counter As System.Int32 = 1
+                While System.IO.File.Exists(destPath)
+                    destPath = System.IO.Path.Combine(
+                        tempDir,
+                        System.IO.Path.GetFileNameWithoutExtension(fileName) & "_" & counter.ToString(System.Globalization.CultureInfo.InvariantCulture) & System.IO.Path.GetExtension(fileName))
+                    counter += 1
+                End While
+                System.IO.File.Copy(cachedPath, destPath, overwrite:=False)
+                createdPaths.Add(System.IO.Path.GetFullPath(destPath))
+                RegisterSessionFile(destPath, "Restored for Local Chat retry", isToolOutput:=False)
+            Next
+
+            If Not System.String.IsNullOrWhiteSpace(manifest.RequestFileCachedName) Then
+                Dim cachedRequest As System.String = System.IO.Path.Combine(directoryPath, manifest.RequestFileCachedName)
+                Dim requestName As System.String = System.IO.Path.GetFileName(cachedRequest)
+                Dim marker As System.String = "_request_"
+                Dim markerIndex As System.Int32 = requestName.IndexOf(marker, System.StringComparison.Ordinal)
+                If markerIndex >= 0 Then requestName = requestName.Substring(markerIndex + marker.Length)
+
+                Dim matching As AutoPilotAttachmentInfo = _chatAgentFiles.FirstOrDefault(
+                    Function(a) a IsNot Nothing AndAlso
+                                System.String.Equals(If(a.OriginalFileName, System.String.Empty), requestName, System.StringComparison.OrdinalIgnoreCase) AndAlso
+                                Not System.String.IsNullOrWhiteSpace(a.TempFilePath) AndAlso System.IO.File.Exists(a.TempFilePath))
+                If matching IsNot Nothing Then
+                    requestFilePath = matching.TempFilePath
+                Else
+                    Dim destRequest As System.String = System.IO.Path.Combine(tempDir, requestName)
+                    Dim counter As System.Int32 = 1
+                    While System.IO.File.Exists(destRequest)
+                        destRequest = System.IO.Path.Combine(
+                            tempDir,
+                            System.IO.Path.GetFileNameWithoutExtension(requestName) & "_request_" & counter.ToString(System.Globalization.CultureInfo.InvariantCulture) & System.IO.Path.GetExtension(requestName))
+                        counter += 1
+                    End While
+                    System.IO.File.Copy(cachedRequest, destRequest, overwrite:=False)
+                    createdPaths.Add(System.IO.Path.GetFullPath(destRequest))
+                    RegisterSessionFile(destRequest, "Restored request file for Local Chat retry", isToolOutput:=False)
+                    requestFilePath = destRequest
+                End If
+            End If
+
+            System.IO.Directory.SetLastWriteTimeUtc(directoryPath, System.DateTime.UtcNow)
+            Return True
+        Catch ex As System.Exception
+            For Each createdPath As System.String In createdPaths
+                Try
+                    If System.IO.File.Exists(createdPath) Then System.IO.File.Delete(createdPath)
+                Catch
+                End Try
+            Next
+            If _chatAgentFiles IsNot Nothing AndAlso createdPaths.Count > 0 Then
+                Dim createdSet As New System.Collections.Generic.HashSet(Of System.String)(createdPaths, System.StringComparer.OrdinalIgnoreCase)
+                _chatAgentFiles.RemoveAll(
+                    Function(a)
+                        If a Is Nothing OrElse System.String.IsNullOrWhiteSpace(a.TempFilePath) Then Return False
+                        Try
+                            Return createdSet.Contains(System.IO.Path.GetFullPath(a.TempFilePath))
+                        Catch
+                            Return False
+                        End Try
+                    End Function)
+            End If
+            ToolingFileLogger.LogWarn("RestoreLocalChatContinuationInputs failed.", ex:=ex)
+            Return False
+        End Try
+    End Function
+
+    Private Sub DeleteLocalChatContinuationInputs(sessionId As System.String)
+        Try
+            Dim directoryPath As System.String = GetLocalChatContinuationInputDirectory(sessionId)
+            If Not System.String.IsNullOrWhiteSpace(directoryPath) AndAlso System.IO.Directory.Exists(directoryPath) Then
+                System.IO.Directory.Delete(directoryPath, recursive:=True)
+            End If
+        Catch ex As System.Exception
+            ToolingFileLogger.LogWarn("DeleteLocalChatContinuationInputs failed.", ex:=ex)
         End Try
     End Sub
 
@@ -1852,13 +2168,16 @@ Partial Public Class ThisAddIn
             .ToolInstructionsPrompt =
                 CA_Tool_WorkspaceRead & ": Read or extract text from one workspace file. " &
                 "For one local workspace PDF or Office document, prefer this tool over direct path-based extraction, because it stages the file into the current session and uses the existing attachment extraction stack. " &
+                "Read subsequent text windows with start_char equal to the returned next_offset. Do not repeat the previous offset when truncated=true. " &
                 "When the returned payload contains session_file_name, use that exact name with attachment-based tools such as read_attachment, process_word_document, complete_word_tables, excel_list_live_worksheets, excel_read_live_range, and excel_complete_live_workbook.",
             .ToolDefinition =
                 "{""name"":""" & CA_Tool_WorkspaceRead & """," &
                 """description"":""Reads or extracts text from one workspace file and stages it into the current session when possible. When session_file_name is returned, use that exact name with attachment-based tools such as read_attachment, process_word_document, complete_word_tables, excel_list_live_worksheets, excel_read_live_range, and excel_complete_live_workbook.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """path"":{""type"":""string"",""description"":""Relative workspace file path.""}," &
-                """max_chars"":{""type"":""integer"",""description"":""Maximum characters to return. Default 12000, capped.""}" &
+                """start_char"":{""type"":""integer"",""minimum"":0,""description"":""Zero-based character offset in the extracted text. Default 0. If truncated=true, continue at the returned next_offset.""}," &
+                """offset"":{""type"":""integer"",""minimum"":0,""description"":""Compatibility alias for start_char. Prefer start_char; when both are supplied they must match.""}," &
+                """max_chars"":{""type"":""integer"",""description"":""Maximum characters to return. Default 12000, clamped to 1000..500000.""}" &
                 "},""required"":[""path""]}}"
         })
 
@@ -2254,7 +2573,10 @@ Partial Public Class ThisAddIn
                     Return SharedMethods.ReadRtfAsText(filePath, ReturnErrorInsteadOfEmpty:=False)
 
                 Case ".doc"
-                    If INI_AllowLegacyDocFiles Then Return SharedMethods.ReadWordDocument(filePath, ReturnErrorInsteadOfEmpty:=False)
+                    If INI_AllowLegacyDocFiles Then
+                        Return Await SharedMethods.PostToHostUiAsync(Of String)(
+                            Function() SharedMethods.ReadWordDocument(filePath, ReturnErrorInsteadOfEmpty:=False)).ConfigureAwait(False)
+                    End If
                     Return ""
 
                 Case ".docx", ".docm"
@@ -2289,17 +2611,51 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
+    ''' <summary>Resolve paging without turning malformed or conflicting input into a first-page read.</summary>
+    Private Shared Function TryResolveWorkspaceReadStart(
+        arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+        ByRef startChar As System.Int32,
+        ByRef failureMessage As System.String) As System.Boolean
+
+        startChar = 0
+        failureMessage = System.String.Empty
+        Dim found As System.Boolean = False
+        For Each key As System.String In New System.String() {"start_char", "offset"}
+            Dim rawValue As System.Object = Nothing
+            If arguments Is Nothing OrElse Not arguments.TryGetValue(key, rawValue) Then Continue For
+            Dim parsed As System.Int32
+            Dim token As Newtonsoft.Json.Linq.JToken = TryCast(rawValue, Newtonsoft.Json.Linq.JToken)
+            Dim valueText As System.String = System.String.Empty
+            If token IsNot Nothing Then
+                If token.Type = Newtonsoft.Json.Linq.JTokenType.Integer OrElse token.Type = Newtonsoft.Json.Linq.JTokenType.String Then valueText = token.ToString()
+            ElseIf rawValue IsNot Nothing AndAlso Not TypeOf rawValue Is System.Boolean Then
+                valueText = System.Convert.ToString(rawValue, System.Globalization.CultureInfo.InvariantCulture)
+            End If
+            If Not System.Int32.TryParse(valueText, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, parsed) OrElse parsed < 0 Then
+                failureMessage = key & " must be a non-negative integer character offset."
+                Return False
+            End If
+            If found AndAlso startChar <> parsed Then
+                failureMessage = "start_char and offset disagree. Supply start_char only, or the same value in both fields."
+                Return False
+            End If
+            startChar = parsed
+            found = True
+        Next
+        Return True
+    End Function
+
     Private Async Function ExecuteWorkspaceRead(toolCall As ToolCall, context As ToolExecutionContext) As Task(Of String)
         If Not _chatAgentWorkspace.AllowRead Then Return "Error: Workspace read permission is disabled."
 
         Dim rel = GetArgString(toolCall.Arguments, "path")
         Dim maxChars = Math.Min(Math.Max(GetArgInt(toolCall.Arguments, "max_chars", 12000), 1000), 500000)
 
-        Dim startChar As Integer = GetArgInt(toolCall.Arguments, "start_char", -1)
-        If startChar < 0 Then
-            startChar = GetArgInt(toolCall.Arguments, "offset", 0)
+        Dim startChar As System.Int32 = 0
+        Dim pagingFailure As System.String = System.String.Empty
+        If Not TryResolveWorkspaceReadStart(toolCall.Arguments, startChar, pagingFailure) Then
+            Return "Error: " & pagingFailure
         End If
-        startChar = Math.Max(startChar, 0)
 
         Dim startPage As Integer = GetArgInt(toolCall.Arguments, "start_page", 0)
         Dim endPage As Integer = GetArgInt(toolCall.Arguments, "end_page", 0)
@@ -2337,7 +2693,9 @@ Partial Public Class ThisAddIn
         New JProperty("start_char", safeStart),
         New JProperty("returned_chars", takeChars),
         New JProperty("truncated", truncated),
-        New JProperty("continuation", "If more content is needed, call the same tool again with start_char=next_offset and a suitable max_chars value."))
+        New JProperty("continuation", If(truncated,
+            "Continue reading the same path with start_char=" & nextOffset.ToString(System.Globalization.CultureInfo.InvariantCulture) & "; do not repeat the current offset.",
+            "End of extracted text reached; no further page is available.")))
 
         If stagedAttachment IsNot Nothing Then
             payload("staged") = True
@@ -2715,6 +3073,11 @@ Partial Public Class ThisAddIn
 
         Dim sb As New StringBuilder()
         sb.AppendLine("[SESSION FILES]")
+        Dim stagingRoot As System.String = SharedLibrary.Agents.PathPolicy.SessionStagingRoot
+        If Not System.String.IsNullOrWhiteSpace(stagingRoot) Then
+            sb.AppendLine("Session staging directory: " & Newtonsoft.Json.JsonConvert.SerializeObject(stagingRoot))
+            sb.AppendLine("For a staged file, use its full path under this directory. Workspace-relative paths continue to refer to the connected workspace; do not guess between files with the same name.")
+        End If
         sb.AppendLine("These files currently exist in the active agent session, persist across follow-up chat turns, and may be referenced by session tools or agent_workspace_save_session_file.")
         If Not IsChatAgentWorkspaceConnected() Then
             sb.AppendLine("No persistent agent workspace is connected for this run. If the user asks for a text, Markdown, JSON, or code deliverable, use workspace_write with a relative filename or relative path to create it inside the temporary session workspace. Files created there will be surfaced back to the user as output files after the run.")

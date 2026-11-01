@@ -36,53 +36,65 @@ Namespace SharedLibrary
         ''' The first matching format in the implemented check order is stored.
         ''' </summary>
         Public Shared Sub StoreClipboard()
+            Dim capturedData As System.Object = Nothing
             Dim t As New Threading.Thread(
                 Sub()
                     Try
                         If Clipboard.ContainsText() Then
-                            clipboardData = Clipboard.GetText()
+                            capturedData = Clipboard.GetText()
                         ElseIf Clipboard.ContainsImage() Then
-                            clipboardData = Clipboard.GetImage()
+                            capturedData = Clipboard.GetImage()
                         ElseIf Clipboard.ContainsFileDropList() Then
-                            clipboardData = Clipboard.GetFileDropList()
+                            capturedData = Clipboard.GetFileDropList()
                         ElseIf Clipboard.ContainsData(DataFormats.Serializable) Then
-                            clipboardData = Clipboard.GetData(DataFormats.Serializable)
+                            capturedData = Clipboard.GetData(DataFormats.Serializable)
                         Else
-                            clipboardData = Nothing ' No supported data format found
+                            capturedData = Nothing ' No supported data format found
                         End If
                     Catch
-                        clipboardData = Nothing
+                        capturedData = Nothing
                     End Try
                 End Sub)
             t.SetApartmentState(Threading.ApartmentState.STA)
+            t.IsBackground = True
             t.Start()
-            t.Join()
+            If t.Join(5000) Then
+                clipboardData = capturedData
+            Else
+                ' The late worker may finish its local read, but cannot overwrite shared state.
+                clipboardData = Nothing
+                System.Diagnostics.Trace.TraceWarning("Red Ink clipboard storage timed out; no payload will be restored.")
+            End If
         End Sub
 
         ''' <summary>
         ''' Restores the last value captured by <see cref="StoreClipboard"/> to the clipboard.
         ''' </summary>
         Public Shared Sub RestoreClipboard()
-            If clipboardData Is Nothing Then Return
+            Dim dataToRestore As System.Object = clipboardData
+            If dataToRestore Is Nothing Then Return
 
             Dim t As New Threading.Thread(
                 Sub()
                     Try
-                        If TypeOf clipboardData Is String Then
-                            Clipboard.SetText(CStr(clipboardData))
-                        ElseIf TypeOf clipboardData Is Image Then
-                            Clipboard.SetImage(CType(clipboardData, Image))
-                        ElseIf TypeOf clipboardData Is Specialized.StringCollection Then
-                            Clipboard.SetFileDropList(CType(clipboardData, Specialized.StringCollection))
+                        If TypeOf dataToRestore Is String Then
+                            Clipboard.SetText(CStr(dataToRestore))
+                        ElseIf TypeOf dataToRestore Is Image Then
+                            Clipboard.SetImage(CType(dataToRestore, Image))
+                        ElseIf TypeOf dataToRestore Is Specialized.StringCollection Then
+                            Clipboard.SetFileDropList(CType(dataToRestore, Specialized.StringCollection))
                         Else
-                            Clipboard.SetData(DataFormats.Serializable, clipboardData)
+                            Clipboard.SetData(DataFormats.Serializable, dataToRestore)
                         End If
                     Catch
                     End Try
                 End Sub)
             t.SetApartmentState(Threading.ApartmentState.STA)
+            t.IsBackground = True
             t.Start()
-            t.Join()
+            If Not t.Join(5000) Then
+                System.Diagnostics.Trace.TraceWarning("Red Ink clipboard restoration timed out; the native call was not retried.")
+            End If
         End Sub
 
     End Class

@@ -12,6 +12,11 @@
 '
 '       The grace-period and expiry-warning helpers below are still used by the
 '       current Private license flow (SharedMethods.License.Private.vb).
+'
+' KEY ARCHITECTURE
+'   • Surface: SharedMethods (VB implementation).
+'   • Entry points/helpers: ParseVersionDateFromRDV, ShowLicenseEntryForm,
+'     CheckGracePeriodWarning.
 ' =============================================================================
 
 Option Strict On

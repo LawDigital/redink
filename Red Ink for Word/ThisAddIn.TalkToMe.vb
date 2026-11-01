@@ -3438,9 +3438,9 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
         _alternateGoogleApiKeyConfig = Nothing
 
         Try
-            Dim altPath As String = SharedMethods.ExpandEnvironmentVariables(_owner.INI_AlternateModelPath)
+            Dim altPath As String = _owner.INI_AlternateModelPath
 
-            If String.IsNullOrWhiteSpace(altPath) OrElse Not File.Exists(altPath) Then
+            If String.IsNullOrWhiteSpace(altPath) OrElse Not ConfigurationResourceLoader.CanResolve(altPath) Then
                 Return
             End If
 
@@ -4069,7 +4069,7 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
                         configuredApiLiveEndpoint)
                 End If
 
-                Throw New InvalidOperationException("No usable Google Vertex OAuth2 or Google Gemini API-key configuration is available for Gemini 3.5 Transcribe Live.")
+                Throw New InvalidOperationException("No usable Google Enterprise Agent Platform OAuth2 or Google Gemini API-key configuration is available for Gemini 3.5 Transcribe Live.")
 
             Case EngineKind.OpenAiRealtime
                 Dim key As String = ResolveOpenAiKey()
@@ -4748,7 +4748,7 @@ Partial Public Class ThisAddIn
         End If
 
         _talkToMeWidget.SetReturnFocusAfterStart(effectiveReturnFocusAfterStart)
-        _talkToMeWidget.ShowWidget()
+        _talkToMeWidget.ShowWidget(RegisterHostModelessForm(_talkToMeWidget))
     End Sub
 
     Private Sub RestoreWordFocusAfterTalkToMeStart()

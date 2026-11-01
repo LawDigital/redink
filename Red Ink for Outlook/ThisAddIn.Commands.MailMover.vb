@@ -1035,15 +1035,13 @@ Partial Public Class ThisAddIn
 
             ' Set icon using GetLogoBitmap (same as DragDropForm / other UI)
             Try
-                Dim bmp As New Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                frm.Icon = Drawing.Icon.FromHandle(bmp.GetHicon())
-                bmp.Dispose()
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(frm)
             Catch
             End Try
 
             ' Try to bring Outlook forward
             Try
-                Dim hwnd As IntPtr = FindWindow("rctrl_renwnd32", Nothing)
+                Dim hwnd As System.IntPtr = UpdateHandler.HostHandle
                 If hwnd <> IntPtr.Zero Then
                     NativeMethods.SetForegroundWindow(hwnd)
                 End If

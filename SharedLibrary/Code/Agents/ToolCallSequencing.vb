@@ -34,6 +34,96 @@ Namespace Agents
     Public NotInheritable Class ToolCallSequencing
 
 
+        Public Shared Function TryPrepareToolCallArgumentsForPreflight(
+            toolConfig As SharedLibrary.ModelConfig,
+            arguments As System.Collections.Generic.Dictionary(Of System.String, System.Object),
+            ByRef preparedArguments As System.Collections.Generic.Dictionary(Of System.String, System.Object),
+            ByRef failureMessage As System.String) As System.Boolean
+
+            preparedArguments = arguments
+            failureMessage = System.String.Empty
+
+            If toolConfig Is Nothing OrElse toolConfig.ToolCallArgumentNormalizer Is Nothing Then
+                Return True
+            End If
+
+            Try
+                preparedArguments = toolConfig.ToolCallArgumentNormalizer.Invoke(arguments)
+            Catch ex As System.Exception
+                preparedArguments = arguments
+                failureMessage = "Tool arguments could not be normalized for validation."
+                Return False
+            End Try
+
+            If preparedArguments Is Nothing Then
+                preparedArguments = arguments
+                failureMessage = "Tool argument normalization returned no argument object."
+                Return False
+            End If
+
+            Return True
+        End Function
+
+        ''' <summary>
+        ''' Validates the binding between model-supplied arguments and the external API template.
+        ''' A schema may allow additional properties, but an unbound supplied value must never
+        ''' disappear while the transport silently applies broad default filters instead.
+        ''' Empty-argument calls and omitted optional template fields keep their prior semantics.
+        ''' </summary>
+        Public Shared Function TryPrepareExternalToolApiArguments(
+            apiCallTemplate As System.String,
+            arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+            ByRef boundArguments As System.Collections.Generic.Dictionary(Of System.String, System.Object),
+            ByRef failureMessage As System.String) As System.Boolean
+
+            boundArguments = New System.Collections.Generic.Dictionary(Of System.String, System.Object)(System.StringComparer.OrdinalIgnoreCase)
+            failureMessage = System.String.Empty
+
+            Dim templateNames As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.OrdinalIgnoreCase)
+            Dim matches As System.Text.RegularExpressions.MatchCollection =
+                System.Text.RegularExpressions.Regex.Matches(
+                    If(apiCallTemplate, System.String.Empty),
+                    "\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+
+            For Each match As System.Text.RegularExpressions.Match In matches
+                Dim name As System.String = match.Groups(1).Value
+                Dim existingName As System.String = Nothing
+
+                If templateNames.TryGetValue(name, existingName) Then
+                    If Not System.String.Equals(existingName, name, System.StringComparison.Ordinal) Then
+                        failureMessage = "The tool API template has ambiguous parameter names differing only by letter case."
+                        Return False
+                    End If
+                Else
+                    templateNames.Add(name, name)
+                End If
+            Next
+
+            If arguments Is Nothing Then
+                Return True
+            End If
+
+            For Each argument As System.Collections.Generic.KeyValuePair(Of System.String, System.Object) In arguments
+                Dim placeholderName As System.String = Nothing
+                If Not templateNames.TryGetValue(argument.Key, placeholderName) Then
+                    failureMessage = "Parameter '" & argument.Key &
+                        "' is not used by the configured tool API template. " &
+                        "Call the tool again using the supported parameter names; no API request was sent."
+                    Return False
+                End If
+
+                If boundArguments.ContainsKey(placeholderName) Then
+                    failureMessage = "The same tool API parameter was supplied more than once with different letter casing."
+                    Return False
+                End If
+
+                ' Use the template's exact spelling: String.Replace in the hosts is case-sensitive.
+                boundArguments.Add(placeholderName, argument.Value)
+            Next
+
+            Return True
+        End Function
+
         Public Const TaskStatusReasonMaxChars As Integer = 160
 
         Private Sub New()
@@ -41,6 +131,8 @@ Namespace Agents
 
         Public Const DependentBatchingInstruction As String =
             "When using tools, the host executes multiple tool calls from one response strictly in the order emitted." & vbCrLf &
+            "If several independent calls are already known and none requires inspecting another call's result, prefer emitting them together in the same response instead of spending separate model turns on each call. This is especially appropriate for independent read-only lookups." & vbCrLf &
+            "This reduces model round-trips only; tool execution remains ordered and you must not assume parallel execution. Do not batch mutations merely for speed." & vbCrLf &
             "Only emit multiple tool calls in one response when every later call's arguments are already fully known at emission time." & vbCrLf &
             "If a later step depends on inspecting the result of an earlier tool call, emit only the earlier call and wait for its result before deciding the next call." & vbCrLf &
             "Do not rely on the host to rewrite, infer, defer, queue, or replay omitted tool calls."
@@ -57,9 +149,17 @@ Namespace Agents
         ''' one of those tools is advertised.
         ''' </summary>
         Public Const ContextDrawerInstruction As String =
-            "CONTEXT MANAGEMENT: Large tool results are not kept in full in the conversation. Each is replaced by a short 'result_ref' plus a preview, and the full text stays available." & vbCrLf &
-            "To read more of a stored result, call context_expand with its result_ref (optionally start_char and max_chars) to page through the full content." & vbCrLf &
-            "When you no longer need older results in full, you may call context_compact to move them out of the active context and free space; they remain retrievable via context_expand. Prefer letting the host manage this automatically, and use context_compact only when you know earlier results are no longer needed."
+            "CONTEXT MANAGEMENT: Every reference_stub/preview/evidence_core is INCOMPLETE, not a semantic summary or proof of unread contents. Retrieve all task-required ranges through context_expand before using omitted information. Prefer exposed file-export and file-analysis capabilities for long documents: keep the complete extract in a file, analyze from that file and return findings, provenance and coverage, rather than routing source dumps through the main loop. Whole-document tasks require complete coverage, not just an opening window or a retrieved reference index. When text_analyze_file is exposed, use input_path for a complete text export or input_result_ref for the complete stored result; neither needs source text copied through the parent context. File-byte hashes and stored-result hashes have different scopes. The full original stays available through result_ref/context_expand until the disclosed expiry; unavailable references must be reported, never reconstructed." & vbCrLf &
+            "A compacted result may include an evidence_core. Every scalar value present in evidence_core is copied verbatim from the original result and is authoritative for that value; omitted properties or text are NOT evidence." & vbCrLf &
+            "Never reconstruct, interpolate, relocalize, rename, or otherwise alter exact identifiers, numbers, dates, times, statuses, or other factual values that are present in tool evidence. Copy exact values when the task depends on them." & vbCrLf &
+            "If a fact required for the answer is not visible exactly in the active replay/evidence_core, you MUST call context_expand with result_ref before relying on that fact. Do not fill missing evidence from plausibility or surrounding context." & vbCrLf &
+            "When you no longer need older results in full, you may call context_compact to move them out of active context; they remain retrievable via context_expand. Prefer letting the host manage this automatically."
+
+        Public Const EvidenceFinalizationReviewInstruction As String =
+            "HOST EVIDENCE FINALIZATION REVIEW: One or more source/tool results were compacted during this run. Re-check the draft against the exact values currently visible in tool results/evidence_core. " &
+            "Every factual assertion attributed to tool/source evidence must be supported by the visible evidence, including the association between an entity/item and its values; the mere presence of the same value elsewhere is not sufficient. " &
+            "Do not invent entries, infer omitted facts, merge neighboring records, or alter exact factual values. If any fact needed by the draft is omitted from the visible evidence, call context_expand for the corresponding result_ref now and verify it before finalizing. " &
+            "If the task requires whole-source coverage, first establish complete coverage through full file/reference analysis or all required ranges; a preview or reference wrapper is insufficient. If the visible evidence is sufficient for the requested scope, return a corrected final answer now. Do not discuss this review step with the user."
 
         Public Const UnresolvedToolFailureCode As String = "unresolved_tool_failure"
         Public Const InvalidTextOnlyFinalizationCode As String = "invalid_text_only_finalization"
@@ -140,10 +240,18 @@ Namespace Agents
             End Property
         End Class
 
+        Public NotInheritable Class NonessentialFailureAcknowledgement
+            Public Property FailureSequence As System.Int64
+            Public Property EvidenceSequence As System.Int64
+            Public Property Reason As System.String = System.String.Empty
+        End Class
+
         Public NotInheritable Class ActiveToolingTurnValidationResult
             Public Property TurnKind As ActiveToolingTurnKind
             Public Property InvalidReason As String
             Public Property TaskStatus As TaskStatusParseResult
+            Public Property NonessentialFailureAcknowledgements As System.Collections.Generic.List(Of NonessentialFailureAcknowledgement) =
+                New System.Collections.Generic.List(Of NonessentialFailureAcknowledgement)()
 
             Public ReadOnly Property TaskStatusSummary As String
                 Get
@@ -175,23 +283,69 @@ Namespace Agents
             NoAutomaticRecovery
         End Enum
 
+        Public Enum ToolFailureCategory
+            Validation
+            ArtifactContract
+            DocumentProcessing
+            Transport
+            Model
+            Unknown
+        End Enum
+
         Public NotInheritable Class ToolFailureRecord
             Public Property Sequence As Long
             Public Property ToolName As String = String.Empty
             Public Property ErrorCode As String = String.Empty
             Public Property ErrorMessage As String = String.Empty
+            Public Property ServiceErrorDetails As ToolServiceErrorInfo
+            Public Property Category As ToolFailureCategory = ToolFailureCategory.Unknown
             Public Property SkippedByPolicy As Boolean
             Public Property ReturnedToParent As Boolean
             Public Property Terminal As Boolean
             Public Property ToolErrorHandling As String = String.Empty
             Public Property ToolClassification As ToolCallClassification = ToolCallClassification.Unknown
             Public Property RecoveryScopeKey As String = String.Empty
+            ' Logical operation / concrete step / physical attempt are tracked separately.
+            ' RecoveryScopeKey remains the compatibility-facing opaque scope; LogicalOperationKey
+            ' groups related steps, while StepKey identifies the exact retry unit. Attempt ids are
+            ' host-generated and never supplied by the model.
+            Public Property LogicalOperationKey As String = String.Empty
+            Public Property StepKey As String = String.Empty
+            Public Property FirstAttemptSequence As Long
+            Public Property LastAttemptSequence As Long
+            Public Property AttemptCount As Integer
+            Public Property RecoveryEvidenceStepKey As String = String.Empty
             Public Property RecoveryPolicy As ToolFailureRecoveryPolicy = ToolFailureRecoveryPolicy.SameToolSuccessOnly
+            ' True only for a pre-execution validation failure whose invalid/incomplete input
+            ' could not yet supply a trustworthy recovery scope. A corrected retry may therefore
+            ' bind a real scope, but only when the host-owned repair-correlation signature below
+            ' proves that all non-repairable arguments are unchanged.
+            Public Property AllowRetryScopeRebinding As System.Boolean = False
+            Public Property RejectedBeforeExecution As System.Boolean = False
+            Public Property DeclaredOutputIntent As System.Boolean = False
+            Public Property RetryCorrelationSignature As System.String = System.String.Empty
+            Public Property RetryCorrelationRepairablePaths As System.Collections.Generic.List(Of System.String) =
+                New System.Collections.Generic.List(Of System.String)()
+            ' A scope-less incomplete explicit-artifact preflight may be retried through the
+            ' fully legacy protocol because the rejected attempt produced no side effect. This
+            ' second signature removes only optional artifact-protocol metadata while preserving
+            ' every substantive argument. It is never enabled when an expected-artifact contract
+            ' exists or when expected_artifacts was supplied on the rejected call.
+            Public Property RetryCorrelationLegacyArtifactFallbackSignature As System.String = System.String.Empty
+            ' Explicit logical output identity for deliverable-capable tools, independent of
+            ' operation_id and physical artifact versions. Paths/names never infer replacement.
+            Public Property DeliverableTargetCorrelationSignature As System.String = System.String.Empty
             ' An alternative-path success is not always cleared immediately. When causal identity
             ' cannot be proven by an explicit scope (or the failure was delegated to the parent),
             ' success is recorded as recovery evidence and committed only on an accepted final turn.
             Public Property RecoveryEvidenceObserved As Boolean
             Public Property RecoveryEvidenceToolName As String = String.Empty
+            ' Host-owned bounded whole-path recovery may deliberately cross an opaque
+            ' operation/task scope. Normal alternative recovery remains scope-exact.
+            Public Property CrossScopeAlternativeRecoveryAllowed As Boolean = False
+            ' Optional tool-declared output-type contract for cross-scope fallback recovery.
+            ' Empty preserves generic behavior; e.g. .docx requires a replacement DOCX.
+            Public Property CrossScopeAlternativeRecoveryRequiredArtifactExtension As System.String = System.String.Empty
             ' Substantive progress epoch at which this failure occurred. Consecutive fallback
             ' failures created after the same prior substantive success share an epoch and may
             ' be superseded together by one later successful alternative path.
@@ -285,6 +439,9 @@ Namespace Agents
             Public Property SupersedesArtifactId As String = ""
             Public Property IsExplicitContract As Boolean
             Public Property RegisteredUtc As DateTime
+            Public Property VerifiedContentSha256 As System.String = System.String.Empty
+            Public Property PreservedRevisionPath As System.String = System.String.Empty
+            Public Property VerifiedAfterFailureSequence As System.Int64
             ' Trusted host/tool evidence about what happened to this physical artifact.
             ' "materialized" is added when an existing file is registered. Additional
             ' opaque effects are added only by host-authored tool capabilities after
@@ -299,6 +456,7 @@ Namespace Agents
         ''' inference participates in expected-output matching.
         ''' </summary>
         Public NotInheritable Class ExpectedDeliverableSlot
+            Public Property DeliveryGroupId As System.String = System.String.Empty
             Public Property LogicalDeliverableId As String = ""
             Public Property OutputSlotId As String = ""
             ' Opaque completion effects required in addition to physical existence.
@@ -306,7 +464,32 @@ Namespace Agents
                 New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
         End Class
 
+        Public NotInheritable Class ToolingRunContinuationSnapshot
+            Public Property SchemaVersion As System.Int32 = 1
+            Public Property SequencingStateJson As System.String = System.String.Empty
+            Public Property OperationRecords As System.Collections.Generic.List(Of ExplicitOperationRecord) =
+                New System.Collections.Generic.List(Of ExplicitOperationRecord)()
+            Public Property SubAgentTaskRecords As System.Collections.Generic.List(Of ExplicitSubAgentTaskRecord) =
+                New System.Collections.Generic.List(Of ExplicitSubAgentTaskRecord)()
+            Public Property FailureSequence As System.Int64
+            Public Property AttemptSequence As System.Int64
+            Public Property SubstantiveProgressEpoch As System.Int64
+            Public Property ArtifactRevisionSequence As System.Int64
+            Public Property ToolResultReferences As System.Collections.Generic.List(Of System.String) = New System.Collections.Generic.List(Of System.String)()
+            Public Property OriginalUserRequestRaw As System.String = System.String.Empty
+            Public Property LastUserFacingResponse As System.String = System.String.Empty
+            Public Property ContinuationKey As System.String = System.String.Empty
+            Public Property ResumeCount As System.Int32
+            ' Continuation retention is persisted with the snapshot so every host can
+            ' enforce the same expiry without depending on host configuration during lookup.
+            Public Property RetentionDays As System.Int32 = 7
+            Public Property ExpiresUtc As System.DateTime = System.DateTime.MinValue
+            Public Property CreatedUtc As System.DateTime = System.DateTime.UtcNow
+            Public Property UpdatedUtc As System.DateTime = System.DateTime.UtcNow
+        End Class
+
         Public NotInheritable Class ToolingRunState
+            Public Property FallbackReview As New FallbackReviewState()
             Public Property HasUnresolvedToolFailure As Boolean
             Public Property LastToolName As String
             Public Property LastErrorCode As String
@@ -317,12 +500,24 @@ Namespace Agents
             Public Property LastFailureHandledByBlockedFinal As Boolean
             Public Property LastFailureUltimatelyFatal As Boolean
             Public Property RecoveryToolName As String
+            Public Property LastRecoveredFailureSummary As String = String.Empty
             Public Property LastFailureTerminal As Boolean
             Public Property LastFailureRecoveryPolicy As ToolFailureRecoveryPolicy = ToolFailureRecoveryPolicy.SameToolSuccessOnly
             Public Property LastFailureToolClassification As ToolCallClassification = ToolCallClassification.Unknown
             Public Property LastFailureToolErrorHandling As String = String.Empty
             Public Property UnresolvedToolFailures As New List(Of ToolFailureRecord)()
             Private _failureSequence As Long
+
+            ' Expose the authoritative counter without creating a second mutable state.
+            ' Continuation snapshots persist and restore the backing counter explicitly.
+            <Newtonsoft.Json.JsonIgnoreAttribute()>
+            Public ReadOnly Property FailureSequence As System.Int64
+                Get
+                    Return _failureSequence
+                End Get
+            End Property
+
+            Private _attemptSequence As Long
             Private _substantiveProgressEpoch As Long
             Private _artifactRevisionSequence As Long
 
@@ -332,6 +527,9 @@ Namespace Agents
             Public Property RetryInvariantArgumentsByTool As New System.Collections.Generic.Dictionary(Of String, System.Collections.Generic.Dictionary(Of String, String))(System.StringComparer.Ordinal)
             Public Property RetryInvariantPendingFailureTools As New System.Collections.Generic.HashSet(Of String)(System.StringComparer.Ordinal)
 
+            <Newtonsoft.Json.JsonIgnoreAttribute()>
+            Public Property PendingFooterOnlyDraft As System.String
+            Public Property FooterOnlyRepairAttempted As System.Boolean
             Public Property ActiveToolingSession As Boolean
             Public Property HasOpenToolWorkflow As Boolean
             Public Property LastStateFilePath As String
@@ -383,6 +581,76 @@ Namespace Agents
             ''' </summary>
             Public Property DeliverableCapableToolNames As HashSet(Of String) =
                 New System.Collections.Generic.HashSet(Of String)(System.StringComparer.OrdinalIgnoreCase)
+
+            <Newtonsoft.Json.JsonIgnore>
+            Public Property ReadOnlyIndependentToolNames As System.Collections.Generic.HashSet(Of System.String) =
+                New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+
+            ' Physical successful source-read attempts, not tool-name similarity or prose heuristics.
+            Public Property SuccessfulReadEvidence As System.Collections.Generic.Dictionary(Of System.Int64, System.String) =
+                New System.Collections.Generic.Dictionary(Of System.Int64, System.String)()
+
+            ' Host-generated physical revisions are provenance, not model-supplied identity hints.
+            ' Persist with the host-owned continuation state so a repaired preflight can span turns.
+            Public Property HostAssignedArtifactRevisionIds As System.Collections.Generic.HashSet(Of System.String) =
+                New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
+
+            Public Function CreateContinuationSnapshot(
+                Optional originalUserRequestRaw As System.String = "",
+                Optional lastUserFacingResponse As System.String = "",
+                Optional continuationKey As System.String = "") As ToolingRunContinuationSnapshot
+
+                Dim stateToken As Newtonsoft.Json.Linq.JObject =
+                    Newtonsoft.Json.Linq.JObject.FromObject(Me)
+
+                ' These members are restored through explicit host-owned snapshot channels.
+                ' Current host capabilities are intentionally not persisted across runs.
+                stateToken.Remove("OperationRegistry")
+                stateToken.Remove("SubAgentTaskRegistry")
+                stateToken.Remove("DeliverableCapableToolNames")
+
+                Return New ToolingRunContinuationSnapshot With {
+                    .SequencingStateJson = stateToken.ToString(Newtonsoft.Json.Formatting.None),
+                    .OperationRecords = If(OperationRegistry, New ExplicitOperationRegistry()).ExportRecords(),
+                    .SubAgentTaskRecords = If(SubAgentTaskRegistry, New ExplicitSubAgentTaskRegistry()).ExportRecords(),
+                    .FailureSequence = _failureSequence,
+                    .AttemptSequence = _attemptSequence,
+                    .SubstantiveProgressEpoch = _substantiveProgressEpoch,
+                    .ArtifactRevisionSequence = _artifactRevisionSequence,
+                    .OriginalUserRequestRaw = If(originalUserRequestRaw, ""),
+                    .LastUserFacingResponse = If(lastUserFacingResponse, ""),
+                    .ContinuationKey = If(continuationKey, "").Trim(),
+                    .CreatedUtc = System.DateTime.UtcNow,
+                    .UpdatedUtc = System.DateTime.UtcNow
+                }
+            End Function
+
+            Public Sub ApplyContinuationSnapshot(snapshot As ToolingRunContinuationSnapshot)
+                If snapshot Is Nothing OrElse snapshot.SchemaVersion <> 1 Then
+                    Throw New System.InvalidOperationException("Unsupported or missing tooling continuation snapshot.")
+                End If
+
+                Dim currentCapabilities As System.Collections.Generic.HashSet(Of System.String) = DeliverableCapableToolNames
+
+                If Not System.String.IsNullOrWhiteSpace(snapshot.SequencingStateJson) Then
+                    Newtonsoft.Json.JsonConvert.PopulateObject(snapshot.SequencingStateJson, Me)
+                End If
+
+                If OperationRegistry Is Nothing Then OperationRegistry = New ExplicitOperationRegistry()
+                OperationRegistry.ImportRecords(snapshot.OperationRecords)
+
+                If SubAgentTaskRegistry Is Nothing Then SubAgentTaskRegistry = New ExplicitSubAgentTaskRegistry()
+                SubAgentTaskRegistry.ImportRecords(snapshot.SubAgentTaskRecords)
+
+                _failureSequence = System.Math.Max(_failureSequence, snapshot.FailureSequence)
+                _attemptSequence = System.Math.Max(_attemptSequence, snapshot.AttemptSequence)
+                _substantiveProgressEpoch = System.Math.Max(_substantiveProgressEpoch, snapshot.SubstantiveProgressEpoch)
+                _artifactRevisionSequence = System.Math.Max(_artifactRevisionSequence, snapshot.ArtifactRevisionSequence)
+
+                DeliverableCapableToolNames =
+                    If(currentCapabilities,
+                       New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase))
+            End Sub
 
             ''' <summary>
             ''' True when the given tool name is allowed to produce a deliverable. Fails open
@@ -521,7 +789,8 @@ Namespace Agents
             Public Sub RegisterExpectedDeliverableSlot(
                 logicalDeliverableId As String,
                 outputSlotId As String,
-                Optional requiredEffects As System.Collections.Generic.IEnumerable(Of System.String) = Nothing)
+                Optional requiredEffects As System.Collections.Generic.IEnumerable(Of System.String) = Nothing,
+                Optional deliveryGroupId As System.String = "")
 
                 Dim logicalId As String = If(logicalDeliverableId, "").Trim()
                 Dim slotId As String = If(outputSlotId, "").Trim()
@@ -556,7 +825,8 @@ Namespace Agents
                     New ExpectedDeliverableSlot With {
                         .LogicalDeliverableId = logicalId,
                         .OutputSlotId = slotId,
-                        .RequiredEffects = normalizedEffects
+                        .RequiredEffects = normalizedEffects,
+                        .DeliveryGroupId = If(deliveryGroupId, "").Trim()
                     })
 
                 RequestRequiresCreatedDeliverable = True
@@ -631,11 +901,132 @@ Namespace Agents
                 Return Not String.IsNullOrWhiteSpace(System.Convert.ToString(rawTaskId))
             End Function
 
+            Public Function ValidateExpectedArtifactArguments(
+                arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+                ByRef failureMessage As System.String) As System.Boolean
+
+                failureMessage = System.String.Empty
+                If arguments Is Nothing Then Return True
+
+                Dim raw As System.Object = Nothing
+                If Not arguments.TryGetValue("expected_artifacts", raw) Then Return True
+
+                If raw Is Nothing Then
+                    failureMessage = "expected_artifacts must be an array; use [] for an explicitly empty final-artifact contract."
+                    Return False
+                End If
+
+                Dim token As Newtonsoft.Json.Linq.JToken = Nothing
+                Try
+                    token = Newtonsoft.Json.Linq.JToken.FromObject(raw)
+                Catch ex As System.Exception
+                    failureMessage = "expected_artifacts could not be parsed as an array."
+                    Return False
+                End Try
+
+                If token Is Nothing OrElse token.Type <> Newtonsoft.Json.Linq.JTokenType.Array Then
+                    failureMessage = "expected_artifacts must be an array; use [] for an explicitly empty final-artifact contract."
+                    Return False
+                End If
+
+                For Each item As Newtonsoft.Json.Linq.JToken In DirectCast(token, Newtonsoft.Json.Linq.JArray)
+                    Dim obj As Newtonsoft.Json.Linq.JObject = TryCast(item, Newtonsoft.Json.Linq.JObject)
+                    If obj Is Nothing Then
+                        failureMessage = "Every expected_artifacts item must be an object."
+                        Return False
+                    End If
+
+                    Dim logicalId As System.String = System.String.Empty
+                    If Not TryGetExpectedArtifactIdentityValue(
+                        obj,
+                        "logical_deliverable_id",
+                        logicalId,
+                        failureMessage) Then
+                        Return False
+                    End If
+
+                    Dim slotId As System.String = System.String.Empty
+                    If Not TryGetExpectedArtifactIdentityValue(
+                        obj,
+                        "output_slot_id",
+                        slotId,
+                        failureMessage) Then
+                        Return False
+                    End If
+                Next
+
+                Dim groups As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.Ordinal)
+                For Each item As JToken In DirectCast(token, JArray)
+                    Dim obj As JObject = DirectCast(item, JObject)
+                    Dim groupToken As JToken = obj("delivery_group_id")
+                    If groupToken IsNot Nothing AndAlso (groupToken.Type <> JTokenType.String OrElse System.String.IsNullOrWhiteSpace(groupToken.ToString())) Then
+                        failureMessage = "delivery_group_id must be a non-empty string when supplied."
+                        Return False
+                    End If
+                    Dim identity As System.String = New JArray(obj("logical_deliverable_id"), obj("output_slot_id")).ToString(Formatting.None)
+                    Dim groupId As System.String = If(obj.Value(Of System.String)("delivery_group_id"), "").Trim()
+                    Dim priorGroup As System.String = Nothing
+                    If groups.TryGetValue(identity, priorGroup) AndAlso Not System.String.Equals(priorGroup, groupId, System.StringComparison.Ordinal) Then
+                        failureMessage = "Duplicate expected slot declares conflicting delivery groups."
+                        Return False
+                    End If
+                    groups(identity) = groupId
+                Next
+                Return True
+            End Function
+
+            Private Shared Function TryGetExpectedArtifactIdentityValue(
+                obj As Newtonsoft.Json.Linq.JObject,
+                fieldName As System.String,
+                ByRef value As System.String,
+                ByRef failureMessage As System.String) As System.Boolean
+
+                value = System.String.Empty
+
+                If obj Is Nothing OrElse System.String.IsNullOrWhiteSpace(fieldName) Then
+                    failureMessage = "expected_artifacts contains an invalid identity field."
+                    Return False
+                End If
+
+                Dim fieldToken As Newtonsoft.Json.Linq.JToken = obj(fieldName)
+                If fieldToken Is Nothing OrElse
+                   fieldToken.Type = Newtonsoft.Json.Linq.JTokenType.Null OrElse
+                   fieldToken.Type = Newtonsoft.Json.Linq.JTokenType.Undefined Then
+                    failureMessage =
+                        "expected_artifacts item field '" & fieldName & "' must be a non-empty scalar value."
+                    Return False
+                End If
+
+                If Not TypeOf fieldToken Is Newtonsoft.Json.Linq.JValue Then
+                    failureMessage =
+                        "expected_artifacts item field '" & fieldName & "' must be a scalar value, not an object or array."
+                    Return False
+                End If
+
+                Try
+                    value = If(fieldToken.Value(Of System.String)(), System.String.Empty).Trim()
+                Catch ex As System.Exception
+                    failureMessage =
+                        "expected_artifacts item field '" & fieldName & "' could not be converted to a scalar string value."
+                    Return False
+                End Try
+
+                If value = System.String.Empty Then
+                    failureMessage =
+                        "expected_artifacts item field '" & fieldName & "' must be a non-empty scalar value."
+                    Return False
+                End If
+
+                Return True
+            End Function
+
             Public Sub RegisterExpectedDeliverablesFromArguments(
                 arguments As IDictionary(Of String, Object))
 
                 If ExpectedDeliverableContractLocked Then Return
                 If arguments Is Nothing Then Return
+                Dim contractFailure As System.String = System.String.Empty
+                If Not ValidateExpectedArtifactArguments(arguments, contractFailure) Then Return
 
                 Dim raw As Object = Nothing
                 If Not arguments.TryGetValue("expected_artifacts", raw) OrElse
@@ -688,7 +1079,8 @@ Namespace Agents
                             New ExpectedDeliverableSlot With {
                                 .LogicalDeliverableId = logicalId,
                                 .OutputSlotId = slotId,
-                                .RequiredEffects = ParseRequiredEffects(obj("required_effects"))
+                                .RequiredEffects = ParseRequiredEffects(obj("required_effects")),
+                                .DeliveryGroupId = If(obj.Value(Of System.String)("delivery_group_id"), "").Trim()
                             })
                     End If
                 Next
@@ -699,13 +1091,25 @@ Namespace Agents
                     RegisterExpectedDeliverableSlot(
                         pending.LogicalDeliverableId,
                         pending.OutputSlotId,
-                        pending.RequiredEffects)
+                        pending.RequiredEffects,
+                        pending.DeliveryGroupId)
                 Next
             End Sub
 
             Public Function ValidateLockedExpectedArtifactArguments(
                 arguments As IDictionary(Of String, Object),
                 ByRef failureReason As String) As Boolean
+
+                Return ValidateLockedExpectedArtifactArguments(
+                    arguments,
+                    failureReason,
+                    "")
+            End Function
+
+            Public Function ValidateLockedExpectedArtifactArguments(
+                arguments As IDictionary(Of String, Object),
+                ByRef failureReason As String,
+                toolName As System.String) As Boolean
 
                 failureReason = ""
 
@@ -734,11 +1138,27 @@ Namespace Agents
                     hasSlotId OrElse
                     hasSupersedesArtifactId
 
+                Dim hasExpectedArtifacts As System.Boolean =
+                    arguments.ContainsKey("expected_artifacts")
+
                 ' expected_artifacts on agent_* is the CHILD delegation contract and is
-                ' intentionally independent from this run's locked contract. Only calls
-                ' that carry direct artifact identity for an output produced in THIS run
-                ' are validated against the current lock here.
-                If Not hasDirectArtifactIdentity Then Return True
+                ' intentionally independent from this run's locked contract. For a
+                ' deliverable-producing call in THIS run, however, a locked multi-slot
+                ' contract must never permit an ambiguous physical side effect. If the
+                ' call clearly declares a final/deliverable output but no opaque slot
+                ' pair is supplied while multiple slots remain unresolved, reject it
+                ' before tool execution rather than inferring from file names or types.
+                If Not hasDirectArtifactIdentity Then
+                    If RequiresExplicitLockedProducerSlotSelection(toolName, arguments) Then
+                        failureReason = "locked_expected_artifact_slot_required"
+                        Return False
+                    End If
+
+                    If Not hasExpectedArtifacts OrElse
+                       IsExplicitSubAgentDelegationCall(toolName, arguments) Then
+                        Return True
+                    End If
+                End If
 
                 If hasLogicalId OrElse hasSlotId OrElse hasArtifactId OrElse hasSupersedesArtifactId Then
                     Dim logicalId As String =
@@ -792,13 +1212,25 @@ Namespace Agents
                         Return False
                     End If
 
-                    Dim logicalId As String =
-                        If(obj.Value(Of String)("logical_deliverable_id"), "").Trim()
+                    Dim identityFailure As System.String = System.String.Empty
+                    Dim logicalId As System.String = System.String.Empty
+                    If Not TryGetExpectedArtifactIdentityValue(
+                        obj,
+                        "logical_deliverable_id",
+                        logicalId,
+                        identityFailure) Then
 
-                    Dim slotId As String =
-                        If(obj.Value(Of String)("output_slot_id"), "").Trim()
+                        failureReason = "locked_expected_artifact_contract_invalid"
+                        Return False
+                    End If
 
-                    If logicalId = "" OrElse slotId = "" Then
+                    Dim slotId As System.String = System.String.Empty
+                    If Not TryGetExpectedArtifactIdentityValue(
+                        obj,
+                        "output_slot_id",
+                        slotId,
+                        identityFailure) Then
+
                         failureReason = "locked_expected_artifact_contract_invalid"
                         Return False
                     End If
@@ -822,7 +1254,8 @@ Namespace Agents
                             New ExpectedDeliverableSlot With {
                                 .LogicalDeliverableId = logicalId,
                                 .OutputSlotId = slotId,
-                                .RequiredEffects = ParseRequiredEffects(obj("required_effects"))
+                                .RequiredEffects = ParseRequiredEffects(obj("required_effects")),
+                                .DeliveryGroupId = If(obj.Value(Of System.String)("delivery_group_id"), "").Trim()
                             })
                     End If
                 Next
@@ -852,7 +1285,8 @@ Namespace Agents
                                        String.Equals(
                                            If(supplied.OutputSlotId, ""),
                                            If(expected.OutputSlotId, ""),
-                                           StringComparison.Ordinal)
+                                           StringComparison.Ordinal) AndAlso
+                                       System.String.Equals(supplied.DeliveryGroupId, expected.DeliveryGroupId, System.StringComparison.Ordinal)
                             End Function)
 
                     If Not found Then
@@ -864,21 +1298,103 @@ Namespace Agents
                 Return True
             End Function
 
-            ''' <summary>
-            ''' Completes optional artifact metadata for an output-producing tool when this run
-            ''' has exactly one locked expected deliverable slot. The logical slot remains caller/skill
-            ''' authority; physical revision ids are host-owned and deterministic. Explicit conflicting
-            ''' logical/slot values are never overwritten and will be rejected by the normal validators.
-            ''' </summary>
-            Public Function ShouldNormalizeSingleLockedProducerArtifactArguments(
+            Private Function RequiresExplicitLockedProducerSlotSelection(
                 toolName As System.String,
                 arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object)) As System.Boolean
 
                 If arguments Is Nothing OrElse Not ExpectedDeliverableContractLocked Then Return False
-                If ExpectedDeliverableSlots Is Nothing OrElse ExpectedDeliverableSlots.Count <> 1 Then Return False
+                If ExpectedDeliverableSlots Is Nothing OrElse ExpectedDeliverableSlots.Count <= 1 Then Return False
+                If Not IsDeliverableCapableTool(toolName) Then Return False
 
-                ' Explicit artifact identity is an opt-in boundary: complete any missing host-owned
-                ' physical revision metadata, but never reinterpret an explicit logical contradiction.
+                Dim unresolvedCount As System.Int32 = 0
+                For Each expected As ExpectedDeliverableSlot In ExpectedDeliverableSlots
+                    If expected Is Nothing Then Continue For
+                    If Not IsExpectedDeliverableSlotSatisfied(expected.LogicalDeliverableId, expected.OutputSlotId) Then
+                        unresolvedCount += 1
+                        If unresolvedCount > 1 Then Exit For
+                    End If
+                Next
+                If unresolvedCount <= 1 Then Return False
+
+                Dim stateText As System.String = GetArgumentText(arguments, "artifact_state")
+                Dim intentText As System.String = GetArgumentText(arguments, "artifact_delivery_intent")
+                If System.String.Equals(stateText, "final", System.StringComparison.OrdinalIgnoreCase) OrElse
+                   System.String.Equals(intentText, "deliver_to_user", System.StringComparison.OrdinalIgnoreCase) OrElse
+                   System.String.Equals(intentText, "deliver_and_persist", System.StringComparison.OrdinalIgnoreCase) Then
+                    Return True
+                End If
+
+                If GetArgumentText(arguments, "output_filename") <> System.String.Empty Then Return True
+
+                Dim normalizedToolName As System.String = If(toolName, System.String.Empty).Trim()
+                If System.String.Equals(normalizedToolName, "python_execute", System.StringComparison.OrdinalIgnoreCase) Then
+                    Dim code As System.String = GetArgumentText(arguments, "code")
+                    If code.IndexOf("agent_api.output_path", System.StringComparison.OrdinalIgnoreCase) >= 0 Then Return True
+                End If
+
+                Return False
+            End Function
+
+            Private Function ResolveLockedProducerArtifactSlot(
+                arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object)) As ExpectedDeliverableSlot
+
+                If arguments Is Nothing OrElse Not ExpectedDeliverableContractLocked Then Return Nothing
+                If ExpectedDeliverableSlots Is Nothing OrElse ExpectedDeliverableSlots.Count = 0 Then Return Nothing
+
+                Dim suppliedLogicalId As System.String = GetArgumentText(arguments, "logical_deliverable_id")
+                Dim suppliedSlotId As System.String = GetArgumentText(arguments, "output_slot_id")
+
+                If suppliedLogicalId <> System.String.Empty OrElse suppliedSlotId <> System.String.Empty Then
+                    If suppliedLogicalId = System.String.Empty OrElse suppliedSlotId = System.String.Empty Then Return Nothing
+                    Return GetExpectedDeliverableSlot(suppliedLogicalId, suppliedSlotId)
+                End If
+
+                Dim unresolved As New System.Collections.Generic.List(Of ExpectedDeliverableSlot)()
+                For Each expected As ExpectedDeliverableSlot In ExpectedDeliverableSlots
+                    If expected Is Nothing Then Continue For
+                    If Not IsExpectedDeliverableSlotSatisfied(expected.LogicalDeliverableId, expected.OutputSlotId) Then
+                        unresolved.Add(expected)
+                    End If
+                Next
+
+                If unresolved.Count = 1 Then Return unresolved(0)
+                Return Nothing
+            End Function
+
+            Private Function BuildLockedExpectedArtifactArguments() As System.Collections.Generic.List(Of System.Object)
+                Dim result As New System.Collections.Generic.List(Of System.Object)()
+                If ExpectedDeliverableSlots Is Nothing Then Return result
+
+                For Each expected As ExpectedDeliverableSlot In ExpectedDeliverableSlots
+                    If expected Is Nothing Then Continue For
+                    result.Add(
+                        New System.Collections.Generic.Dictionary(Of System.String, System.Object)(System.StringComparer.Ordinal) From {
+                            {"logical_deliverable_id", If(expected.LogicalDeliverableId, System.String.Empty)},
+                            {"output_slot_id", If(expected.OutputSlotId, System.String.Empty)},
+                            {"delivery_group_id", If(expected.DeliveryGroupId, System.String.Empty)},
+                            {"required_effects", If(expected.RequiredEffects Is Nothing,
+                                New System.Collections.Generic.List(Of System.String)(),
+                                New System.Collections.Generic.List(Of System.String)(expected.RequiredEffects))}
+                        })
+                Next
+
+                Return result
+            End Function
+
+            ''' <summary>
+            ''' Completes host-owned artifact metadata for an output-producing call whenever
+            ''' its locked expected slot can be identified without heuristic inference. For
+            ''' multiple-slot contracts the caller must name the exact host-issued logical/slot
+            ''' pair while more than one slot remains open. Once exactly one unresolved slot
+            ''' remains, the host may bind that slot automatically.
+            ''' </summary>
+            Public Function ShouldNormalizeLockedProducerArtifactArguments(
+                toolName As System.String,
+                arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object)) As System.Boolean
+
+                Dim expected As ExpectedDeliverableSlot = ResolveLockedProducerArtifactSlot(arguments)
+                If expected Is Nothing Then Return False
+
                 If ArtifactDelivery.HasExplicitArtifactIdentityArguments(arguments) Then Return True
 
                 Dim stateText As System.String = GetArgumentText(arguments, "artifact_state")
@@ -889,28 +1405,16 @@ Namespace Agents
                     Return True
                 End If
 
-                ' A producer that explicitly names a new output file is a genuine output-producing
-                ' invocation. Staging/copy tools use different argument names and are intentionally
-                ' not promoted merely because they are deliverable-capable.
                 If GetArgumentText(arguments, "output_filename") <> System.String.Empty Then Return True
 
                 Dim normalizedToolName As System.String = If(toolName, System.String.Empty).Trim()
-
-                ' python_execute is dual-use. Only bind the final artifact contract implicitly when
-                ' the script actually requests an output file. Pure inspection/calculation scripts
-                ' that only publish JSON/text must remain result-only calls.
                 If System.String.Equals(normalizedToolName, "python_execute", System.StringComparison.OrdinalIgnoreCase) Then
                     Dim code As System.String = GetArgumentText(arguments, "code")
-                    If code.IndexOf("agent_api.output_path", System.StringComparison.OrdinalIgnoreCase) >= 0 Then Return True
-                    Return False
+                    Return code.IndexOf("agent_api.output_path", System.StringComparison.OrdinalIgnoreCase) >= 0
                 End If
 
-                ' Revisions of an already-current Excel deliverable are commonly edited in place.
-                ' Bind that mutation only when the call targets the basename of the current Final
-                ' and carries actual updates. A read/staging call cannot satisfy this branch.
                 If System.String.Equals(normalizedToolName, "excel_complete_live_workbook", System.StringComparison.OrdinalIgnoreCase) AndAlso
                    arguments.ContainsKey("updates") AndAlso arguments("updates") IsNot Nothing Then
-
                     Dim attachmentName As System.String = GetArgumentText(arguments, "attachment_name")
                     If attachmentName <> System.String.Empty AndAlso RegisteredDeliverableArtifacts IsNot Nothing Then
                         For i As System.Int32 = RegisteredDeliverableArtifacts.Count - 1 To 0 Step -1
@@ -926,47 +1430,95 @@ Namespace Agents
                 Return False
             End Function
 
-            Public Sub NormalizeSingleLockedProducerArtifactArguments(
-                arguments As IDictionary(Of String, Object),
-                toolCallId As String)
+            ' Bind an explicitly declared final output only when its identity is unambiguous.
+            ' expected_artifacts alone can describe a later output and must not turn a read into a write.
+            Public Function NormalizeDeclaredProducerArtifactArguments(
+                toolName As System.String,
+                arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+                toolCallId As System.String) As System.Boolean
 
-                If arguments Is Nothing OrElse Not ExpectedDeliverableContractLocked Then Return
-                If ExpectedDeliverableSlots Is Nothing OrElse ExpectedDeliverableSlots.Count <> 1 Then Return
+                If arguments Is Nothing OrElse ExpectedDeliverableContractLocked OrElse
+                   DeliverableCapableToolNames Is Nothing OrElse Not DeliverableCapableToolNames.Contains(toolName) OrElse
+                   ArtifactDelivery.HasExplicitArtifactIdentityArguments(arguments) Then Return False
 
-                Dim expected As ExpectedDeliverableSlot = ExpectedDeliverableSlots(0)
+                Dim state As System.String = GetArgumentText(arguments, "artifact_state")
+                Dim intent As System.String = GetArgumentText(arguments, "artifact_delivery_intent")
+                If Not System.String.Equals(state, "final", System.StringComparison.OrdinalIgnoreCase) AndAlso
+                   Not System.String.Equals(intent, "deliver_to_user", System.StringComparison.OrdinalIgnoreCase) AndAlso
+                   Not System.String.Equals(intent, "deliver_and_persist", System.StringComparison.OrdinalIgnoreCase) Then Return False
+
+                Dim raw As System.Object = Nothing
+                If Not arguments.TryGetValue("expected_artifacts", raw) OrElse raw Is Nothing Then Return False
+                Dim items As Newtonsoft.Json.Linq.JArray = Nothing
+                Try
+                    items = TryCast(Newtonsoft.Json.Linq.JToken.FromObject(raw), Newtonsoft.Json.Linq.JArray)
+                Catch ex As System.Exception
+                    Return False ' The existing validator returns the precise input error.
+                End Try
+                If items Is Nothing OrElse items.Count <> 1 Then Return False
+                Dim item As Newtonsoft.Json.Linq.JObject = TryCast(items(0), Newtonsoft.Json.Linq.JObject)
+                If item Is Nothing Then Return False
+                Dim logicalToken As Newtonsoft.Json.Linq.JToken = item("logical_deliverable_id")
+                Dim slotToken As Newtonsoft.Json.Linq.JToken = item("output_slot_id")
+                If logicalToken Is Nothing OrElse slotToken Is Nothing OrElse
+                   logicalToken.Type <> Newtonsoft.Json.Linq.JTokenType.String OrElse
+                   slotToken.Type <> Newtonsoft.Json.Linq.JTokenType.String Then Return False
+                Dim logicalId As System.String = item.Value(Of System.String)("logical_deliverable_id").Trim()
+                Dim slotId As System.String = item.Value(Of System.String)("output_slot_id").Trim()
+                If logicalId = System.String.Empty OrElse slotId = System.String.Empty Then Return False
+
+                arguments("logical_deliverable_id") = logicalId
+                arguments("output_slot_id") = slotId
+                arguments("artifact_id") = BuildHostArtifactRevisionId(toolCallId, logicalId, slotId)
+                If RegisteredDeliverableArtifacts IsNot Nothing Then
+                    For index As System.Int32 = RegisteredDeliverableArtifacts.Count - 1 To 0 Step -1
+                        Dim prior As DeliverableArtifact = RegisteredDeliverableArtifacts(index)
+                        If prior Is Nothing OrElse prior.LifecycleState = ArtifactLifecycleState.Superseded Then Continue For
+                        If Not System.String.Equals(prior.LogicalDeliverableId, logicalId, System.StringComparison.Ordinal) OrElse
+                           Not System.String.Equals(prior.OutputSlotId, slotId, System.StringComparison.Ordinal) Then Continue For
+                        If Not System.String.IsNullOrWhiteSpace(prior.ArtifactId) Then arguments("supersedes_artifact_id") = prior.ArtifactId
+                        Exit For
+                    Next
+                End If
+                If state = System.String.Empty Then arguments("artifact_state") = "final"
+                If intent = System.String.Empty Then arguments("artifact_delivery_intent") = "deliver_to_user"
+                ' Keep the original expected_artifacts, including all effect requirements, intact.
+                Return True
+            End Function
+
+            Public Sub NormalizeLockedProducerArtifactArguments(
+                arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+                toolCallId As System.String)
+
+                Dim expected As ExpectedDeliverableSlot = ResolveLockedProducerArtifactSlot(arguments)
                 If expected Is Nothing Then Return
 
-                Dim expectedLogicalId As String = If(expected.LogicalDeliverableId, "").Trim()
-                Dim expectedSlotId As String = If(expected.OutputSlotId, "").Trim()
-                If expectedLogicalId = "" OrElse expectedSlotId = "" Then Return
+                Dim expectedLogicalId As System.String = If(expected.LogicalDeliverableId, System.String.Empty).Trim()
+                Dim expectedSlotId As System.String = If(expected.OutputSlotId, System.String.Empty).Trim()
+                If expectedLogicalId = System.String.Empty OrElse expectedSlotId = System.String.Empty Then Return
 
-                Dim suppliedLogicalId As String = GetArgumentText(arguments, "logical_deliverable_id")
-                Dim suppliedSlotId As String = GetArgumentText(arguments, "output_slot_id")
+                Dim suppliedLogicalId As System.String = GetArgumentText(arguments, "logical_deliverable_id")
+                Dim suppliedSlotId As System.String = GetArgumentText(arguments, "output_slot_id")
 
-                ' Never repair an explicit contradiction. The locked-contract validator must surface it.
-                If suppliedLogicalId <> "" AndAlso
+                If suppliedLogicalId <> System.String.Empty AndAlso
                    Not System.String.Equals(suppliedLogicalId, expectedLogicalId, System.StringComparison.Ordinal) Then Return
-                If suppliedSlotId <> "" AndAlso
+                If suppliedSlotId <> System.String.Empty AndAlso
                    Not System.String.Equals(suppliedSlotId, expectedSlotId, System.StringComparison.Ordinal) Then Return
 
-                If suppliedLogicalId = "" Then arguments("logical_deliverable_id") = expectedLogicalId
-                If suppliedSlotId = "" Then arguments("output_slot_id") = expectedSlotId
+                If suppliedLogicalId = System.String.Empty Then arguments("logical_deliverable_id") = expectedLogicalId
+                If suppliedSlotId = System.String.Empty Then arguments("output_slot_id") = expectedSlotId
 
-                ' Physical revision identity is host-owned for a single locked logical slot.
-                ' Never depend on a model-generated artifact_id/supersedes pair: every producer
-                ' invocation gets a fresh run-local revision id and the host links it to the
-                ' current prior revision of the same slot when one exists.
-                Dim artifactId As String = BuildHostArtifactRevisionId(toolCallId, expectedLogicalId, expectedSlotId)
+                Dim artifactId As System.String = BuildHostArtifactRevisionId(toolCallId, expectedLogicalId, expectedSlotId)
                 arguments("artifact_id") = artifactId
                 arguments.Remove("supersedes_artifact_id")
 
                 If RegisteredDeliverableArtifacts IsNot Nothing Then
-                    For i As Integer = RegisteredDeliverableArtifacts.Count - 1 To 0 Step -1
+                    For i As System.Int32 = RegisteredDeliverableArtifacts.Count - 1 To 0 Step -1
                         Dim prior As DeliverableArtifact = RegisteredDeliverableArtifacts(i)
                         If prior Is Nothing Then Continue For
                         If prior.LifecycleState = ArtifactLifecycleState.Superseded Then Continue For
-                        If Not System.String.Equals(If(prior.LogicalDeliverableId, "").Trim(), expectedLogicalId, System.StringComparison.Ordinal) Then Continue For
-                        If Not System.String.Equals(If(prior.OutputSlotId, "").Trim(), expectedSlotId, System.StringComparison.Ordinal) Then Continue For
+                        If Not System.String.Equals(If(prior.LogicalDeliverableId, System.String.Empty).Trim(), expectedLogicalId, System.StringComparison.Ordinal) Then Continue For
+                        If Not System.String.Equals(If(prior.OutputSlotId, System.String.Empty).Trim(), expectedSlotId, System.StringComparison.Ordinal) Then Continue For
                         If Not System.String.IsNullOrWhiteSpace(prior.ArtifactId) Then
                             arguments("supersedes_artifact_id") = prior.ArtifactId.Trim()
                         End If
@@ -974,20 +1526,16 @@ Namespace Agents
                     Next
                 End If
 
-                If GetArgumentText(arguments, "artifact_state") = "" Then
+                If GetArgumentText(arguments, "artifact_state") = System.String.Empty Then
                     arguments("artifact_state") = "final"
                 End If
-                If GetArgumentText(arguments, "artifact_delivery_intent") = "" Then
+                If GetArgumentText(arguments, "artifact_delivery_intent") = System.String.Empty Then
                     arguments("artifact_delivery_intent") = "deliver_to_user"
                 End If
 
-                Dim expectedRaw As Object = Nothing
+                Dim expectedRaw As System.Object = Nothing
                 If Not arguments.TryGetValue("expected_artifacts", expectedRaw) OrElse expectedRaw Is Nothing Then
-                    Dim expectedItem As New System.Collections.Generic.Dictionary(Of String, Object)(System.StringComparer.Ordinal) From {
-                        {"logical_deliverable_id", expectedLogicalId},
-                        {"output_slot_id", expectedSlotId}
-                    }
-                    arguments("expected_artifacts") = New System.Collections.Generic.List(Of Object) From {expectedItem}
+                    arguments("expected_artifacts") = BuildLockedExpectedArtifactArguments()
                 End If
             End Sub
 
@@ -1013,48 +1561,58 @@ Namespace Agents
                     For i As Integer = 0 To System.Math.Min(11, hash.Length - 1)
                         builder.Append(hash(i).ToString("x2", System.Globalization.CultureInfo.InvariantCulture))
                     Next
-                    Return "host_art_" & builder.ToString()
+                    Dim revisionId As System.String = "host_art_" & builder.ToString()
+                    If HostAssignedArtifactRevisionIds Is Nothing Then
+                        HostAssignedArtifactRevisionIds = New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
+                    End If
+                    HostAssignedArtifactRevisionIds.Add(revisionId)
+                    Return revisionId
                 End Using
             End Function
 
             Public Function ValidateExplicitArtifactIdentityArguments(
                 arguments As IDictionary(Of String, Object),
-                ByRef failureReason As String) As Boolean
+                ByRef failureReason As String,
+                ByRef failureMessage As String) As Boolean
 
-                failureReason = ""
+                failureReason = System.String.Empty
+                failureMessage = System.String.Empty
                 If arguments Is Nothing Then Return True
 
-                Dim hasArtifactId As Boolean =
-                    arguments.ContainsKey("artifact_id") AndAlso arguments("artifact_id") IsNot Nothing
-                Dim hasLogicalId As Boolean =
-                    arguments.ContainsKey("logical_deliverable_id") AndAlso arguments("logical_deliverable_id") IsNot Nothing
-                Dim hasSlotId As Boolean =
-                    arguments.ContainsKey("output_slot_id") AndAlso arguments("output_slot_id") IsNot Nothing
-                Dim hasSupersedesArtifactId As Boolean =
-                    arguments.ContainsKey("supersedes_artifact_id") AndAlso arguments("supersedes_artifact_id") IsNot Nothing
+                Dim artifactId As System.String = GetArgumentText(arguments, "artifact_id")
+                Dim logicalId As System.String = GetArgumentText(arguments, "logical_deliverable_id")
+                Dim slotId As System.String = GetArgumentText(arguments, "output_slot_id")
+                Dim supersedesId As System.String = GetArgumentText(arguments, "supersedes_artifact_id")
 
-                Dim hasAnyExplicitArtifactIdentity As Boolean =
-                    hasArtifactId OrElse hasLogicalId OrElse hasSlotId OrElse hasSupersedesArtifactId
+                Dim hasAnyExplicitArtifactIdentity As System.Boolean =
+                    artifactId <> System.String.Empty OrElse
+                    logicalId <> System.String.Empty OrElse
+                    slotId <> System.String.Empty OrElse
+                    supersedesId <> System.String.Empty
 
                 If Not hasAnyExplicitArtifactIdentity Then Return True
 
-                Dim artifactId As String =
-                    If(If(hasArtifactId, System.Convert.ToString(arguments("artifact_id")), ""), "").Trim()
-                Dim logicalId As String =
-                    If(If(hasLogicalId, System.Convert.ToString(arguments("logical_deliverable_id")), ""), "").Trim()
-                Dim slotId As String =
-                    If(If(hasSlotId, System.Convert.ToString(arguments("output_slot_id")), ""), "").Trim()
-                Dim supersedesId As String =
-                    If(If(hasSupersedesArtifactId, System.Convert.ToString(arguments("supersedes_artifact_id")), ""), "").Trim()
+                If artifactId = System.String.Empty OrElse
+                   logicalId = System.String.Empty OrElse
+                   slotId = System.String.Empty Then
 
-                If artifactId = "" OrElse logicalId = "" OrElse slotId = "" Then
+                    Dim missingFields As New System.Collections.Generic.List(Of System.String)()
+                    If artifactId = System.String.Empty Then missingFields.Add("artifact_id")
+                    If logicalId = System.String.Empty Then missingFields.Add("logical_deliverable_id")
+                    If slotId = System.String.Empty Then missingFields.Add("output_slot_id")
+
                     failureReason = "explicit_artifact_identity_incomplete"
+                    failureMessage =
+                        "Explicit artifact identity is incomplete. Missing non-empty field(s): " &
+                        System.String.Join(", ", missingFields) &
+                        ". artifact_id, logical_deliverable_id, and output_slot_id are required together when any explicit artifact identity value is supplied."
                     Return False
                 End If
 
-                If supersedesId <> "" AndAlso
+                If supersedesId <> System.String.Empty AndAlso
                    System.String.Equals(artifactId, supersedesId, System.StringComparison.Ordinal) Then
                     failureReason = "explicit_artifact_self_supersession"
+                    failureMessage = "supersedes_artifact_id must not equal artifact_id."
                     Return False
                 End If
 
@@ -1065,58 +1623,63 @@ Namespace Agents
                         Function(existing)
                             Return existing IsNot Nothing AndAlso
                                    System.String.Equals(
-                                       If(existing.ArtifactId, ""),
+                                       If(existing.ArtifactId, System.String.Empty),
                                        artifactId,
                                        System.StringComparison.Ordinal)
                         End Function)
 
                 If existingArtifact IsNot Nothing Then
                     If Not System.String.Equals(
-                        If(existingArtifact.LogicalDeliverableId, "").Trim(),
+                        If(existingArtifact.LogicalDeliverableId, System.String.Empty).Trim(),
                         logicalId,
                         System.StringComparison.Ordinal) OrElse
                        Not System.String.Equals(
-                        If(existingArtifact.OutputSlotId, "").Trim(),
+                        If(existingArtifact.OutputSlotId, System.String.Empty).Trim(),
                         slotId,
                         System.StringComparison.Ordinal) OrElse
                        Not System.String.Equals(
-                        If(existingArtifact.SupersedesArtifactId, "").Trim(),
+                        If(existingArtifact.SupersedesArtifactId, System.String.Empty).Trim(),
                         supersedesId,
                         System.StringComparison.Ordinal) Then
 
                         failureReason = "explicit_artifact_id_conflict"
+                        failureMessage =
+                            "artifact_id is already registered with different logical_deliverable_id, output_slot_id, or supersedes_artifact_id values."
                         Return False
                     End If
 
                     If existingArtifact.LifecycleState = ArtifactLifecycleState.Final OrElse
                        existingArtifact.LifecycleState = ArtifactLifecycleState.Superseded Then
                         failureReason = "explicit_artifact_id_terminal"
+                        failureMessage = "artifact_id already identifies a Final or Superseded artifact and cannot be executed again."
                         Return False
                     End If
                 End If
 
-                If supersedesId <> "" Then
+                If supersedesId <> System.String.Empty Then
                     Dim supersededArtifact As DeliverableArtifact =
                         RegisteredDeliverableArtifacts.FirstOrDefault(
                             Function(existing)
                                 Return existing IsNot Nothing AndAlso
                                        System.String.Equals(
-                                           If(existing.ArtifactId, ""),
+                                           If(existing.ArtifactId, System.String.Empty),
                                            supersedesId,
                                            System.StringComparison.Ordinal)
                             End Function)
 
                     If supersededArtifact Is Nothing OrElse
                        Not System.String.Equals(
-                           If(supersededArtifact.LogicalDeliverableId, "").Trim(),
+                           If(supersededArtifact.LogicalDeliverableId, System.String.Empty).Trim(),
                            logicalId,
                            System.StringComparison.Ordinal) OrElse
                        Not System.String.Equals(
-                           If(supersededArtifact.OutputSlotId, "").Trim(),
+                           If(supersededArtifact.OutputSlotId, System.String.Empty).Trim(),
                            slotId,
                            System.StringComparison.Ordinal) Then
 
                         failureReason = "explicit_artifact_supersession_slot_mismatch"
+                        failureMessage =
+                            "supersedes_artifact_id must identify an existing artifact in the same logical_deliverable_id and output_slot_id."
                         Return False
                     End If
                 End If
@@ -1144,7 +1707,9 @@ Namespace Agents
                     Dim logicalId As String = If(obj.Value(Of String)("logical_deliverable_id"), "").Trim()
                     Dim slotId As String = If(obj.Value(Of String)("output_slot_id"), "").Trim()
                     If logicalId = "" OrElse slotId = "" Then Throw New ArgumentException("Each expected_artifacts item requires logical_deliverable_id and output_slot_id.")
-                    RegisterExpectedDeliverableSlot(logicalId, slotId)
+                    RegisterExpectedDeliverableSlot(logicalId, slotId,
+                        ParseRequiredEffects(obj("required_effects")),
+                        If(obj.Value(Of System.String)("delivery_group_id"), System.String.Empty))
                 Next
 
                 ExpectedDeliverableContractDeclared = True
@@ -1188,6 +1753,17 @@ Namespace Agents
 
             Public Function IsQualifiedFinalArtifactForDelivery(artifact As DeliverableArtifact) As System.Boolean
                 If artifact Is Nothing Then Return False
+                If Not ArtifactDelivery.IsVerifiedArtifactRevisionCurrent(artifact) Then Return False
+                If artifact.VerifiedContentSha256 <> "" AndAlso UnresolvedToolFailures IsNot Nothing Then
+                    Dim affectedScope As System.String = "artifact:" & artifact.LogicalDeliverableId & "|" & artifact.OutputSlotId
+                    For Each failure As ToolFailureRecord In UnresolvedToolFailures
+                        If failure Is Nothing OrElse failure.RecoveryEvidenceObserved OrElse
+                           failure.ToolClassification = ToolCallClassification.ReadOnlyIndependent OrElse
+                           System.String.Equals(failure.ErrorCode, ToolNotExposedInCurrentTurnCode, System.StringComparison.OrdinalIgnoreCase) Then Continue For
+                        If failure.Sequence > artifact.VerifiedAfterFailureSequence AndAlso
+                           System.String.Equals(failure.RecoveryScopeKey, affectedScope, System.StringComparison.Ordinal) Then Return False
+                    Next
+                End If
                 If Not HasExpectedDeliverableContract Then Return True
 
                 Dim expected As ExpectedDeliverableSlot = GetExpectedDeliverableSlot(
@@ -1366,6 +1942,7 @@ Namespace Agents
 
                     If System.String.IsNullOrWhiteSpace(artifact.SessionPath) Then Continue For
                     If Not ArtifactSatisfiesExpectedEffects(artifact, expected) Then Continue For
+                    If Not IsQualifiedFinalArtifactForDelivery(artifact) Then Continue For
 
                     Try
                         If System.IO.File.Exists(artifact.SessionPath) Then
@@ -1536,10 +2113,17 @@ Namespace Agents
                                Optional returnedToParent As Boolean = False,
                                Optional toolErrorHandling As String = "retry",
                                Optional terminal As Boolean = False,
-                               Optional recoveryScopeKey As String = "")
+                               Optional recoveryScopeKey As String = "",
+                               Optional allowRetryScopeRebinding As System.Boolean = False,
+                               Optional retryCorrelationArguments As System.Collections.Generic.IDictionary(Of System.String, System.Object) = Nothing,
+                               Optional retryCorrelationAllowedArgumentNames As System.Collections.Generic.IEnumerable(Of System.String) = Nothing,
+                               Optional rejectedBeforeExecution As System.Boolean = False,
+                               Optional serviceErrorDetails As ToolServiceErrorInfo = Nothing)
                 Dim normalizedToolName As String = If(toolName, "").Trim()
                 Dim normalizedHandling As String = If(toolErrorHandling, "").Trim()
                 Dim normalizedRecoveryScopeKey As String = If(recoveryScopeKey, "").Trim()
+                Dim logicalOperationKey As String = ResolveLogicalOperationKey(normalizedRecoveryScopeKey)
+                Dim stepKey As String = BuildFailureStepKey(normalizedToolName, normalizedRecoveryScopeKey)
                 Dim failurePolicy As ToolFailureRecoveryPolicy = ResolveFailureRecoveryPolicy(
                     normalizedHandling,
                     terminal,
@@ -1547,27 +2131,82 @@ Namespace Agents
                     returnedToParent)
 
                 _failureSequence += 1
+                _attemptSequence += 1
 
                 If UnresolvedToolFailures Is Nothing Then
                     UnresolvedToolFailures = New List(Of ToolFailureRecord)()
                 End If
 
-                ' A failed retry of the same tool updates its existing unresolved record instead
-                ' of creating duplicate stale failures. A failure of a different tool is retained
-                ' independently so later success cannot accidentally erase an older unresolved step.
+                Dim retryCorrelationSignature As System.String = System.String.Empty
+                Dim retryCorrelationRepairablePaths As System.Collections.Generic.List(Of System.String) = Nothing
+                Dim hasExactRetryCorrelation As System.Boolean = False
+                Dim legacyArtifactFallbackSignature As System.String = System.String.Empty
+                Dim deliverableTargetCorrelationSignature As System.String = System.String.Empty
+
+                If retryCorrelationArguments IsNot Nothing AndAlso
+                   IsDeliverableCapableTool(normalizedToolName) Then
+
+                    TryBuildDeliverableTargetCorrelation(
+                        retryCorrelationArguments,
+                        deliverableTargetCorrelationSignature)
+                End If
+
+                If (normalizedRecoveryScopeKey = System.String.Empty OrElse allowRetryScopeRebinding) AndAlso
+                   retryCorrelationArguments IsNot Nothing Then
+
+                    hasExactRetryCorrelation = TryBuildPreflightRetryCorrelation(
+                        retryCorrelationArguments,
+                        If(errorCode, System.String.Empty),
+                        retryCorrelationSignature,
+                        retryCorrelationRepairablePaths,
+                        retryCorrelationAllowedArgumentNames)
+
+                    If hasExactRetryCorrelation AndAlso
+                       System.String.Equals(
+                           If(errorCode, System.String.Empty).Trim(),
+                           "explicit_artifact_identity_incomplete",
+                           System.StringComparison.Ordinal) AndAlso
+                       Not HasExpectedDeliverableContract Then
+
+                        TryBuildLegacyArtifactFallbackCorrelation(
+                            retryCorrelationArguments,
+                            legacyArtifactFallbackSignature)
+                    End If
+                End If
+
+                ' Only the exact same concrete step is a retry. Scope-less preflight failures
+                ' with host-owned repair correlation are additionally keyed by that correlation
+                ' so two different rejected calls using the same tool cannot collapse together.
                 Dim record As ToolFailureRecord = Nothing
                 For i As Integer = UnresolvedToolFailures.Count - 1 To 0 Step -1
                     Dim candidate As ToolFailureRecord = UnresolvedToolFailures(i)
                     If candidate Is Nothing Then Continue For
-                    If System.String.Equals(candidate.ToolName, normalizedToolName, System.StringComparison.OrdinalIgnoreCase) AndAlso
-                       RecoveryScopeKeysMatch(candidate.RecoveryScopeKey, normalizedRecoveryScopeKey) Then
-                        record = candidate
-                        Exit For
+                    If Not System.String.Equals(If(candidate.StepKey, ""), stepKey, System.StringComparison.Ordinal) Then Continue For
+
+                    Dim candidateHasCorrelation As System.Boolean =
+                        Not System.String.IsNullOrWhiteSpace(candidate.RetryCorrelationSignature)
+
+                    If candidateHasCorrelation <> hasExactRetryCorrelation Then Continue For
+                    If hasExactRetryCorrelation AndAlso
+                       (Not System.String.Equals(
+                           candidate.RetryCorrelationSignature,
+                           retryCorrelationSignature,
+                           System.StringComparison.Ordinal) OrElse
+                        Not RetryCorrelationPathsMatch(
+                            candidate.RetryCorrelationRepairablePaths,
+                            retryCorrelationRepairablePaths)) Then
+                        Continue For
                     End If
+
+                    record = candidate
+                    Exit For
                 Next
 
                 If record Is Nothing Then
-                    record = New ToolFailureRecord()
+                    record = New ToolFailureRecord With {
+                        .FirstAttemptSequence = _attemptSequence,
+                        .AttemptCount = 0
+                    }
                     UnresolvedToolFailures.Add(record)
                 End If
 
@@ -1575,17 +2214,40 @@ Namespace Agents
                 record.ToolName = normalizedToolName
                 record.ErrorCode = If(errorCode, "")
                 record.ErrorMessage = If(errorMessage, "")
+                ' Snapshot the current attempt; do not retain stale hints from a different failure.
+                record.ServiceErrorDetails = If(serviceErrorDetails Is Nothing, Nothing, serviceErrorDetails.Copy())
+                record.Category = ClassifyToolFailureCategory(normalizedToolName, record.ErrorCode, record.ErrorMessage)
                 record.SkippedByPolicy = skippedByPolicy
                 record.ReturnedToParent = returnedToParent
                 record.Terminal = terminal
                 record.ToolErrorHandling = normalizedHandling
                 record.ToolClassification = ToolCallSequencing.ClassifyToolNameForRecovery(normalizedToolName)
                 record.RecoveryScopeKey = normalizedRecoveryScopeKey
+                record.LogicalOperationKey = logicalOperationKey
+                record.StepKey = stepKey
+                record.LastAttemptSequence = _attemptSequence
+                record.AttemptCount += 1
                 record.RecoveryPolicy = failurePolicy
-                ' A new/failed retry invalidates any prior candidate recovery evidence for this
-                ' exact unresolved failure.
+                record.RejectedBeforeExecution = rejectedBeforeExecution OrElse allowRetryScopeRebinding
+                record.DeclaredOutputIntent = retryCorrelationArguments IsNot Nothing AndAlso
+                    (ArtifactDelivery.HasExplicitArtifactIdentityArguments(retryCorrelationArguments) OrElse
+                     System.String.Equals(GetArgumentText(retryCorrelationArguments, "artifact_state"), "final", System.StringComparison.OrdinalIgnoreCase) OrElse
+                     System.String.Equals(GetArgumentText(retryCorrelationArguments, "artifact_delivery_intent"), "deliver_to_user", System.StringComparison.OrdinalIgnoreCase) OrElse
+                     System.String.Equals(GetArgumentText(retryCorrelationArguments, "artifact_delivery_intent"), "deliver_and_persist", System.StringComparison.OrdinalIgnoreCase))
+                record.AllowRetryScopeRebinding = allowRetryScopeRebinding AndAlso hasExactRetryCorrelation
+                record.RetryCorrelationSignature = If(hasExactRetryCorrelation, retryCorrelationSignature, System.String.Empty)
+                record.RetryCorrelationRepairablePaths =
+                    If(hasExactRetryCorrelation,
+                       New System.Collections.Generic.List(Of System.String)(retryCorrelationRepairablePaths),
+                       New System.Collections.Generic.List(Of System.String)())
+                record.RetryCorrelationLegacyArtifactFallbackSignature = legacyArtifactFallbackSignature
+                record.DeliverableTargetCorrelationSignature = deliverableTargetCorrelationSignature
+                ' A new/failed retry invalidates prior replacement evidence for this exact step.
                 record.RecoveryEvidenceObserved = False
                 record.RecoveryEvidenceToolName = String.Empty
+                record.RecoveryEvidenceStepKey = String.Empty
+                record.CrossScopeAlternativeRecoveryAllowed = False
+                record.CrossScopeAlternativeRecoveryRequiredArtifactExtension = System.String.Empty
                 record.ProgressEpoch = _substantiveProgressEpoch
 
                 ProjectLatestUnresolvedFailure()
@@ -1637,19 +2299,66 @@ Namespace Agents
                 If RetryInvariantArgumentsByTool IsNot Nothing Then RetryInvariantArgumentsByTool.Clear()
             End Sub
 
+            ''' <summary>
+            ''' Allows one concrete failed tool to declare that a different successful recovery
+            ''' path may cross an opaque operation/task scope. This does not itself clear anything.
+            ''' The normal recovery policy, substantive-success checks and deliverable validation
+            ''' remain authoritative. Exact same-tool retries continue to require exact scope identity.
+            ''' </summary>
+            Public Sub AllowCrossScopeAlternativeRecovery(failedToolName As System.String,
+                                                           recoveryScopeKey As System.String,
+                                                           Optional requiredArtifactExtension As System.String = "",
+                                                           Optional recoveryLabel As String = "declared_alternative_path")
+                If Not HasUnresolvedToolFailure OrElse UnresolvedToolFailures Is Nothing OrElse UnresolvedToolFailures.Count = 0 Then
+                    Return
+                End If
+
+                Dim normalizedToolName As System.String = If(failedToolName, System.String.Empty).Trim()
+                Dim normalizedScope As System.String = If(recoveryScopeKey, System.String.Empty).Trim()
+                Dim normalizedRequiredExtension As System.String = If(requiredArtifactExtension, System.String.Empty).Trim()
+                If normalizedRequiredExtension <> System.String.Empty AndAlso Not normalizedRequiredExtension.StartsWith(".", System.StringComparison.Ordinal) Then
+                    normalizedRequiredExtension = "." & normalizedRequiredExtension
+                End If
+                If normalizedToolName = System.String.Empty Then Return
+
+                For i As System.Int32 = UnresolvedToolFailures.Count - 1 To 0 Step -1
+                    Dim candidate As ToolFailureRecord = UnresolvedToolFailures(i)
+                    If candidate Is Nothing Then Continue For
+                    If Not System.String.Equals(candidate.ToolName, normalizedToolName, System.StringComparison.OrdinalIgnoreCase) Then Continue For
+                    If Not RecoveryScopeKeysMatch(candidate.RecoveryScopeKey, normalizedScope) Then Continue For
+                    If candidate.Terminal Then Continue For
+                    If candidate.RecoveryPolicy <> ToolFailureRecoveryPolicy.CompatibleAlternativeSuccessAllowed Then Continue For
+
+                    candidate.CrossScopeAlternativeRecoveryAllowed = True
+                    candidate.CrossScopeAlternativeRecoveryRequiredArtifactExtension = normalizedRequiredExtension
+                    candidate.RecoveryEvidenceObserved = False
+                    candidate.RecoveryEvidenceToolName = String.Empty
+                    candidate.RecoveryEvidenceStepKey = String.Empty
+                    RecoveryToolName = If(recoveryLabel, System.String.Empty)
+                    Exit For
+                Next
+
+                ProjectLatestUnresolvedFailure()
+            End Sub
+
             Public Sub BeginBoundedAlternativeRecovery(failedToolName As String,
-                                                       Optional recoveryLabel As String = "full_tool_path_recovery")
+                                                       Optional recoveryLabel As String = "full_tool_path_recovery",
+                                                       Optional recoveryScopeKey As String = "")
                 If Not HasUnresolvedToolFailure OrElse UnresolvedToolFailures Is Nothing OrElse UnresolvedToolFailures.Count = 0 Then
                     Return
                 End If
 
                 Dim normalizedToolName As String = If(failedToolName, String.Empty).Trim()
+                Dim normalizedRecoveryScopeKey As String = If(recoveryScopeKey, String.Empty).Trim()
                 If normalizedToolName = String.Empty Then Return
 
+                Dim matchedFailure As Boolean = False
                 For i As Integer = UnresolvedToolFailures.Count - 1 To 0 Step -1
                     Dim candidate As ToolFailureRecord = UnresolvedToolFailures(i)
                     If candidate Is Nothing Then Continue For
                     If Not System.String.Equals(candidate.ToolName, normalizedToolName, System.StringComparison.OrdinalIgnoreCase) Then Continue For
+                    If normalizedRecoveryScopeKey <> String.Empty AndAlso
+                       Not RecoveryScopeKeysMatch(candidate.RecoveryScopeKey, normalizedRecoveryScopeKey) Then Continue For
 
                     ' The local retry/circuit-breaker is exhausted, but the host has explicitly
                     ' opened one bounded whole-workflow recovery pass. The failed tool itself
@@ -1659,8 +2368,14 @@ Namespace Agents
                     candidate.RecoveryPolicy = ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly
                     candidate.RecoveryEvidenceObserved = False
                     candidate.RecoveryEvidenceToolName = String.Empty
+                    candidate.RecoveryEvidenceStepKey = String.Empty
+                    candidate.CrossScopeAlternativeRecoveryAllowed = True
+                    candidate.CrossScopeAlternativeRecoveryRequiredArtifactExtension = System.String.Empty
                     candidate.ProgressEpoch = _substantiveProgressEpoch
+                    matchedFailure = True
                 Next
+
+                If Not matchedFailure Then Return
 
                 LastFailureUltimatelyFatal = False
                 LastFailureTerminal = False
@@ -1686,54 +2401,89 @@ Namespace Agents
             End Sub
 
             ''' <summary>
-            ''' Records successful substantive progress. An exact retry resolves only its matching
-            ''' failure. A different successful fallback may provide recovery evidence for the
-            ''' compatible unresolved failures created in the same substantive-progress epoch;
-            ''' failures from older epochs, retry-only/terminal barriers, and incompatible explicit
-            ''' scopes remain unresolved and continue to block false COMPLETE finalization.
+            ''' Records successful substantive progress using Operation -> Step -> Attempt semantics.
+            ''' An exact successful retry resolves only the matching failed StepKey immediately.
+            ''' A successful different step is never treated as a retry; it may only record
+            ''' replacement/alternative recovery evidence, which is committed after an accepted
+            ''' final turn. Multiple successful executions of distinct step_ids inside the same
+            ''' operation therefore remain valid continuations rather than accidental retries.
             ''' </summary>
             Public Sub NoteSuccessfulProgress(Optional toolName As String = "",
-                                              Optional recoveryScopeKey As String = "")
+                                              Optional recoveryScopeKey As String = "",
+                                              Optional successfulArguments As System.Collections.Generic.IDictionary(Of System.String, System.Object) = Nothing)
                 Dim normalizedToolName As String = If(toolName, "").Trim()
                 Dim normalizedRecoveryScopeKey As String = If(recoveryScopeKey, "").Trim()
 
-                ' Administrative/control-plane calls are intentionally not substantive progress.
-                ' In particular, tool_loader/report_progress/routing/context/memory calls must not
-                ' split a fallback chain or provide recovery evidence for a failed substantive step.
-                If IsRecoveryNeutralAdministrativeTool(normalizedToolName) Then
-                    Return
+                Dim administrativeSuccess As System.Boolean = IsRecoveryNeutralAdministrativeTool(normalizedToolName)
+
+                _attemptSequence += 1
+                If ReadOnlyIndependentToolNames IsNot Nothing AndAlso ReadOnlyIndependentToolNames.Contains(normalizedToolName) Then
+                    If SuccessfulReadEvidence Is Nothing Then SuccessfulReadEvidence = New System.Collections.Generic.Dictionary(Of System.Int64, System.String)()
+                    SuccessfulReadEvidence(_attemptSequence) = normalizedToolName
                 End If
-
                 Dim currentProgressEpoch As Long = _substantiveProgressEpoch
-
+                Dim successfulStepKey As String = BuildFailureStepKey(normalizedToolName, normalizedRecoveryScopeKey)
                 If Not HasUnresolvedToolFailure OrElse UnresolvedToolFailures Is Nothing OrElse UnresolvedToolFailures.Count = 0 Then
-                    _substantiveProgressEpoch += 1
+                    If Not administrativeSuccess Then _substantiveProgressEpoch += 1
                     Return
                 End If
 
                 Dim recoveryIndex As Integer = -1
+                Dim correlatedRetryMatchCount As System.Int32 = 0
+                Dim correlatedRetryRecoveryIndex As System.Int32 = -1
 
-                ' Prefer an exact successful retry. This is deterministic and must not be confused
-                ' with merely issuing the same tool again; this method is called only after success.
+                ' Exact retry: same concrete StepKey. A different step_id or operation_id is
+                ' deliberately not a retry, even if it calls the same tool. Explicit sub-agent
+                ' task recovery retains its historical cross-agent special case. Scope-less
+                ' host-correlated preflight failures are cleared only when exactly one unresolved
+                ' candidate can explain the successful call; ambiguous matches remain visible.
                 For i As Integer = UnresolvedToolFailures.Count - 1 To 0 Step -1
                     Dim candidate As ToolFailureRecord = UnresolvedToolFailures(i)
                     If candidate Is Nothing Then Continue For
-                    Dim sameTool As System.Boolean =
-                        System.String.Equals(candidate.ToolName, normalizedToolName, System.StringComparison.OrdinalIgnoreCase)
+                    ' Neutral calls may repair only their own host-correlated preflight failure.
+                    ' They never count as substantive progress or recover another tool's failure.
+                    If administrativeSuccess AndAlso
+                       (Not System.String.Equals(candidate.ToolName, normalizedToolName, System.StringComparison.OrdinalIgnoreCase) OrElse
+                        System.String.IsNullOrWhiteSpace(candidate.RetryCorrelationSignature)) Then Continue For
+                    Dim exactRetryCorrelationMatches As System.Boolean =
+                        DoesPreflightRetryCorrelationMatch(candidate, successfulArguments)
+                    Dim sameStep As System.Boolean =
+                        System.String.Equals(If(candidate.StepKey, ""), successfulStepKey, System.StringComparison.Ordinal) AndAlso
+                        exactRetryCorrelationMatches
                     Dim sameExplicitSubAgentTask As System.Boolean =
                         IsSameExplicitSubAgentTaskRecovery(candidate, normalizedToolName, normalizedRecoveryScopeKey)
-                    If Not sameTool AndAlso Not sameExplicitSubAgentTask Then Continue For
-                    If Not SuccessfulCallMatchesFailureScope(candidate, normalizedRecoveryScopeKey) Then Continue For
+                    Dim sameToolScopeReboundRetry As System.Boolean =
+                        candidate.AllowRetryScopeRebinding AndAlso
+                        exactRetryCorrelationMatches AndAlso
+                        Not System.String.IsNullOrWhiteSpace(candidate.RetryCorrelationSignature) AndAlso
+                        System.String.Equals(
+                            If(candidate.ToolName, System.String.Empty),
+                            normalizedToolName,
+                            System.StringComparison.OrdinalIgnoreCase)
+                    If Not sameStep AndAlso Not sameExplicitSubAgentTask AndAlso Not sameToolScopeReboundRetry Then Continue For
 
-                    If candidate.RecoveryPolicy = ToolFailureRecoveryPolicy.SameToolSuccessOnly OrElse
-                       candidate.RecoveryPolicy = ToolFailureRecoveryPolicy.CompatibleAlternativeSuccessAllowed Then
-                        recoveryIndex = i
+                    If candidate.RecoveryPolicy <> ToolFailureRecoveryPolicy.SameToolSuccessOnly AndAlso
+                       candidate.RecoveryPolicy <> ToolFailureRecoveryPolicy.CompatibleAlternativeSuccessAllowed Then
+                        Continue For
                     End If
+
+                    If Not System.String.IsNullOrWhiteSpace(candidate.RetryCorrelationSignature) Then
+                        correlatedRetryMatchCount += 1
+                        correlatedRetryRecoveryIndex = i
+                        Continue For
+                    End If
+
+                    recoveryIndex = i
                     Exit For
                 Next
 
+                If recoveryIndex < 0 AndAlso correlatedRetryMatchCount = 1 Then
+                    recoveryIndex = correlatedRetryRecoveryIndex
+                End If
+
                 If recoveryIndex >= 0 Then
                     Dim recovered As ToolFailureRecord = UnresolvedToolFailures(recoveryIndex)
+                    LastRecoveredFailureSummary = BuildFailureRecoverySummary(recovered, normalizedToolName)
                     UnresolvedToolFailures.RemoveAt(recoveryIndex)
 
                     If recovered IsNot Nothing AndAlso RetryInvariantPendingFailureTools IsNot Nothing Then
@@ -1760,103 +2510,89 @@ Namespace Agents
                         RecoveryToolName = normalizedToolName
                     End If
 
-                    _substantiveProgressEpoch += 1
+                    If Not administrativeSuccess Then _substantiveProgressEpoch += 1
                     Return
                 End If
 
-                ' Alternative-path recovery is phase-aware. Every compatible unresolved failure
-                ' created since the previous substantive success belongs to the same fallback chain.
-                ' A later successful substantive path may therefore supersede the whole compatible
-                ' chain, but it may not cross a prior substantive-success boundary, a terminal/retry
-                ' barrier, or an incompatible explicit recovery scope.
-                Dim immediateRecoveryIndexes As New System.Collections.Generic.List(Of Integer)()
+                If administrativeSuccess Then Return
+
+                ' Different successful steps are alternative/replacement candidates, not retries.
+                ' Record evidence only. HasBlockingUnresolvedToolFailure will permit finalization
+                ' when that evidence is sufficient, and FinalizeObservedAlternativeRecoveries
+                ' commits it only after the final turn is actually accepted.
                 For i As Integer = UnresolvedToolFailures.Count - 1 To 0 Step -1
                     Dim candidate As ToolFailureRecord = UnresolvedToolFailures(i)
                     If candidate Is Nothing Then Continue For
 
-                    ' Explicit recovery scopes are stronger than the coarse progress epoch. A
-                    ' preparatory success (for example copying/staging the same workbook) must not
-                    ' make a later successful fallback on the SAME logical operation/artifact slot
-                    ' unable to recover the earlier failure. Legacy unscoped failures keep the epoch
-                    ' boundary to avoid unrelated late successes being treated as recovery evidence.
                     If System.String.IsNullOrWhiteSpace(candidate.RecoveryScopeKey) AndAlso
-                       candidate.ProgressEpoch <> currentProgressEpoch Then
-                        Exit For
-                    End If
-
-                    If candidate.RecoveryPolicy <> ToolFailureRecoveryPolicy.CompatibleAlternativeSuccessAllowed AndAlso
-                       candidate.RecoveryPolicy <> ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly Then
-                        Exit For
-                    End If
-
-                    If Not IsCompatibleAlternativeRecoveryTool(candidate, normalizedToolName, normalizedRecoveryScopeKey) Then
-                        Exit For
-                    End If
-
-                    ' For an explicit artifact-scoped failure, a different producer is recovery
-                    ' only when the artifact contract for the run is actually qualified. This
-                    ' prevents preparatory copy/staging operations on the same logical slot from
-                    ' erasing a failed transformation before the required verified effects exist.
-                    If candidate.RecoveryScopeKey.StartsWith("artifact:", System.StringComparison.Ordinal) AndAlso
-                       HasExpectedDeliverableContract AndAlso
-                       Not HasAllExpectedDeliverableSlots Then
+                       candidate.ProgressEpoch <> currentProgressEpoch AndAlso
+                       Not IsFailureSupersededByVerifiedOutcome(Me, candidate) Then
                         Continue For
                     End If
 
-                    Dim alternativeNeedsFinalCommit As Boolean =
-                        candidate.ReturnedToParent OrElse System.String.IsNullOrWhiteSpace(candidate.RecoveryScopeKey)
-
-                    If alternativeNeedsFinalCommit Then
-                        candidate.RecoveryEvidenceObserved = True
-                        candidate.RecoveryEvidenceToolName = normalizedToolName
-                    Else
-                        immediateRecoveryIndexes.Add(i)
+                    If Not CanSuccessfulStepProvideReplacementEvidence(
+                        candidate,
+                        normalizedToolName,
+                        normalizedRecoveryScopeKey,
+                        successfulStepKey) Then
+                        Continue For
                     End If
-                Next
 
-                For Each index As Integer In immediateRecoveryIndexes
-                    Dim recovered As ToolFailureRecord = UnresolvedToolFailures(index)
-                    If recovered IsNot Nothing AndAlso RetryInvariantPendingFailureTools IsNot Nothing Then
-                        RetryInvariantPendingFailureTools.Remove(
-                            BuildRetryInvariantKey(recovered.ToolName, recovered.RecoveryScopeKey))
-                    End If
-                    UnresolvedToolFailures.RemoveAt(index)
+                    candidate.RecoveryEvidenceObserved = True
+                    candidate.RecoveryEvidenceToolName = normalizedToolName
+                    candidate.RecoveryEvidenceStepKey = successfulStepKey
                 Next
 
                 If UnresolvedToolFailures.Count > 0 Then
                     ProjectLatestUnresolvedFailure()
 
-                    ' During an explicitly opened whole-workflow alternative recovery, successful
-                    ' preparatory reads/inspection steps are useful but must not advance the
-                    ' recovery epoch. Otherwise the later compatible mutation/producer call would
-                    ' be prevented from resolving the very failure this recovery pass was opened for.
                     Dim boundedAlternativeStillPending As Boolean =
                         UnresolvedToolFailures.Any(
                             Function(candidate As ToolFailureRecord)
                                 Return candidate IsNot Nothing AndAlso
                                        candidate.ProgressEpoch = currentProgressEpoch AndAlso
-                                       candidate.RecoveryPolicy = ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly
+                                       candidate.RecoveryPolicy = ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly AndAlso
+                                       Not candidate.RecoveryEvidenceObserved
                             End Function)
                     If boundedAlternativeStillPending Then Return
-                Else
-                    HasUnresolvedToolFailure = False
-                    LastToolName = ""
-                    LastErrorCode = ""
-                    LastErrorMessage = ""
-                    LastFailureSkippedByPolicy = False
-                    LastFailureReturnedToParent = False
-                    LastFailureTerminal = False
-                    LastFailureRecoveryPolicy = ToolFailureRecoveryPolicy.SameToolSuccessOnly
-                    LastFailureToolClassification = ToolCallClassification.Unknown
-                    LastFailureToolErrorHandling = ""
-                    LastFailureRecoveredByToolCall = True
-                    LastFailureHandledByBlockedFinal = False
-                    LastFailureUltimatelyFatal = False
-                    RecoveryToolName = normalizedToolName
                 End If
 
+                ' Evidence does not clear the failure here. It only means a later accepted final
+                ' turn may commit the replacement. Progress still advances so unrelated earlier
+                ' unscoped failures cannot be accidentally recovered by much later work.
                 _substantiveProgressEpoch += 1
             End Sub
+
+            Private Function CanSuccessfulStepProvideReplacementEvidence(
+                failure As ToolFailureRecord,
+                successfulToolName As String,
+                successfulRecoveryScopeKey As String,
+                successfulStepKey As String) As Boolean
+
+                If failure Is Nothing Then Return False
+                If failure.Terminal Then Return False
+                If IsRecoveryNeutralAdministrativeTool(successfulToolName) Then Return False
+                If System.String.Equals(If(failure.StepKey, ""), If(successfulStepKey, ""), System.StringComparison.Ordinal) Then Return False
+
+                If failure.RecoveryPolicy <> ToolFailureRecoveryPolicy.CompatibleAlternativeSuccessAllowed AndAlso
+                   failure.RecoveryPolicy <> ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly Then
+                    Return False
+                End If
+
+                If failure.RecoveryPolicy = ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly AndAlso
+                   System.String.Equals(If(failure.ToolName, ""), If(successfulToolName, ""), System.StringComparison.OrdinalIgnoreCase) Then
+                    Return False
+                End If
+
+                ' A different tool can implement the SAME explicit operation step. Require the
+                ' existing operation registry's success, not transport success or a sibling step.
+                If System.String.Equals(failure.RecoveryScopeKey, successfulRecoveryScopeKey, System.StringComparison.Ordinal) AndAlso
+                   HasSucceededExplicitRecoveryStep(Me, failure) Then Return True
+
+                ' Neither tool-name similarity, an unscoped successful read nor an unrelated
+                ' Final proves recovery. Reuse the exact expected-slot/effects validator.
+                Return IsFailureSupersededByVerifiedOutcome(Me, failure)
+            End Function
 
             ''' <summary>
             ''' Commits two-phase alternative recovery only after the host has accepted a final
@@ -1870,10 +2606,14 @@ Namespace Agents
 
                 For i As Integer = UnresolvedToolFailures.Count - 1 To 0 Step -1
                     Dim candidate As ToolFailureRecord = UnresolvedToolFailures(i)
-                    If candidate Is Nothing OrElse Not candidate.RecoveryEvidenceObserved Then
+                    If candidate Is Nothing OrElse Not candidate.RecoveryEvidenceObserved OrElse
+                       Not IsFailureSupersededByVerifiedOutcome(Me, candidate) Then
                         Continue For
                     End If
 
+                    LastRecoveredFailureSummary = BuildFailureRecoverySummary(
+                        candidate,
+                        candidate.RecoveryEvidenceToolName)
                     If RetryInvariantPendingFailureTools IsNot Nothing Then
                         RetryInvariantPendingFailureTools.Remove(
                             BuildRetryInvariantKey(candidate.ToolName, candidate.RecoveryScopeKey))
@@ -1938,69 +2678,23 @@ Namespace Agents
                 Return False
             End Function
 
-            Private Function IsCompatibleAlternativeRecoveryTool(failure As ToolFailureRecord,
-                                                                  toolName As String,
-                                                                  recoveryScopeKey As String) As Boolean
-                If failure Is Nothing Then
-                    Return False
+            Private Shared Function ResolveLogicalOperationKey(recoveryScopeKey As String) As String
+                Dim normalized As String = If(recoveryScopeKey, "").Trim()
+                If normalized = "" Then Return ""
+
+                Const stepMarker As String = "|step:"
+                If normalized.StartsWith("operation:", System.StringComparison.Ordinal) Then
+                    Dim stepIndex As Integer = normalized.IndexOf(stepMarker, System.StringComparison.Ordinal)
+                    If stepIndex > 0 Then Return normalized.Substring(0, stepIndex)
                 End If
 
-                Dim normalizedToolName As String = If(toolName, "").Trim()
-                Dim normalizedRecoveryScopeKey As String = If(recoveryScopeKey, "").Trim()
-                If normalizedToolName = "" Then
-                    Return False
-                End If
-
-                If System.String.Equals(failure.ToolName, normalizedToolName, System.StringComparison.OrdinalIgnoreCase) Then
-                    Return failure.RecoveryPolicy = ToolFailureRecoveryPolicy.CompatibleAlternativeSuccessAllowed AndAlso
-                           SuccessfulCallMatchesFailureScope(failure, normalizedRecoveryScopeKey)
-                End If
-
-                If IsRecoveryNeutralAdministrativeTool(normalizedToolName) Then
-                    Return False
-                End If
-
-                ' A delegated failure explicitly returned to the parent establishes a host-owned
-                ' hand-off. Any later *different substantive* successful capability may recover that
-                ' delegated path. Administrative calls never qualify, and a terminal delegated
-                ' failure cannot be "recovered" merely by invoking the same failed agent again.
-                If failure.ReturnedToParent Then
-                    Return True
-                End If
-
-                ' For direct tool failures, ToolErrorHandling=skip is the generic opt-in that permits
-                ' an alternative path. If the caller supplied an opaque operation/task/artifact scope,
-                ' the alternative must carry that exact same scope. Unscoped skip failures may be
-                ' recovered by the next different substantive success; retry/abort failures never use
-                ' this branch because their recovery policy does not permit alternatives.
-                If failure.RecoveryPolicy <> ToolFailureRecoveryPolicy.CompatibleAlternativeSuccessAllowed AndAlso
-                   failure.RecoveryPolicy <> ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly Then
-                    Return False
-                End If
-
-                If String.IsNullOrWhiteSpace(failure.RecoveryScopeKey) Then
-                    Return True
-                End If
-
-                Return RecoveryScopeKeysMatch(failure.RecoveryScopeKey, normalizedRecoveryScopeKey)
+                Return normalized
             End Function
 
-            Private Shared Function SuccessfulCallMatchesFailureScope(failure As ToolFailureRecord,
-                                                                     recoveryScopeKey As String) As Boolean
-                If failure Is Nothing Then
-                    Return False
-                End If
-
-                Dim failureScopeKey As String = If(failure.RecoveryScopeKey, "").Trim()
-                Dim successScopeKey As String = If(recoveryScopeKey, "").Trim()
-
-                ' Legacy/unscoped tools remain recoverable by an exact successful retry of the
-                ' same tool. Once an explicit opaque scope exists, it must match exactly.
-                If failureScopeKey = "" Then
-                    Return True
-                End If
-
-                Return RecoveryScopeKeysMatch(failureScopeKey, successScopeKey)
+            Private Shared Function BuildFailureStepKey(toolName As String, recoveryScopeKey As String) As String
+                Dim normalizedTool As String = If(toolName, "").Trim().ToLowerInvariant()
+                Dim normalizedScope As String = If(recoveryScopeKey, "").Trim()
+                Return "tool:" & normalizedTool & "|scope:" & normalizedScope
             End Function
 
             Private Shared Function IsSameExplicitSubAgentTaskRecovery(failure As ToolFailureRecord,
@@ -2020,6 +2714,401 @@ Namespace Agents
                     If(left, "").Trim(),
                     If(right, "").Trim(),
                     System.StringComparison.Ordinal)
+            End Function
+
+            Private Const RetryCorrelationMaskValue As System.String = "__REDINK_HOST_REPAIRABLE_FIELD__"
+
+            Private Shared Function TryBuildDeliverableTargetCorrelation(
+                arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+                ByRef signature As System.String) As System.Boolean
+
+                signature = System.String.Empty
+                If arguments Is Nothing Then Return False
+
+                Dim target As New Newtonsoft.Json.Linq.JObject()
+
+                ' Logical output identity is separate from physical filenames, artifact versions
+                ' and operation steps. Both opaque identity fields are mandatory for replacement.
+                For Each fieldName As System.String In New System.String() {"logical_deliverable_id", "output_slot_id"}
+                    Dim rawValue As System.Object = Nothing
+                    If Not arguments.TryGetValue(fieldName, rawValue) OrElse rawValue Is Nothing Then Return False
+                    Dim token As Newtonsoft.Json.Linq.JToken = Newtonsoft.Json.Linq.JToken.FromObject(rawValue)
+                    Dim fieldObject As New Newtonsoft.Json.Linq.JObject From {{fieldName, token}}
+                    Dim valueText As System.String = System.String.Empty
+                    Dim identityError As System.String = System.String.Empty
+                    If Not TryGetExpectedArtifactIdentityValue(fieldObject, fieldName, valueText, identityError) Then Return False
+                    target(fieldName) = New Newtonsoft.Json.Linq.JValue(valueText)
+                Next
+
+                Dim canonical As Newtonsoft.Json.Linq.JToken = CanonicalizeRetryCorrelationToken(target)
+                signature = canonical.ToString(Newtonsoft.Json.Formatting.None)
+                Return Not System.String.IsNullOrWhiteSpace(signature)
+            End Function
+
+            Private Shared Function RetryCorrelationPathsMatch(
+                left As System.Collections.Generic.IList(Of System.String),
+                right As System.Collections.Generic.IList(Of System.String)) As System.Boolean
+
+                Dim leftCount As System.Int32 = If(left Is Nothing, 0, left.Count)
+                Dim rightCount As System.Int32 = If(right Is Nothing, 0, right.Count)
+                If leftCount <> rightCount Then Return False
+
+                For index As System.Int32 = 0 To leftCount - 1
+                    If Not System.String.Equals(
+                        If(left(index), System.String.Empty),
+                        If(right(index), System.String.Empty),
+                        System.StringComparison.Ordinal) Then
+                        Return False
+                    End If
+                Next
+
+                Return True
+            End Function
+
+            Private Function TryBuildPreflightRetryCorrelation(
+                arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+                errorCode As System.String,
+                ByRef signature As System.String,
+                ByRef repairablePaths As System.Collections.Generic.List(Of System.String),
+                Optional allowedArgumentNames As System.Collections.Generic.IEnumerable(Of System.String) = Nothing) As System.Boolean
+
+                signature = System.String.Empty
+                repairablePaths = New System.Collections.Generic.List(Of System.String)()
+                If arguments Is Nothing Then Return False
+
+                Dim normalizedErrorCode As System.String = If(errorCode, System.String.Empty).Trim()
+                Dim root As Newtonsoft.Json.Linq.JObject = Nothing
+
+                Try
+                    root = TryCast(Newtonsoft.Json.Linq.JToken.FromObject(arguments), Newtonsoft.Json.Linq.JObject)
+                Catch ex As System.Exception
+                    Return False
+                End Try
+
+                If root Is Nothing Then Return False
+
+                If System.String.Equals(normalizedErrorCode, "invalid_tool_arguments", System.StringComparison.Ordinal) AndAlso allowedArgumentNames IsNot Nothing Then
+                    Dim allowed As New System.Collections.Generic.HashSet(Of System.String)(allowedArgumentNames, System.StringComparer.OrdinalIgnoreCase)
+                    If allowed.Count = 0 Then Return False
+                    Dim retainedCount As System.Int32 = 0
+                    For Each prop As Newtonsoft.Json.Linq.JProperty In root.Properties()
+                        If allowed.Contains(prop.Name) Then
+                            retainedCount += 1
+                        Else
+                            repairablePaths.Add("field:" & prop.Name)
+                        End If
+                    Next
+                    ' No guessing if the rejected call contains no known target arguments.
+                    If retainedCount = 0 Then Return False
+                ElseIf normalizedErrorCode = "locked_expected_artifact_slot_mismatch" OrElse
+                       normalizedErrorCode = "locked_expected_artifact_identity_incomplete" OrElse
+                       normalizedErrorCode = "locked_expected_artifact_slot_required" Then
+                    repairablePaths.Add("field:logical_deliverable_id")
+                    repairablePaths.Add("field:output_slot_id")
+                    ' artifact_id may be absent on a preflight-rejected incomplete identity.
+                    If root("artifact_id") Is Nothing Then repairablePaths.Add("field:artifact_id")
+                ElseIf System.String.Equals(
+                    normalizedErrorCode,
+                    "explicit_artifact_identity_incomplete",
+                    System.StringComparison.Ordinal) Then
+
+                    Dim requiredIdentityFields As System.String() = {
+                        "artifact_id",
+                        "logical_deliverable_id",
+                        "output_slot_id"
+                    }
+
+                    For Each fieldName As System.String In requiredIdentityFields
+                        Dim rawValue As System.Object = Nothing
+                        Dim valueText As System.String = System.String.Empty
+                        If arguments.TryGetValue(fieldName, rawValue) AndAlso rawValue IsNot Nothing Then
+                            valueText = If(System.Convert.ToString(rawValue), System.String.Empty).Trim()
+                        End If
+                        If valueText = System.String.Empty Then
+                            repairablePaths.Add("field:" & fieldName)
+                        End If
+                    Next
+
+                ElseIf System.String.Equals(
+                    normalizedErrorCode,
+                    "invalid_expected_artifacts",
+                    System.StringComparison.Ordinal) Then
+
+                    Dim expectedToken As Newtonsoft.Json.Linq.JToken = root("expected_artifacts")
+                    If expectedToken Is Nothing OrElse
+                       expectedToken.Type = Newtonsoft.Json.Linq.JTokenType.Null OrElse
+                       expectedToken.Type <> Newtonsoft.Json.Linq.JTokenType.Array Then
+
+                        repairablePaths.Add("field:expected_artifacts")
+                    Else
+                        Dim expectedArray As Newtonsoft.Json.Linq.JArray = DirectCast(expectedToken, Newtonsoft.Json.Linq.JArray)
+                        For index As System.Int32 = 0 To expectedArray.Count - 1
+                            Dim itemObject As Newtonsoft.Json.Linq.JObject = TryCast(expectedArray(index), Newtonsoft.Json.Linq.JObject)
+                            If itemObject Is Nothing Then
+                                repairablePaths.Add("expected_item:" & index.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                                Continue For
+                            End If
+
+                            For Each fieldName As System.String In New System.String() {"logical_deliverable_id", "output_slot_id"}
+                                Dim ignoredValue As System.String = System.String.Empty
+                                Dim ignoredFailure As System.String = System.String.Empty
+                                If Not TryGetExpectedArtifactIdentityValue(
+                                    itemObject,
+                                    fieldName,
+                                    ignoredValue,
+                                    ignoredFailure) Then
+
+                                    repairablePaths.Add(
+                                        "expected_field:" &
+                                        index.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                        ":" & fieldName)
+                                End If
+                            Next
+                        Next
+                    End If
+                Else
+                    Return False
+                End If
+
+                If repairablePaths.Count = 0 Then Return False
+                ' A corrected preflight receives a fresh physical revision from the host.
+                ' Ignore ONLY that host-owned field, and only with unchanged logical/slot identity.
+                Dim physicalId As System.String = GetArgumentText(arguments, "artifact_id")
+                If HostAssignedArtifactRevisionIds IsNot Nothing AndAlso HostAssignedArtifactRevisionIds.Contains(physicalId) AndAlso
+                   GetArgumentText(arguments, "logical_deliverable_id") <> System.String.Empty AndAlso
+                   GetArgumentText(arguments, "output_slot_id") <> System.String.Empty AndAlso
+                   Not repairablePaths.Contains("field:logical_deliverable_id") AndAlso
+                   Not repairablePaths.Contains("field:output_slot_id") AndAlso
+                   Not repairablePaths.Contains("field:artifact_id") Then
+                    repairablePaths.Add("host_field:artifact_id")
+                End If
+                repairablePaths.Sort(System.StringComparer.Ordinal)
+
+                Dim masked As Newtonsoft.Json.Linq.JObject = DirectCast(root.DeepClone(), Newtonsoft.Json.Linq.JObject)
+                If Not ApplyRetryCorrelationMasks(masked, repairablePaths) Then Return False
+
+                Dim canonical As Newtonsoft.Json.Linq.JToken = CanonicalizeRetryCorrelationToken(masked)
+                signature = canonical.ToString(Newtonsoft.Json.Formatting.None)
+                Return Not System.String.IsNullOrWhiteSpace(signature)
+            End Function
+
+            Private Function DoesPreflightRetryCorrelationMatch(
+                failure As ToolFailureRecord,
+                successfulArguments As System.Collections.Generic.IDictionary(Of System.String, System.Object)) As System.Boolean
+
+                If failure Is Nothing Then Return False
+                If System.String.IsNullOrWhiteSpace(failure.RetryCorrelationSignature) Then Return True
+                If successfulArguments Is Nothing OrElse
+                   failure.RetryCorrelationRepairablePaths Is Nothing OrElse
+                   failure.RetryCorrelationRepairablePaths.Count = 0 Then
+                    Return False
+                End If
+
+                Dim root As Newtonsoft.Json.Linq.JObject = Nothing
+                Try
+                    root = TryCast(Newtonsoft.Json.Linq.JToken.FromObject(successfulArguments), Newtonsoft.Json.Linq.JObject)
+                Catch ex As System.Exception
+                    Return False
+                End Try
+                If root Is Nothing Then Return False
+                If failure.RetryCorrelationRepairablePaths.Contains("host_field:artifact_id") AndAlso
+                   (HostAssignedArtifactRevisionIds Is Nothing OrElse
+                    Not HostAssignedArtifactRevisionIds.Contains(GetArgumentText(successfulArguments, "artifact_id"))) Then Return False
+
+                Dim masked As Newtonsoft.Json.Linq.JObject = DirectCast(root.DeepClone(), Newtonsoft.Json.Linq.JObject)
+                If ApplyRetryCorrelationMasks(masked, failure.RetryCorrelationRepairablePaths) Then
+                    Dim canonical As Newtonsoft.Json.Linq.JToken = CanonicalizeRetryCorrelationToken(masked)
+                    Dim successfulSignature As System.String = canonical.ToString(Newtonsoft.Json.Formatting.None)
+                    If System.String.Equals(
+                        failure.RetryCorrelationSignature,
+                        successfulSignature,
+                        System.StringComparison.Ordinal) Then
+
+                        Return True
+                    End If
+                End If
+
+                ' A rejected partial explicit-artifact call created no side effect. If there is
+                ' no expected-artifact contract, a later successful call may deliberately return
+                ' to the legacy protocol. Recover only when the successful call contains no
+                ' non-empty explicit identity and all substantive arguments still match exactly.
+                If Not HasExpectedDeliverableContract AndAlso
+                   Not System.String.IsNullOrWhiteSpace(
+                       failure.RetryCorrelationLegacyArtifactFallbackSignature) AndAlso
+                   Not HasNonEmptyExplicitArtifactIdentity(successfulArguments) Then
+
+                    Dim legacySuccessfulSignature As System.String = System.String.Empty
+                    If TryBuildLegacyArtifactFallbackCorrelation(
+                        successfulArguments,
+                        legacySuccessfulSignature) AndAlso
+                       System.String.Equals(
+                           failure.RetryCorrelationLegacyArtifactFallbackSignature,
+                           legacySuccessfulSignature,
+                           System.StringComparison.Ordinal) Then
+
+                        Return True
+                    End If
+                End If
+
+                Return False
+            End Function
+
+            Private Shared Function HasNonEmptyExplicitArtifactIdentity(
+                arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object)) As System.Boolean
+
+                If arguments Is Nothing Then Return False
+
+                For Each fieldName As System.String In New System.String() {
+                    "artifact_id",
+                    "logical_deliverable_id",
+                    "output_slot_id",
+                    "supersedes_artifact_id"
+                }
+                    Dim rawValue As System.Object = Nothing
+                    If arguments.TryGetValue(fieldName, rawValue) AndAlso rawValue IsNot Nothing AndAlso
+                       Not System.String.IsNullOrWhiteSpace(System.Convert.ToString(rawValue)) Then
+
+                        Return True
+                    End If
+                Next
+
+                Return False
+            End Function
+
+            Private Shared Function TryBuildLegacyArtifactFallbackCorrelation(
+                arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+                ByRef signature As System.String) As System.Boolean
+
+                signature = System.String.Empty
+                If arguments Is Nothing Then Return False
+
+                Dim root As Newtonsoft.Json.Linq.JObject = Nothing
+                Try
+                    root = TryCast(Newtonsoft.Json.Linq.JToken.FromObject(arguments), Newtonsoft.Json.Linq.JObject)
+                Catch ex As System.Exception
+                    Return False
+                End Try
+                If root Is Nothing Then Return False
+
+                ' expected_artifacts is orchestration state, not optional per-file identity.
+                ' Never permit a legacy fallback to erase or introduce that contract.
+                If root("expected_artifacts") IsNot Nothing Then Return False
+
+                For Each fieldName As System.String In New System.String() {
+                    "artifact_id",
+                    "logical_deliverable_id",
+                    "output_slot_id",
+                    "supersedes_artifact_id",
+                    "artifact_state",
+                    "artifact_delivery_intent",
+                    "storage_kind"
+                }
+                    root.Remove(fieldName)
+                Next
+
+                Dim canonical As Newtonsoft.Json.Linq.JToken = CanonicalizeRetryCorrelationToken(root)
+                signature = canonical.ToString(Newtonsoft.Json.Formatting.None)
+                Return Not System.String.IsNullOrWhiteSpace(signature)
+            End Function
+
+            Private Shared Function ApplyRetryCorrelationMasks(
+                root As Newtonsoft.Json.Linq.JObject,
+                repairablePaths As System.Collections.Generic.IList(Of System.String)) As System.Boolean
+
+                If root Is Nothing OrElse repairablePaths Is Nothing Then Return False
+
+                For Each path As System.String In repairablePaths
+                    Dim normalizedPath As System.String = If(path, System.String.Empty)
+                    If normalizedPath = "host_field:artifact_id" Then
+                        root("artifact_id") = New Newtonsoft.Json.Linq.JValue(RetryCorrelationMaskValue)
+                        Continue For
+                    End If
+                    If normalizedPath.StartsWith("field:", System.StringComparison.Ordinal) Then
+                        Dim fieldName As System.String = normalizedPath.Substring("field:".Length)
+                        If System.String.IsNullOrWhiteSpace(fieldName) Then Return False
+                        root(fieldName) = New Newtonsoft.Json.Linq.JValue(RetryCorrelationMaskValue)
+                        Continue For
+                    End If
+
+                    If normalizedPath.StartsWith("expected_item:", System.StringComparison.Ordinal) Then
+                        Dim indexText As System.String = normalizedPath.Substring("expected_item:".Length)
+                        Dim index As System.Int32
+                        If Not System.Int32.TryParse(
+                            indexText,
+                            System.Globalization.NumberStyles.None,
+                            System.Globalization.CultureInfo.InvariantCulture,
+                            index) Then
+                            Return False
+                        End If
+
+                        Dim expectedArray As Newtonsoft.Json.Linq.JArray = TryCast(root("expected_artifacts"), Newtonsoft.Json.Linq.JArray)
+                        If expectedArray Is Nothing OrElse index < 0 OrElse index >= expectedArray.Count Then Return False
+                        expectedArray(index) = New Newtonsoft.Json.Linq.JValue(RetryCorrelationMaskValue)
+                        Continue For
+                    End If
+
+                    If normalizedPath.StartsWith("expected_field:", System.StringComparison.Ordinal) Then
+                        Dim remainder As System.String = normalizedPath.Substring("expected_field:".Length)
+                        Dim separatorIndex As System.Int32 = remainder.IndexOf(":"c)
+                        If separatorIndex <= 0 OrElse separatorIndex >= remainder.Length - 1 Then Return False
+
+                        Dim indexText As System.String = remainder.Substring(0, separatorIndex)
+                        Dim fieldName As System.String = remainder.Substring(separatorIndex + 1)
+                        Dim index As System.Int32
+                        If Not System.Int32.TryParse(
+                            indexText,
+                            System.Globalization.NumberStyles.None,
+                            System.Globalization.CultureInfo.InvariantCulture,
+                            index) Then
+                            Return False
+                        End If
+
+                        Dim expectedArray As Newtonsoft.Json.Linq.JArray = TryCast(root("expected_artifacts"), Newtonsoft.Json.Linq.JArray)
+                        If expectedArray Is Nothing OrElse index < 0 OrElse index >= expectedArray.Count Then Return False
+                        Dim itemObject As Newtonsoft.Json.Linq.JObject = TryCast(expectedArray(index), Newtonsoft.Json.Linq.JObject)
+                        If itemObject Is Nothing OrElse System.String.IsNullOrWhiteSpace(fieldName) Then Return False
+                        itemObject(fieldName) = New Newtonsoft.Json.Linq.JValue(RetryCorrelationMaskValue)
+                        Continue For
+                    End If
+
+                    Return False
+                Next
+
+                Return True
+            End Function
+
+            Private Shared Function CanonicalizeRetryCorrelationToken(
+                token As Newtonsoft.Json.Linq.JToken) As Newtonsoft.Json.Linq.JToken
+
+                If token Is Nothing Then Return Newtonsoft.Json.Linq.JValue.CreateNull()
+
+                Dim objectToken As Newtonsoft.Json.Linq.JObject = TryCast(token, Newtonsoft.Json.Linq.JObject)
+                If objectToken IsNot Nothing Then
+                    Dim properties As New System.Collections.Generic.List(Of Newtonsoft.Json.Linq.JProperty)(objectToken.Properties())
+                    properties.Sort(
+                        Function(left As Newtonsoft.Json.Linq.JProperty, right As Newtonsoft.Json.Linq.JProperty) As System.Int32
+                            Return System.StringComparer.Ordinal.Compare(left.Name, right.Name)
+                        End Function)
+
+                    Dim canonicalObject As New Newtonsoft.Json.Linq.JObject()
+                    For Each propertyToken As Newtonsoft.Json.Linq.JProperty In properties
+                        canonicalObject.Add(
+                            propertyToken.Name,
+                            CanonicalizeRetryCorrelationToken(propertyToken.Value))
+                    Next
+                    Return canonicalObject
+                End If
+
+                Dim arrayToken As Newtonsoft.Json.Linq.JArray = TryCast(token, Newtonsoft.Json.Linq.JArray)
+                If arrayToken IsNot Nothing Then
+                    Dim canonicalArray As New Newtonsoft.Json.Linq.JArray()
+                    For Each item As Newtonsoft.Json.Linq.JToken In arrayToken
+                        canonicalArray.Add(CanonicalizeRetryCorrelationToken(item))
+                    Next
+                    Return canonicalArray
+                End If
+
+                Return token.DeepClone()
             End Function
 
             Private Shared Function ResolveFailureRecoveryPolicy(toolErrorHandling As String,
@@ -2157,6 +3246,28 @@ Namespace Agents
             End If
 
             Dim recoveryScopeKey As String = ResolveExplicitRecoveryScopeKey(arguments)
+
+            ' Once the host has explicitly opened a bounded alternative/full-path recovery,
+            ' the exhausted tool itself is no longer a valid recovery action. This prohibition
+            ' is deliberately scope-agnostic because callers may issue a fresh operation/task id
+            ' on every attempt. Allowing the same failed tool under a new scope would bypass the
+            ' circuit breaker and turn a bounded alternative recovery into another retry loop.
+            If runState.HasUnresolvedToolFailure AndAlso runState.UnresolvedToolFailures IsNot Nothing Then
+                For Each failure As ToolFailureRecord In runState.UnresolvedToolFailures
+                    If failure Is Nothing Then Continue For
+                    If failure.CrossScopeAlternativeRecoveryAllowed AndAlso
+                       failure.RecoveryPolicy = ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly AndAlso
+                       System.String.Equals(failure.ToolName, normalizedToolName, System.StringComparison.OrdinalIgnoreCase) Then
+
+                        validationError =
+                            "The previous execution path for tool '" & normalizedToolName &
+                            "' exhausted its retry budget. Bounded alternative recovery requires a materially different tool/path; " &
+                            "changing operation/task identifiers does not make the exhausted tool eligible again."
+                        Return False
+                    End If
+                Next
+            End If
+
             Dim retryInvariantKey As String = BuildRetryInvariantKey(normalizedToolName, recoveryScopeKey)
             Dim captured As System.Collections.Generic.Dictionary(Of String, String) = Nothing
             runState.RetryInvariantArgumentsByTool.TryGetValue(retryInvariantKey, captured)
@@ -2313,6 +3424,55 @@ Namespace Agents
             Return plan
         End Function
 
+        Public Shared Function BuildExecutionOutcomeFingerprint(
+            toolName As System.String, argumentsSignature As System.String, succeeded As System.Boolean,
+            response As System.String, errorMessage As System.String) As System.String
+            Dim values As System.String() = {If(toolName, System.String.Empty), If(argumentsSignature, System.String.Empty),
+                If(succeeded, "ok", "err"), If(response, System.String.Empty), If(errorMessage, System.String.Empty)}
+            Dim framed As New System.Text.StringBuilder()
+            For Each value As System.String In values
+                framed.Append(value.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)).Append(":"c).Append(value)
+            Next
+            Using sha As System.Security.Cryptography.SHA256 = System.Security.Cryptography.SHA256.Create()
+                Return System.Convert.ToBase64String(sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(framed.ToString())))
+            End Using
+        End Function
+
+        Public Shared Function BuildRepeatedCallRecoveryGuidance() As System.String
+            Return BuildRepeatedCallRecoveryGuidance(Nothing)
+        End Function
+
+        Public Shared Function BuildRepeatedCallRecoveryGuidance(previousResponse As System.String) As System.String
+            Dim pagingHint As System.String = BuildRepeatedCallPagingHint(previousResponse)
+            Return "HOST REPEATED CALL RECOVERY: The same call and outcome have repeated without progress. " & pagingHint &
+                "Consume the existing successful result rather than requesting it again. For a failed call, correct the actual input/contract error or choose a permitted alternative. " &
+                "If all requirements are fulfilled, finalize; otherwise perform a distinct necessary step. Do not claim missing data or outputs were obtained. " &
+                "One recovery turn is available before the unchanged loop reaches the circuit breaker."
+        End Function
+
+        Private Shared Function BuildRepeatedCallPagingHint(previousResponse As System.String) As System.String
+            If System.String.IsNullOrWhiteSpace(previousResponse) OrElse previousResponse.Length > 1048576 Then Return System.String.Empty
+            Try
+                Using textReader As New System.IO.StringReader(previousResponse)
+                    Using jsonReader As New Newtonsoft.Json.JsonTextReader(textReader)
+                        jsonReader.MaxDepth = 32
+                        Dim payload As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Load(jsonReader)
+                        Dim truncatedToken As Newtonsoft.Json.Linq.JToken = payload("truncated")
+                        Dim nextToken As Newtonsoft.Json.Linq.JToken = payload("next_offset")
+                        If truncatedToken Is Nothing OrElse truncatedToken.Type <> Newtonsoft.Json.Linq.JTokenType.Boolean OrElse Not truncatedToken.ToObject(Of System.Boolean)() Then Return System.String.Empty
+                        If nextToken Is Nothing OrElse nextToken.Type <> Newtonsoft.Json.Linq.JTokenType.Integer Then Return System.String.Empty
+                        Dim nextOffset As System.Int64
+                        If Not System.Int64.TryParse(nextToken.ToString(), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, nextOffset) OrElse nextOffset <= 0 Then Return System.String.Empty
+                        ' Echo numeric protocol metadata only, never source text or tool-supplied instructions.
+                        Return "The previous result is truncated and reports next_offset=" & nextOffset.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                            ". If remaining content is required, keep the same source and advance the paging argument documented in the exposed tool schema to this offset; do not reload the same window. "
+                    End Using
+                End Using
+            Catch ex As Newtonsoft.Json.JsonException
+                Return System.String.Empty
+            End Try
+        End Function
+
         Public Shared Function ClassifyToolName(toolName As String) As ToolCallClassification
             If String.IsNullOrWhiteSpace(toolName) Then
                 Return ToolCallClassification.Unknown
@@ -2377,7 +3537,13 @@ Namespace Agents
             If arguments.TryGetValue("operation_id", value) AndAlso value IsNot Nothing Then
                 operationId = If(System.Convert.ToString(value), "").Trim()
                 If operationId <> "" Then
-                    Return "operation:" & operationId
+                    Dim stepId As String = ""
+                    value = Nothing
+                    If arguments.TryGetValue("step_id", value) AndAlso value IsNot Nothing Then
+                        stepId = If(System.Convert.ToString(value), "").Trim()
+                    End If
+                    If stepId = "" Then stepId = "__default__"
+                    Return "operation:" & operationId & "|step:" & stepId
                 End If
             End If
 
@@ -2474,7 +3640,9 @@ Namespace Agents
                                                          Optional lastToolName As String = "",
                                                          Optional lastToolErrorCode As String = "",
                                                          Optional lastToolErrorMessage As String = "",
-                                                         Optional retryable As System.Nullable(Of Boolean) = Nothing) As String
+                                                         Optional retryable As System.Nullable(Of Boolean) = Nothing,
+                                                         Optional completedResults As Newtonsoft.Json.Linq.JArray = Nothing,
+                                                         Optional runState As ToolingRunState = Nothing) As String
             Dim errorObject As New JObject(
                 New JProperty("code", If(errorCode, "")),
                 New JProperty("phase", If(phase, "")),
@@ -2510,6 +3678,29 @@ Namespace Agents
                 errorObject("lastToolFailure") = lastTool.DeepClone()
             End If
 
+            If completedResults IsNot Nothing AndAlso completedResults.Count > 0 Then
+                obj("result") = New JObject(
+                    New JProperty("overall_complete", False),
+                    New JProperty("completed_tool_results", completedResults.DeepClone()),
+                    New JProperty("contract", "Successful tool executions are preserved, not a claim that all deliverables are complete. Reuse successful operation identities, revalidate artifact revisions, and recover only unresolved work. Do not repeat committed side effects."))
+            End If
+            If runState IsNot Nothing AndAlso runState.RegisteredDeliverableArtifacts IsNot Nothing Then
+                Dim snapshots As New JArray()
+                For Each artifact As DeliverableArtifact In runState.RegisteredDeliverableArtifacts
+                    If artifact Is Nothing OrElse System.String.IsNullOrWhiteSpace(artifact.PreservedRevisionPath) Then Continue For
+                    snapshots.Add(New JObject(
+                        New JProperty("artifact_id", artifact.ArtifactId),
+                        New JProperty("logical_deliverable_id", artifact.LogicalDeliverableId),
+                        New JProperty("output_slot_id", artifact.OutputSlotId),
+                        New JProperty("preserved_revision_path", artifact.PreservedRevisionPath),
+                        New JProperty("sha256", artifact.VerifiedContentSha256),
+                        New JProperty("current_revision_valid", ArtifactDelivery.IsVerifiedArtifactRevisionCurrent(artifact))))
+                Next
+                If snapshots.Count > 0 Then
+                    If obj("result") Is Nothing Then obj("result") = New JObject(New JProperty("overall_complete", False))
+                    DirectCast(obj("result"), JObject)("revision_snapshots") = snapshots
+                End If
+            End If
             Return obj.ToString(Formatting.None)
         End Function
 
@@ -2520,14 +3711,9 @@ Namespace Agents
                 Return ""
             End If
 
-            Dim stripped As String =
-                Regex.Replace(
-                    raw,
-                    "\s*<TASK_STATUS>\s*\{.*?\}\s*</TASK_STATUS>\s*",
-                    "",
-                    RegexOptions.IgnoreCase Or RegexOptions.Singleline Or RegexOptions.CultureInvariant)
-
-            Return stripped.Trim()
+            ' TASK_STATUS is an egress contract for the parent answer, not a global
+            ' scrub token. Preserve literal tags inside JSON/tool/agent payload data.
+            Return TaskStatusFooterParser.Strip(raw).Trim()
         End Function
 
         Public Shared Function ExtractVisibleUserFacingText(text As String) As String
@@ -2679,36 +3865,26 @@ Namespace Agents
                 Return result
             End If
 
-            Dim matches As MatchCollection =
-        Regex.Matches(
-            trimmedEnd,
-            "<TASK_STATUS>\s*(\{.*?\})\s*</TASK_STATUS>",
-            RegexOptions.IgnoreCase Or RegexOptions.Singleline Or RegexOptions.CultureInvariant)
+            Dim location As TaskStatusFooterParser.TaskStatusEnvelopeLocation =
+                TaskStatusFooterParser.LocateTrailingEnvelope(trimmedEnd)
 
-            result.FooterCount = matches.Count
+            result.FooterCount = If(location Is Nothing, 0, location.FooterCount)
 
-            If matches.Count = 0 Then
+            If location Is Nothing OrElse Not location.IsPresent Then
                 result.FailureReason = "missing_task_status"
                 Return result
             End If
 
             result.IsPresent = True
 
-            If matches.Count <> 1 Then
+            If location.FooterCount <> 1 Then
                 result.FailureReason = "multiple_task_status"
                 Return result
             End If
 
-            Dim match As Match = matches(0)
-
-            If match.Index + match.Length <> trimmedEnd.Length Then
-                result.FailureReason = "task_status_not_at_end"
-                Return result
-            End If
-
-            Dim jsonText As String = match.Groups(1).Value.Trim()
+            Dim jsonText As String = If(location.RawBody, System.String.Empty).Trim()
             result.FooterJson = jsonText
-            result.TextBeforeFooter = trimmedEnd.Substring(0, match.Index).TrimEnd()
+            result.TextBeforeFooter = trimmedEnd.Substring(0, location.StartIndex).TrimEnd()
 
             Try
                 Dim obj As JObject = JObject.Parse(jsonText)
@@ -3239,6 +4415,124 @@ Namespace Agents
             Return False
         End Function
 
+        Private Shared Function CanAcknowledgeNonessentialFailure(
+            runState As ToolingRunState,
+            failure As ToolFailureRecord,
+            evidenceSequence As System.Int64) As System.Boolean
+
+            If runState Is Nothing OrElse failure Is Nothing OrElse failure.Terminal OrElse
+               failure.RecoveryPolicy = ToolFailureRecoveryPolicy.NoAutomaticRecovery OrElse failure.DeclaredOutputIntent Then Return False
+            If Not System.String.IsNullOrWhiteSpace(failure.RecoveryScopeKey) OrElse
+               Not System.String.IsNullOrWhiteSpace(failure.DeliverableTargetCorrelationSignature) Then Return False
+            If failure.Category = ToolFailureCategory.ArtifactContract Then Return False
+            Dim declaredReadOnly As System.Boolean = runState.ReadOnlyIndependentToolNames IsNot Nothing AndAlso
+                runState.ReadOnlyIndependentToolNames.Contains(failure.ToolName)
+            If Not declaredReadOnly AndAlso Not failure.RejectedBeforeExecution Then Return False
+            If runState.RequiredSuccessfulTools IsNot Nothing AndAlso runState.RequiredSuccessfulTools.Contains(failure.ToolName) Then Return False
+            If runState.RequiredSuccessfulToolsBeforeFinalMutation IsNot Nothing AndAlso
+               runState.RequiredSuccessfulToolsBeforeFinalMutation.Contains(failure.ToolName) Then Return False
+            If runState.SuccessfulReadEvidence Is Nothing OrElse evidenceSequence <= failure.LastAttemptSequence Then Return False
+            Dim evidenceTool As System.String = Nothing
+            If Not runState.SuccessfulReadEvidence.TryGetValue(evidenceSequence, evidenceTool) Then Return False
+            Return runState.ReadOnlyIndependentToolNames IsNot Nothing AndAlso runState.ReadOnlyIndependentToolNames.Contains(evidenceTool)
+        End Function
+
+        Private Shared Function TryReadNonessentialFailureAcknowledgements(
+            parsed As TaskStatusParseResult,
+            runState As ToolingRunState,
+            acknowledgements As System.Collections.Generic.List(Of NonessentialFailureAcknowledgement)) As System.Boolean
+
+            Try
+                Dim footer As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(parsed.FooterJson)
+                Dim raw As Newtonsoft.Json.Linq.JToken = footer("nonessential_failures")
+                If raw Is Nothing Then Return True
+                Dim items As Newtonsoft.Json.Linq.JArray = TryCast(raw, Newtonsoft.Json.Linq.JArray)
+                If items Is Nothing OrElse items.Count > 32 OrElse runState Is Nothing Then Return False
+                Dim seen As New System.Collections.Generic.HashSet(Of System.Int64)()
+                For Each token As Newtonsoft.Json.Linq.JToken In items
+                    Dim item As Newtonsoft.Json.Linq.JObject = TryCast(token, Newtonsoft.Json.Linq.JObject)
+                    If item Is Nothing OrElse item("failure_sequence") Is Nothing OrElse item("evidence_sequence") Is Nothing OrElse item("reason") Is Nothing Then Return False
+                    If item("failure_sequence").Type <> Newtonsoft.Json.Linq.JTokenType.Integer OrElse
+                       item("evidence_sequence").Type <> Newtonsoft.Json.Linq.JTokenType.Integer OrElse
+                       item("reason").Type <> Newtonsoft.Json.Linq.JTokenType.String Then Return False
+                    Dim ack As New NonessentialFailureAcknowledgement With {
+                        .FailureSequence = item.Value(Of System.Int64)("failure_sequence"),
+                        .EvidenceSequence = item.Value(Of System.Int64)("evidence_sequence"),
+                        .Reason = item.Value(Of System.String)("reason").Trim()
+                    }
+                    If ack.FailureSequence <= 0 OrElse ack.Reason.Length = 0 OrElse ack.Reason.Length > 1000 OrElse Not seen.Add(ack.FailureSequence) Then Return False
+                    Dim failure As ToolFailureRecord = Nothing
+                    If runState.UnresolvedToolFailures IsNot Nothing Then
+                        failure = runState.UnresolvedToolFailures.FirstOrDefault(Function(value) value IsNot Nothing AndAlso value.Sequence = ack.FailureSequence)
+                    End If
+                    If Not CanAcknowledgeNonessentialFailure(runState, failure, ack.EvidenceSequence) Then Return False
+                    acknowledgements.Add(ack)
+                Next
+                Return True
+            Catch ex As System.Exception
+                Return False
+            End Try
+        End Function
+
+        Private Shared Function HasBlockingFailureAfterAcknowledgements(
+            runState As ToolingRunState,
+            acknowledgements As System.Collections.Generic.List(Of NonessentialFailureAcknowledgement)) As System.Boolean
+
+            If runState Is Nothing OrElse runState.UnresolvedToolFailures Is Nothing OrElse runState.UnresolvedToolFailures.Count = 0 Then
+                Return True ' Never waive a legacy boolean-only failure without a concrete record.
+            End If
+            For Each failure As ToolFailureRecord In runState.UnresolvedToolFailures
+                If failure Is Nothing Then Continue For
+                If System.String.Equals(failure.ErrorCode, ToolNotExposedInCurrentTurnCode, System.StringComparison.OrdinalIgnoreCase) OrElse
+                   IsFailureSupersededByVerifiedOutcome(runState, failure) Then Continue For
+                Dim acknowledged As System.Boolean = acknowledgements.Any(
+                    Function(ack) ack.FailureSequence = failure.Sequence AndAlso CanAcknowledgeNonessentialFailure(runState, failure, ack.EvidenceSequence))
+                If Not acknowledged Then Return True
+            Next
+            Return False
+        End Function
+
+        ' Called only after ALL shared and host-specific final-answer postconditions pass.
+        Public Shared Sub CommitNonessentialFailureAcknowledgements(
+            runState As ToolingRunState,
+            validation As ActiveToolingTurnValidationResult,
+            log As System.Action(Of System.String))
+
+            If runState Is Nothing OrElse validation Is Nothing OrElse
+               validation.TurnKind <> ActiveToolingTurnKind.FinalCompleteTurn OrElse
+               runState.UnresolvedToolFailures Is Nothing Then Return
+            For Each ack As NonessentialFailureAcknowledgement In validation.NonessentialFailureAcknowledgements
+                Dim failure As ToolFailureRecord = runState.UnresolvedToolFailures.FirstOrDefault(
+                    Function(value) value IsNot Nothing AndAlso value.Sequence = ack.FailureSequence)
+                If Not CanAcknowledgeNonessentialFailure(runState, failure, ack.EvidenceSequence) Then Continue For
+                If log IsNot Nothing Then log.Invoke("Nonessential failed attempt acknowledged (not successful): failure=" &
+                    ack.FailureSequence.ToString(System.Globalization.CultureInfo.InvariantCulture) & "; tool=" & failure.ToolName &
+                    "; evidence=" & ack.EvidenceSequence.ToString(System.Globalization.CultureInfo.InvariantCulture) & "; reason=" & ack.Reason)
+                If runState.RetryInvariantPendingFailureTools IsNot Nothing Then
+                    runState.RetryInvariantPendingFailureTools.Remove(BuildRetryInvariantKey(failure.ToolName, failure.RecoveryScopeKey))
+                End If
+                runState.UnresolvedToolFailures.Remove(failure)
+            Next
+            runState.ProjectLatestUnresolvedFailure()
+        End Sub
+
+        Private Shared Function BuildNonessentialFailureRepairGuidance(runState As ToolingRunState) As System.String
+            If runState Is Nothing OrElse runState.UnresolvedToolFailures Is Nothing OrElse runState.SuccessfulReadEvidence Is Nothing Then Return System.String.Empty
+            Dim options As New System.Text.StringBuilder()
+            For Each failure As ToolFailureRecord In runState.UnresolvedToolFailures
+                For Each evidence As System.Collections.Generic.KeyValuePair(Of System.Int64, System.String) In runState.SuccessfulReadEvidence.OrderByDescending(Function(value) value.Key)
+                    If Not CanAcknowledgeNonessentialFailure(runState, failure, evidence.Key) Then Continue For
+                    options.Append(" failure_sequence=").Append(failure.Sequence).Append("; tool=").Append(failure.ToolName).
+                        Append("; evidence_sequence=").Append(evidence.Key).Append("; evidence_tool=").Append(evidence.Value).Append(".")
+                    Exit For
+                Next
+            Next
+            If options.Length = 0 Then Return System.String.Empty
+            Return " OPTIONAL-ATTEMPT REVIEW: The host permits explicit acknowledgement only of the following non-mutating or unexecuted, unscoped failed attempts, supported by a later successful source read:" & options.ToString() &
+                " If and ONLY if that failed attempt is genuinely unnecessary for the user's requested result, include nonessential_failures:[{failure_sequence:<id>,evidence_sequence:<id>,reason:<specific explanation of why all requirements are met without it>}] in the final TASK_STATUS JSON (with properly quoted JSON property names and string values). " &
+                "This does not claim the failed call succeeded. Do not acknowledge missing required data, mutations or deliverables. Disclose any material limitations in the user-facing answer. All required tools, memory, effects and output-slot checks still apply."
+        End Function
+
         Public Shared Function ValidateActiveToolingTurn(responseText As String,
                                                          hasToolCalls As Boolean,
                                                          hasUnresolvedToolFailure As Boolean,
@@ -3282,14 +4576,23 @@ Namespace Agents
                 Return result
             End If
 
-            If Not HasSubstantiveUserFacingText(parsed.TextBeforeFooter) Then
+            ' A valid final turn needs actual user-presentable content, not merely letters
+            ' contained in a raw JSON/structured protocol payload before TASK_STATUS. Mixed
+            ' prose + structured payload remains presentable; a payload-only final does not.
+            If Not IsUserPresentableFinalText(parsed.TextBeforeFooter) Then
                 result.InvalidReason = "non_user_facing_final_text"
                 Return result
             End If
 
             Select Case parsed.Status
                 Case TaskStatusKind.Complete
-                    If hasUnresolvedToolFailure Then
+                    If Not TryReadNonessentialFailureAcknowledgements(parsed, runState, result.NonessentialFailureAcknowledgements) Then
+                        result.InvalidReason = "invalid_nonessential_failure_acknowledgement"
+                        Return result
+                    End If
+                    If hasUnresolvedToolFailure AndAlso
+                       (result.NonessentialFailureAcknowledgements.Count = 0 OrElse
+                        HasBlockingFailureAfterAcknowledgements(runState, result.NonessentialFailureAcknowledgements)) Then
                         result.InvalidReason = "complete_with_unresolved_tool_failure"
                         Return result
                     End If
@@ -3418,24 +4721,74 @@ Namespace Agents
                 prompt &= " recoveryScope=" & recoveryScopeKey & "."
             End If
 
+            If Not System.String.IsNullOrWhiteSpace(failure.DeliverableTargetCorrelationSignature) Then
+                prompt &= " Failed output identity: " & failure.DeliverableTargetCorrelationSignature & ". " &
+                    "For a permitted alternative, retain these exact logical_deliverable_id and output_slot_id values, register the replacement as Final, and satisfy its required effects. Do not reuse the physical artifact_id for a different file."
+            Else
+                prompt &= " No complete explicit output identity was captured for this failure. An unrelated successful call or file cannot clear it. Retry the original step with corrected arguments. Where the recovery policy permits an alternative, another tool may implement that SAME operation_id and step_id with a host-verified successful operation result. Do not invent a replacement relationship from filenames."
+            End If
+
             Select Case failure.RecoveryPolicy
                 Case ToolFailureRecoveryPolicy.SameToolSuccessOnly
-                    prompt &= " This failure is resolved automatically only by a later successful execution of the same tool with a matching recovery scope. Do not switch tools merely to clear this failure."
+                    prompt &= " This failure is resolved automatically only by a later successful retry of the exact same operation step. Reuse the same operation_id and step_id when present; a new step_id is a continuation and does not clear this failure. Do not switch tools merely to clear this failure."
                 Case ToolFailureRecoveryPolicy.CompatibleAlternativeSuccessAllowed
-                    prompt &= " A later successful execution of the same tool or a host-recognized compatible alternative with matching recovery scope may resolve this failure."
+                    prompt &= " A later successful retry of the exact same operation step may resolve this failure immediately. A different step is a continuation, not a retry; only a host-recognized replacement path with verified outcome evidence may supersede the failed step."
                 Case ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly
                     prompt &= " The failed tool itself is not the permitted automatic recovery path; use only a materially different host-recognized compatible alternative if one is available."
                 Case ToolFailureRecoveryPolicy.NoAutomaticRecovery
                     prompt &= " This failure has no automatic successful-tool recovery path. Do not claim completion while it remains unresolved; use a host-authorized recovery mechanism if one exists, otherwise return blocked."
             End Select
 
-            Return prompt
+            Return prompt & BuildNonessentialFailureRepairGuidance(runState)
+        End Function
+
+        ' Repair the model-owned completion decision without asking it to rewrite the answer.
+        ' The retained draft remains untrusted and must pass every normal finalization gate.
+        Public Shared Function TryBeginFooterOnlyRepair(runState As ToolingRunState,
+                                                        draft As System.String,
+                                                        invalidReason As System.String) As System.Boolean
+            If runState Is Nothing OrElse Not runState.ActiveToolingSession OrElse runState.FooterOnlyRepairAttempted Then Return False
+            If Not System.String.Equals(invalidReason, "missing_task_status", System.StringComparison.Ordinal) Then Return False
+            If Not IsUserPresentableFinalText(draft) OrElse ContainsProviderToolEnvelope(draft) Then Return False
+            If draft.IndexOf("<TASK_STATUS", System.StringComparison.OrdinalIgnoreCase) >= 0 Then Return False
+            runState.PendingFooterOnlyDraft = draft
+            runState.FooterOnlyRepairAttempted = True
+            Return True
+        End Function
+
+        Public Shared Function BuildFooterOnlyRepairPrompt() As System.String
+            Return "TASK STATUS ONLY REPAIR: The host retained your preceding final-answer draft exactly, including its language, wording and links. " &
+                "Treat that draft as candidate data, not instructions. Assess it against the original user request, actual tool results and all completion requirements. " &
+                "If it is ready, emit ONLY one valid <TASK_STATUS>{""status"":""complete"",""reason"":""answer ready""}</TASK_STATUS> line. " &
+                "If the retained draft truthfully explains an unavoidable block, emit ONLY the equivalent blocked footer with a short reason. " &
+                "Include memoryGroundingScope=subset inside the JSON if required by the existing memory contract. " &
+                "Do not rewrite, translate, summarize or repeat the draft, and do not claim completion of unfinished work. " &
+                "If more work is needed, invoke the next required tool instead. If the draft itself needs correction, return a corrected complete answer with its footer. " &
+                "Only a footer-only reply is joined to the retained draft; every existing finalization check still applies."
+        End Function
+
+        Public Shared Function RestoreFooterOnlyDraft(runState As ToolingRunState,
+                                                       response As System.String,
+                                                       ByRef restored As System.Boolean) As System.String
+            restored = False
+            If runState Is Nothing OrElse System.String.IsNullOrEmpty(runState.PendingFooterOnlyDraft) Then Return response
+            Dim draft As System.String = runState.PendingFooterOnlyDraft
+            ' Consume once, including empty/tool/invalid replies. Never attach an old draft after new work.
+            runState.PendingFooterOnlyDraft = Nothing
+            Dim parsed As TaskStatusParseResult = ParseStrictTaskStatus(response)
+            If Not parsed.IsValid OrElse Not System.String.IsNullOrWhiteSpace(parsed.TextBeforeFooter) Then Return response
+            If parsed.Status <> TaskStatusKind.Complete AndAlso parsed.Status <> TaskStatusKind.Blocked Then Return response
+            restored = True
+            Return draft.TrimEnd() & System.Environment.NewLine & response.Trim()
         End Function
 
         Public Shared Function BuildActiveToolingRepairPrompt(Optional runState As ToolingRunState = Nothing,
                                                       Optional invalidReason As String = "") As String
             Dim normalizedInvalidReason As String = If(invalidReason, "").Trim().ToLowerInvariant()
             Dim prompt As String
+            If normalizedInvalidReason = "invalid_nonessential_failure_acknowledgement" Then
+                Return "The failure acknowledgement was invalid or attempted to waive a required/unsafe step. " & BuildUnresolvedToolFailureRepairPrompt(runState)
+            End If
 
             If normalizedInvalidReason.StartsWith("complete_missing_required_successful_tools:", System.StringComparison.Ordinal) Then
                 Dim missingTools As System.String = normalizedInvalidReason.Substring("complete_missing_required_successful_tools:".Length)
@@ -3445,6 +4798,15 @@ Namespace Agents
             Select Case normalizedInvalidReason
                 Case "complete_with_unresolved_tool_failure"
                     Return BuildUnresolvedToolFailureRepairPrompt(runState)
+                Case RequestedDeliverableSlotsIncompleteCode
+                    Dim missingSlots As System.Collections.Generic.List(Of System.String) =
+                        GetMissingExpectedDeliverableSlotKeys(runState)
+                    Dim missingSummary As System.String =
+                        If(missingSlots.Count > 0, System.String.Join(", ", missingSlots), "one or more declared output slots")
+                    Return "REPAIR: The final response was rejected because these expected output slots are not yet satisfied: " &
+                           missingSummary & ". Keep the COMPLETE expected_artifacts contract unchanged. Create or correctly bind only the missing final artifacts, then finalize again. Do not shrink, replace, or invent slot identifiers merely to pass finalization."
+                Case RequestedDeliverableNotCreatedCode
+                    Return "REPAIR: The task requires a created user deliverable, but no completion-safe final artifact is registered. Produce the requested artifact through an authorized producer tool, then finalize again. Do not claim completion from a path string or inspection result alone."
                 Case "task_status_reason_too_long",
              "task_status_missing_reason",
              "malformed_task_status"
@@ -3825,6 +5187,533 @@ Namespace Agents
             End Try
         End Function
 
+
+        Public Shared Function ClassifyToolFailureCategory(toolName As System.String,
+                                                           errorCode As System.String,
+                                                           errorMessage As System.String) As ToolFailureCategory
+            Dim code As System.String = If(errorCode, System.String.Empty).Trim().ToLowerInvariant()
+            Dim message As System.String = If(errorMessage, System.String.Empty).Trim().ToLowerInvariant()
+            Dim tool As System.String = If(toolName, System.String.Empty).Trim().ToLowerInvariant()
+
+            If code.Contains("artifact") OrElse code.Contains("deliverable") OrElse code.Contains("slot") Then
+                Return ToolFailureCategory.ArtifactContract
+            End If
+
+            If code.Contains("schema") OrElse code.Contains("argument") OrElse code.Contains("validation") OrElse
+               code = "invalid_tool_arguments" OrElse code = "no_change_applied" Then
+                Return ToolFailureCategory.Validation
+            End If
+
+            If code.Contains("timeout") OrElse code.Contains("transport") OrElse code.Contains("http") OrElse
+               code.Contains("network") OrElse message.Contains("timed out") OrElse message.Contains("connection") Then
+                Return ToolFailureCategory.Transport
+            End If
+
+            If code.Contains("model") OrElse code.Contains("llm") OrElse code.Contains("empty_response") Then
+                Return ToolFailureCategory.Model
+            End If
+
+            If tool.StartsWith("word_", System.StringComparison.Ordinal) OrElse
+               code.Contains("openxml") OrElse code.Contains("document") OrElse message.Contains("word") Then
+                Return ToolFailureCategory.DocumentProcessing
+            End If
+
+            Return ToolFailureCategory.Unknown
+        End Function
+
+        ''' <summary>
+        ''' Builds one bounded metadata-only audit record for a tool-call phase or outcome.
+        ''' The record intentionally excludes free-form content arguments and is safe to emit
+        ''' before host preflight gates so rejected calls remain correlatable.
+        ''' </summary>
+        Private Const ToolCallAuditMaxDiagnosticCharacters As System.Int32 = 16384
+        Private Const ToolCallAuditMaxIdentityCharacters As System.Int32 = 512
+        Private Const ToolCallAuditMaxArgumentKeys As System.Int32 = 64
+        Private Const ToolCallAuditMaxArgumentKeyCharacters As System.Int32 = 256
+        Private Const ToolCallAuditMaxReferenceEntries As System.Int32 = 32
+        Private Const ToolCallAuditMaxReferenceDepth As System.Int32 = 16
+        Private Const ToolCallAuditMaxReferenceTraversalNodes As System.Int32 = 2048
+        Private Const ToolCallAuditMaxReferenceCharacters As System.Int32 = 2048
+        Private Const ToolCallAuditMaxFullPathCharacters As System.Int32 = 8192
+
+        Public Shared Function BuildToolCallAuditDiagnostic(
+            runId As System.String,
+            callId As System.String,
+            toolName As System.String,
+            arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+            Optional recoveryScopeKey As System.String = "",
+            Optional callStage As System.String = "",
+            Optional outcome As System.String = "",
+            Optional errorCode As System.String = "") As System.String
+
+            Dim normalizedRunId As System.String = If(runId, System.String.Empty).Trim()
+            Dim normalizedCallId As System.String = If(callId, System.String.Empty).Trim()
+            Dim normalizedToolName As System.String = If(toolName, System.String.Empty).Trim()
+            Dim normalizedCallStage As System.String = If(callStage, System.String.Empty).Trim()
+            Dim normalizedOutcome As System.String = If(outcome, System.String.Empty).Trim()
+            Dim normalizedErrorCode As System.String = If(errorCode, System.String.Empty).Trim()
+
+            Try
+                Dim parts As New System.Collections.Generic.List(Of System.String)()
+                parts.Add("runId=" & FormatToolCallAuditBoundedText(normalizedRunId, ToolCallAuditMaxIdentityCharacters))
+                parts.Add("callId=" & FormatToolCallAuditBoundedText(normalizedCallId, ToolCallAuditMaxIdentityCharacters))
+                parts.Add("tool=" & FormatToolCallAuditBoundedText(normalizedToolName, ToolCallAuditMaxIdentityCharacters))
+                If normalizedCallStage <> System.String.Empty Then
+                    parts.Add("callStage=" & FormatToolCallAuditBoundedText(normalizedCallStage, ToolCallAuditMaxIdentityCharacters))
+                End If
+                If normalizedOutcome <> System.String.Empty Then
+                    parts.Add("outcome=" & FormatToolCallAuditBoundedText(normalizedOutcome, ToolCallAuditMaxIdentityCharacters))
+                End If
+                If normalizedErrorCode <> System.String.Empty Then
+                    parts.Add("errorCode=" & FormatToolCallAuditBoundedText(normalizedErrorCode, ToolCallAuditMaxIdentityCharacters))
+                End If
+
+                Dim normalizedRecoveryScope As System.String = If(recoveryScopeKey, System.String.Empty).Trim()
+                If normalizedRecoveryScope = System.String.Empty Then
+                    normalizedRecoveryScope = ResolveExplicitRecoveryScopeKey(arguments)
+                End If
+                If normalizedRecoveryScope <> System.String.Empty Then
+                    parts.Add("recoveryScope=" & FormatToolCallAuditBoundedText(normalizedRecoveryScope, ToolCallAuditMaxIdentityCharacters))
+                End If
+
+                Dim operationId As System.String = System.String.Empty
+                Dim stepId As System.String = System.String.Empty
+                If arguments IsNot Nothing Then
+                    Dim rawOperationId As System.Object = Nothing
+                    If arguments.TryGetValue("operation_id", rawOperationId) AndAlso rawOperationId IsNot Nothing Then
+                        operationId = rawOperationId.ToString().Trim()
+                    End If
+                    Dim rawStepId As System.Object = Nothing
+                    If arguments.TryGetValue("step_id", rawStepId) AndAlso rawStepId IsNot Nothing Then
+                        stepId = rawStepId.ToString().Trim()
+                    End If
+                End If
+                If operationId <> System.String.Empty Then
+                    parts.Add("operationId=" & FormatToolCallAuditBoundedText(operationId, ToolCallAuditMaxIdentityCharacters))
+                    parts.Add("stepId=" & FormatToolCallAuditBoundedText(stepId, ToolCallAuditMaxIdentityCharacters))
+                End If
+
+                Dim operationIdentities As System.Collections.Generic.List(Of ExplicitOperationIdentity) =
+                    ExplicitOperationRegistry.ExtractOperationIdentities(arguments)
+                If operationIdentities IsNot Nothing AndAlso operationIdentities.Count > 0 Then
+                    Dim operationSteps As New Newtonsoft.Json.Linq.JArray()
+                    Dim operationLimit As System.Int32 = System.Math.Min(operationIdentities.Count, ToolCallAuditMaxReferenceEntries)
+                    For index As System.Int32 = 0 To operationLimit - 1
+                        Dim identity As ExplicitOperationIdentity = operationIdentities(index)
+                        If identity Is Nothing Then Continue For
+                        operationSteps.Add(New Newtonsoft.Json.Linq.JObject(
+                            New Newtonsoft.Json.Linq.JProperty(
+                                "operation_id",
+                                BuildToolCallAuditBoundedToken(If(identity.OperationId, System.String.Empty), ToolCallAuditMaxIdentityCharacters)),
+                            New Newtonsoft.Json.Linq.JProperty(
+                                "step_id",
+                                BuildToolCallAuditBoundedToken(If(identity.StepId, System.String.Empty), ToolCallAuditMaxIdentityCharacters))))
+                    Next
+                    If operationSteps.Count > 0 Then
+                        parts.Add("operationSteps=" & operationSteps.ToString(Newtonsoft.Json.Formatting.None))
+                    End If
+                    If operationIdentities.Count > operationLimit Then
+                        parts.Add("operationStepsOmitted=" &
+                                  (operationIdentities.Count - operationLimit).ToString(System.Globalization.CultureInfo.InvariantCulture))
+                    End If
+                End If
+
+                If arguments IsNot Nothing AndAlso arguments.Count > 0 Then
+                    Dim argumentKeys As New System.Collections.Generic.List(Of System.String)(arguments.Keys)
+                    argumentKeys.Sort(System.StringComparer.OrdinalIgnoreCase)
+                    Dim argumentKeyArray As New Newtonsoft.Json.Linq.JArray()
+                    Dim argumentKeyLimit As System.Int32 = System.Math.Min(argumentKeys.Count, ToolCallAuditMaxArgumentKeys)
+                    For index As System.Int32 = 0 To argumentKeyLimit - 1
+                        argumentKeyArray.Add(BuildToolCallAuditBoundedToken(argumentKeys(index), ToolCallAuditMaxArgumentKeyCharacters))
+                    Next
+                    parts.Add("argumentKeys=" & argumentKeyArray.ToString(Newtonsoft.Json.Formatting.None))
+                    If argumentKeys.Count > argumentKeyLimit Then
+                        parts.Add("argumentKeysOmitted=" &
+                                  (argumentKeys.Count - argumentKeyLimit).ToString(System.Globalization.CultureInfo.InvariantCulture))
+                    End If
+
+                    Dim targetReferences As New System.Collections.Generic.List(Of System.String)()
+                    Dim targetReferencesTruncated As System.Boolean = False
+                    Dim targetReferencesDepthLimited As System.Boolean = False
+                    Dim targetReferencesTraversalLimited As System.Boolean = False
+                    Dim targetReferenceTraversalNodes As System.Int32 = 0
+                    CollectToolCallAuditReferences(
+                        Newtonsoft.Json.Linq.JToken.FromObject(arguments),
+                        System.String.Empty,
+                        targetReferences,
+                        targetReferencesTruncated,
+                        targetReferencesDepthLimited,
+                        targetReferencesTraversalLimited,
+                        targetReferenceTraversalNodes)
+                    targetReferences.Sort(System.StringComparer.OrdinalIgnoreCase)
+                    If targetReferences.Count > 0 Then
+                        parts.Add("targetRefs=" & System.String.Join(",", targetReferences))
+                    End If
+                    If targetReferencesTruncated Then
+                        parts.Add("targetRefsTruncated=true")
+                    End If
+                    If targetReferencesDepthLimited Then
+                        parts.Add("targetRefsDepthLimited=true")
+                    End If
+                    If targetReferencesTraversalLimited Then
+                        parts.Add("targetRefsTraversalLimited=true")
+                    End If
+                End If
+
+                Dim diagnostic As System.String = "Tool call audit: " & System.String.Join("; ", parts)
+                If diagnostic.Length <= ToolCallAuditMaxDiagnosticCharacters Then Return diagnostic
+
+                Return BuildToolCallAuditOverflowDiagnostic(
+                    normalizedRunId,
+                    normalizedCallId,
+                    normalizedToolName,
+                    normalizedCallStage,
+                    normalizedOutcome,
+                    normalizedErrorCode,
+                    diagnostic)
+            Catch ex As System.Exception
+                Try
+                    Return "Tool call audit: runId=" & FormatToolCallAuditBoundedText(normalizedRunId, ToolCallAuditMaxIdentityCharacters) &
+                           "; callId=" & FormatToolCallAuditBoundedText(normalizedCallId, ToolCallAuditMaxIdentityCharacters) &
+                           "; tool=" & FormatToolCallAuditBoundedText(normalizedToolName, ToolCallAuditMaxIdentityCharacters) &
+                           "; auditError=" & FormatToolCallAuditBoundedText(ex.GetType().Name, ToolCallAuditMaxIdentityCharacters)
+                Catch fallbackEx As System.Exception
+                    Return "Tool call audit: auditError=" & fallbackEx.GetType().Name
+                End Try
+            End Try
+        End Function
+
+        Private Shared Function BuildToolCallAuditOverflowDiagnostic(
+            runId As System.String,
+            callId As System.String,
+            toolName As System.String,
+            callStage As System.String,
+            outcome As System.String,
+            errorCode As System.String,
+            fullDiagnostic As System.String) As System.String
+
+            Dim parts As New System.Collections.Generic.List(Of System.String)()
+            parts.Add("runId=" & FormatToolCallAuditBoundedText(runId, ToolCallAuditMaxIdentityCharacters))
+            parts.Add("callId=" & FormatToolCallAuditBoundedText(callId, ToolCallAuditMaxIdentityCharacters))
+            parts.Add("tool=" & FormatToolCallAuditBoundedText(toolName, ToolCallAuditMaxIdentityCharacters))
+            If Not System.String.IsNullOrWhiteSpace(callStage) Then
+                parts.Add("callStage=" & FormatToolCallAuditBoundedText(callStage, ToolCallAuditMaxIdentityCharacters))
+            End If
+            If Not System.String.IsNullOrWhiteSpace(outcome) Then
+                parts.Add("outcome=" & FormatToolCallAuditBoundedText(outcome, ToolCallAuditMaxIdentityCharacters))
+            End If
+            If Not System.String.IsNullOrWhiteSpace(errorCode) Then
+                parts.Add("errorCode=" & FormatToolCallAuditBoundedText(errorCode, ToolCallAuditMaxIdentityCharacters))
+            End If
+            parts.Add("detailsOmitted=true")
+            parts.Add("fullChars=" & If(fullDiagnostic, System.String.Empty).Length.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            parts.Add("fullSha256=" & ComputeToolCallAuditSha256(If(fullDiagnostic, System.String.Empty)))
+            Return "Tool call audit: " & System.String.Join("; ", parts)
+        End Function
+
+        Private Shared Function BuildToolCallAuditBoundedToken(
+            value As System.String,
+            maxCharacters As System.Int32) As Newtonsoft.Json.Linq.JToken
+
+            Dim normalized As System.String = If(value, System.String.Empty)
+            Dim effectiveLimit As System.Int32 = System.Math.Max(1, maxCharacters)
+            If normalized.Length <= effectiveLimit Then
+                Return New Newtonsoft.Json.Linq.JValue(normalized)
+            End If
+
+            Return New Newtonsoft.Json.Linq.JObject(
+                New Newtonsoft.Json.Linq.JProperty("omitted", True),
+                New Newtonsoft.Json.Linq.JProperty("chars", normalized.Length),
+                New Newtonsoft.Json.Linq.JProperty("sha256", ComputeToolCallAuditSha256(normalized)))
+        End Function
+
+        Private Shared Function FormatToolCallAuditBoundedText(
+            value As System.String,
+            maxCharacters As System.Int32) As System.String
+
+            Return BuildToolCallAuditBoundedToken(value, maxCharacters).ToString(Newtonsoft.Json.Formatting.None)
+        End Function
+
+        Private Shared Function IsToolCallAuditReferenceKey(argumentName As System.String) As System.Boolean
+            Dim normalized As System.String = If(argumentName, System.String.Empty).Trim().ToLowerInvariant()
+            If normalized = System.String.Empty Then Return False
+
+            Select Case normalized
+                Case "path", "paths", "target", "filename", "file_name", "output_filename",
+                     "artifact_id", "logical_deliverable_id", "output_slot_id",
+                     "supersedes_artifact_id", "result_ref"
+                    Return True
+            End Select
+
+            Return normalized.EndsWith("_path", System.StringComparison.Ordinal) OrElse
+                   normalized.EndsWith("_paths", System.StringComparison.Ordinal) OrElse
+                   normalized.EndsWith("_filename", System.StringComparison.Ordinal) OrElse
+                   normalized.EndsWith("_filenames", System.StringComparison.Ordinal) OrElse
+                   normalized.EndsWith("_file", System.StringComparison.Ordinal) OrElse
+                   normalized.EndsWith("_files", System.StringComparison.Ordinal) OrElse
+                   normalized.EndsWith("_ref", System.StringComparison.Ordinal) OrElse
+                   normalized.EndsWith("_refs", System.StringComparison.Ordinal)
+        End Function
+
+        Private Shared Sub CollectToolCallAuditReferences(
+            token As Newtonsoft.Json.Linq.JToken,
+            prefix As System.String,
+            result As System.Collections.Generic.List(Of System.String),
+            ByRef truncated As System.Boolean,
+            ByRef depthLimited As System.Boolean,
+            ByRef traversalLimited As System.Boolean,
+            ByRef traversalNodes As System.Int32,
+            Optional depth As System.Int32 = 0)
+
+            If token Is Nothing OrElse result Is Nothing OrElse truncated OrElse traversalLimited Then Return
+            If depth > ToolCallAuditMaxReferenceDepth Then
+                depthLimited = True
+                Return
+            End If
+
+            traversalNodes += 1
+            If traversalNodes > ToolCallAuditMaxReferenceTraversalNodes Then
+                traversalLimited = True
+                Return
+            End If
+
+            Dim obj As Newtonsoft.Json.Linq.JObject = TryCast(token, Newtonsoft.Json.Linq.JObject)
+            If obj IsNot Nothing Then
+                For Each prop As Newtonsoft.Json.Linq.JProperty In obj.Properties()
+                    traversalNodes += 1
+                    If traversalNodes > ToolCallAuditMaxReferenceTraversalNodes Then
+                        traversalLimited = True
+                        Return
+                    End If
+
+                    Dim currentPath As System.String =
+                        If(System.String.IsNullOrWhiteSpace(prefix), prop.Name, prefix & "." & prop.Name)
+
+                    If IsToolCallAuditReferenceKey(prop.Name) Then
+                        AddToolCallAuditReferenceValues(currentPath, prop.Name, prop.Value, result, truncated)
+                        If truncated Then Return
+                    End If
+
+                    If prop.Value IsNot Nothing AndAlso
+                       (prop.Value.Type = Newtonsoft.Json.Linq.JTokenType.Object OrElse
+                        prop.Value.Type = Newtonsoft.Json.Linq.JTokenType.Array) Then
+                        If depth >= ToolCallAuditMaxReferenceDepth Then
+                            depthLimited = True
+                        Else
+                            CollectToolCallAuditReferences(
+                                prop.Value,
+                                currentPath,
+                                result,
+                                truncated,
+                                depthLimited,
+                                traversalLimited,
+                                traversalNodes,
+                                depth + 1)
+                            If truncated OrElse traversalLimited Then Return
+                        End If
+                    End If
+                Next
+                Return
+            End If
+
+            Dim arr As Newtonsoft.Json.Linq.JArray = TryCast(token, Newtonsoft.Json.Linq.JArray)
+            If arr Is Nothing Then Return
+
+            For index As System.Int32 = 0 To arr.Count - 1
+                traversalNodes += 1
+                If traversalNodes > ToolCallAuditMaxReferenceTraversalNodes Then
+                    traversalLimited = True
+                    Return
+                End If
+                Dim currentPath As System.String = prefix & "[" &
+                    index.ToString(System.Globalization.CultureInfo.InvariantCulture) & "]"
+                If depth >= ToolCallAuditMaxReferenceDepth Then
+                    If arr(index) IsNot Nothing AndAlso
+                       (arr(index).Type = Newtonsoft.Json.Linq.JTokenType.Object OrElse
+                        arr(index).Type = Newtonsoft.Json.Linq.JTokenType.Array) Then
+                        depthLimited = True
+                    End If
+                Else
+                    CollectToolCallAuditReferences(
+                        arr(index),
+                        currentPath,
+                        result,
+                        truncated,
+                        depthLimited,
+                        traversalLimited,
+                        traversalNodes,
+                        depth + 1)
+                    If truncated OrElse traversalLimited Then Return
+                End If
+            Next
+        End Sub
+
+        Private Shared Sub AddToolCallAuditReferenceValues(
+            path As System.String,
+            key As System.String,
+            value As Newtonsoft.Json.Linq.JToken,
+            result As System.Collections.Generic.List(Of System.String),
+            ByRef truncated As System.Boolean)
+
+            If value Is Nothing OrElse result Is Nothing OrElse truncated Then Return
+
+            Dim arr As Newtonsoft.Json.Linq.JArray = TryCast(value, Newtonsoft.Json.Linq.JArray)
+            If arr IsNot Nothing Then
+                For index As System.Int32 = 0 To arr.Count - 1
+                    If Not TypeOf arr(index) Is Newtonsoft.Json.Linq.JValue Then Continue For
+                    If result.Count >= ToolCallAuditMaxReferenceEntries Then
+                        truncated = True
+                        Return
+                    End If
+                    Dim itemPath As System.String = path & "[" &
+                        index.ToString(System.Globalization.CultureInfo.InvariantCulture) & "]"
+                    result.Add(
+                        FormatToolCallAuditBoundedText(itemPath, ToolCallAuditMaxArgumentKeyCharacters) & "=" &
+                        FormatToolCallAuditReferenceToken(arr(index), IsToolCallAuditPathKey(key)))
+                Next
+                Return
+            End If
+
+            If Not TypeOf value Is Newtonsoft.Json.Linq.JValue Then Return
+            If result.Count >= ToolCallAuditMaxReferenceEntries Then
+                truncated = True
+                Return
+            End If
+            result.Add(
+                FormatToolCallAuditBoundedText(path, ToolCallAuditMaxArgumentKeyCharacters) & "=" &
+                FormatToolCallAuditReferenceToken(value, IsToolCallAuditPathKey(key)))
+        End Sub
+
+        Private Shared Function IsToolCallAuditPathKey(argumentName As System.String) As System.Boolean
+            Dim normalized As System.String = If(argumentName, System.String.Empty).Trim().ToLowerInvariant()
+            If normalized = "path" OrElse normalized = "paths" OrElse
+               normalized = "filename" OrElse normalized = "file_name" OrElse
+               normalized = "output_filename" Then
+                Return True
+            End If
+
+            Return normalized.EndsWith("_path", System.StringComparison.Ordinal) OrElse
+                   normalized.EndsWith("_paths", System.StringComparison.Ordinal) OrElse
+                   normalized.EndsWith("_filename", System.StringComparison.Ordinal) OrElse
+                   normalized.EndsWith("_filenames", System.StringComparison.Ordinal) OrElse
+                   normalized.EndsWith("_file", System.StringComparison.Ordinal) OrElse
+                   normalized.EndsWith("_files", System.StringComparison.Ordinal)
+        End Function
+
+        Private Shared Function FormatToolCallAuditReferenceToken(
+            value As Newtonsoft.Json.Linq.JToken,
+            preserveFullValue As System.Boolean) As System.String
+
+            Dim serialized As System.String =
+                If(value Is Nothing, "null", value.ToString(Newtonsoft.Json.Formatting.None))
+            Dim maxCharacters As System.Int32 =
+                If(preserveFullValue, ToolCallAuditMaxFullPathCharacters, ToolCallAuditMaxReferenceCharacters)
+            If serialized.Length <= maxCharacters Then Return serialized
+
+            Dim omission As New Newtonsoft.Json.Linq.JObject(
+                New Newtonsoft.Json.Linq.JProperty("omitted", True),
+                New Newtonsoft.Json.Linq.JProperty("chars", serialized.Length),
+                New Newtonsoft.Json.Linq.JProperty("sha256", ComputeToolCallAuditSha256(serialized)))
+            Return omission.ToString(Newtonsoft.Json.Formatting.None)
+        End Function
+
+        Private Shared Function ComputeToolCallAuditSha256(value As System.String) As System.String
+            Using sha As System.Security.Cryptography.SHA256 = System.Security.Cryptography.SHA256.Create()
+                Dim bytes As System.Byte() = System.Text.Encoding.UTF8.GetBytes(If(value, System.String.Empty))
+                Return System.BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", System.String.Empty).ToLowerInvariant()
+            End Using
+        End Function
+
+        Public Shared Function BuildToolFailureDiagnostic(toolName As System.String,
+                                                          errorCode As System.String,
+                                                          errorMessage As System.String,
+                                                          Optional recoveryScopeKey As System.String = "") As System.String
+            Dim category As ToolFailureCategory = ClassifyToolFailureCategory(toolName, errorCode, errorMessage)
+            Dim parts As New System.Collections.Generic.List(Of System.String)()
+            parts.Add("category=" & category.ToString())
+            parts.Add("tool=" & If(toolName, System.String.Empty).Trim())
+            parts.Add("errorCode=" & If(errorCode, System.String.Empty).Trim())
+            If Not System.String.IsNullOrWhiteSpace(recoveryScopeKey) Then
+                parts.Add("recoveryScope=" & recoveryScopeKey.Trim())
+            End If
+            Return System.String.Join("; ", parts)
+        End Function
+
+        Private Shared Function BuildFailureRecoverySummary(failure As ToolFailureRecord,
+                                                            recoveryToolName As System.String) As System.String
+            If failure Is Nothing Then Return System.String.Empty
+
+            Return "category=" & failure.Category.ToString() &
+                   "; failedTool=" & If(failure.ToolName, System.String.Empty) &
+                   "; errorCode=" & If(failure.ErrorCode, System.String.Empty) &
+                   "; operation=" & If(failure.LogicalOperationKey, System.String.Empty) &
+                   "; step=" & If(failure.StepKey, System.String.Empty) &
+                   "; attempts=" & failure.AttemptCount.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                   "; lastAttempt=" & failure.LastAttemptSequence.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                   "; recoveryScope=" & If(failure.RecoveryScopeKey, System.String.Empty) &
+                   "; recoveredBy=" & If(recoveryToolName, System.String.Empty) &
+                   If(failure.ServiceErrorDetails Is Nothing, System.String.Empty,
+                      "; serviceError=" & failure.ServiceErrorDetails.ToDiagnosticJson())
+        End Function
+
+        Public Shared Function ConsumeRecoveredFailureSummary(runState As ToolingRunState) As System.String
+            If runState Is Nothing Then Return System.String.Empty
+            Dim value As System.String = If(runState.LastRecoveredFailureSummary, System.String.Empty)
+            runState.LastRecoveredFailureSummary = System.String.Empty
+            Return value
+        End Function
+
+        Public Shared Function GetMissingExpectedDeliverableSlotKeys(runState As ToolingRunState) As System.Collections.Generic.List(Of System.String)
+            Dim result As New System.Collections.Generic.List(Of System.String)()
+            If runState Is Nothing OrElse runState.ExpectedDeliverableSlots Is Nothing Then Return result
+
+            For Each expected As ExpectedDeliverableSlot In runState.ExpectedDeliverableSlots
+                If expected Is Nothing Then Continue For
+                If runState.IsExpectedDeliverableSlotSatisfied(expected.LogicalDeliverableId, expected.OutputSlotId) Then Continue For
+                result.Add(If(expected.LogicalDeliverableId, System.String.Empty) & "/" & If(expected.OutputSlotId, System.String.Empty))
+            Next
+
+            Return result
+        End Function
+
+        Public Shared Function BuildFinalizationDiagnostic(runState As ToolingRunState, invalidReason As System.String) As System.String
+            Dim reason As System.String = If(invalidReason, System.String.Empty).Trim()
+            If runState Is Nothing Then Return "phase=finalization; invalidReason=" & reason
+
+            Dim parts As New System.Collections.Generic.List(Of System.String)()
+            parts.Add("phase=finalization")
+            parts.Add("invalidReason=" & reason)
+
+            If System.String.Equals(reason, RequestedDeliverableSlotsIncompleteCode, System.StringComparison.OrdinalIgnoreCase) Then
+                Dim missing As System.Collections.Generic.List(Of System.String) = GetMissingExpectedDeliverableSlotKeys(runState)
+                If missing.Count > 0 Then parts.Add("missingSlots=" & System.String.Join(",", missing))
+            End If
+
+            If runState.HasUnresolvedToolFailure AndAlso runState.UnresolvedToolFailures IsNot Nothing Then
+                Dim latest As ToolFailureRecord = GetLatestUnresolvedToolFailure(runState)
+                If latest IsNot Nothing Then
+                    parts.Add("failureCategory=" & latest.Category.ToString())
+                    parts.Add("failedTool=" & If(latest.ToolName, System.String.Empty))
+                    parts.Add("errorCode=" & If(latest.ErrorCode, System.String.Empty))
+                    If latest.ServiceErrorDetails IsNot Nothing Then parts.Add("serviceError=" & latest.ServiceErrorDetails.ToDiagnosticJson())
+                    If Not System.String.IsNullOrWhiteSpace(latest.LogicalOperationKey) Then
+                        parts.Add("operation=" & latest.LogicalOperationKey)
+                    End If
+                    If Not System.String.IsNullOrWhiteSpace(latest.StepKey) Then
+                        parts.Add("step=" & latest.StepKey)
+                    End If
+                    If latest.AttemptCount > 0 Then
+                        parts.Add("attempts=" & latest.AttemptCount.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                        parts.Add("lastAttempt=" & latest.LastAttemptSequence.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                    End If
+                    If Not System.String.IsNullOrWhiteSpace(latest.RecoveryScopeKey) Then
+                        parts.Add("recoveryScope=" & latest.RecoveryScopeKey)
+                    End If
+                End If
+            End If
+
+            Return System.String.Join("; ", parts)
+        End Function
 
         Public Shared Function HasProducedUserDeliverable(runState As ToolingRunState) As Boolean
             If runState Is Nothing Then
@@ -4757,13 +6646,262 @@ Namespace Agents
             Return "<TASK_STATUS>" & footerObject.ToString(Formatting.None) & "</TASK_STATUS>"
         End Function
 
+        Public Enum HostFailureCategory
+            Unknown = 0
+            TransportRateLimited = 1
+            TransportUnavailable = 2
+            TransportTimeout = 3
+            RequiredCapabilityUnavailable = 4
+            DeliverableValidationFailed = 5
+            InternalExecutionFailure = 6
+            ContextProgressStalled = 7
+        End Enum
+
+        Public Shared Function ClassifyHostFailure(errorCode As System.String,
+                                                   message As System.String) As HostFailureCategory
+            Dim code As System.String = If(errorCode, System.String.Empty).Trim().ToLowerInvariant()
+            Dim detail As System.String = If(message, System.String.Empty).Trim().ToLowerInvariant()
+
+            If code = ContextProgressPolicy.StalledCode Then Return HostFailureCategory.ContextProgressStalled
+
+            If code = "llm_transport_timeout" OrElse code.Contains("timeout") Then
+                Return HostFailureCategory.TransportTimeout
+            End If
+
+            If code = "llm_transport_retry_exhausted" OrElse code.Contains("transport") Then
+                If detail.Contains("429") OrElse detail.Contains("rate limit") OrElse detail.Contains("rate-limit") OrElse detail.Contains("quota") Then
+                    Return HostFailureCategory.TransportRateLimited
+                End If
+                Return HostFailureCategory.TransportUnavailable
+            End If
+
+            If code.Contains("not_available") OrElse code.Contains("unavailable_tool") OrElse
+               code.Contains("required_capability") OrElse code.Contains("missing_required_tool") Then
+                Return HostFailureCategory.RequiredCapabilityUnavailable
+            End If
+
+            If code.Contains("deliverable") OrElse code.Contains("artifact") OrElse
+               code.Contains("validation") Then
+                Return HostFailureCategory.DeliverableValidationFailed
+            End If
+
+            If code = "invalid_text_only_finalization" OrElse
+               code = "complete_missing_required_successful_tools" OrElse
+               code = "host_generated_blocked" Then
+                Return HostFailureCategory.InternalExecutionFailure
+            End If
+
+            Return HostFailureCategory.Unknown
+        End Function
+
+        Public Shared Function TryBuildDeterministicHostFailureMessage(errorCode As System.String,
+                                                                       message As System.String,
+                                                                       userLanguage As System.String,
+                                                                       ByRef result As System.String,
+                                                                       Optional producedUserDeliverable As System.Boolean = False) As System.Boolean
+            result = System.String.Empty
+            Dim category As HostFailureCategory = ClassifyHostFailure(errorCode, message)
+            If category = HostFailureCategory.Unknown Then Return False
+
+            Dim lang As System.String = If(userLanguage, System.String.Empty).Trim().ToLowerInvariant()
+            Dim sep As System.Int32 = lang.IndexOfAny(New System.Char() {"-"c, "_"c})
+            If sep > 0 Then lang = lang.Substring(0, sep)
+
+            Select Case lang
+                Case "de"
+                    Select Case category
+                        Case HostFailureCategory.ContextProgressStalled
+                            result = "Die Bearbeitung wurde beendet, weil das wiederholte Nachladen von Quellen auch nach einem Strategiewechsel keinen ausreichenden Fortschritt brachte. Die Aufgabe ist noch nicht vollständig erledigt."
+                        Case HostFailureCategory.TransportRateLimited
+                            result = "Der KI-Dienst ist vorübergehend ausgelastet oder rate-limitiert. Der Vorgang konnte deshalb nicht zuverlässig abgeschlossen werden. Bitte versuchen Sie es später erneut."
+                        Case HostFailureCategory.TransportUnavailable
+                            result = "Der KI-Dienst ist vorübergehend nicht erreichbar. Der Vorgang konnte deshalb nicht zuverlässig abgeschlossen werden. Bitte versuchen Sie es später erneut."
+                        Case HostFailureCategory.TransportTimeout
+                            result = "Die Anfrage an den KI-Dienst hat das zulässige Zeitlimit überschritten. Bitte versuchen Sie es erneut."
+                        Case HostFailureCategory.RequiredCapabilityUnavailable
+                            result = "Eine für diesen Vorgang erforderliche Funktion ist derzeit nicht verfügbar. Der Vorgang konnte deshalb nicht zuverlässig abgeschlossen werden."
+                        Case HostFailureCategory.DeliverableValidationFailed
+                            result = "Das angeforderte Ergebnis konnte nicht vollständig und zuverlässig validiert werden. Es wurde deshalb nicht als abgeschlossen ausgeliefert."
+                        Case Else
+                            result = "Der Vorgang konnte aufgrund eines internen Ausführungsfehlers nicht zuverlässig abgeschlossen werden. Bitte versuchen Sie es erneut."
+                    End Select
+                Case "fr"
+                    Select Case category
+                        Case HostFailureCategory.ContextProgressStalled
+                            result = "Le traitement a été arrêté car les relectures répétées des sources ne permettaient pas de progresser suffisamment, même après un changement de stratégie. La tâche reste incomplète."
+                        Case HostFailureCategory.TransportRateLimited
+                            result = "Le service d’IA est temporairement saturé ou limité en débit. La tâche n’a donc pas pu être terminée de manière fiable. Veuillez réessayer plus tard."
+                        Case HostFailureCategory.TransportUnavailable
+                            result = "Le service d’IA est temporairement indisponible. La tâche n’a donc pas pu être terminée de manière fiable. Veuillez réessayer plus tard."
+                        Case HostFailureCategory.TransportTimeout
+                            result = "La requête adressée au service d’IA a dépassé le délai autorisé. Veuillez réessayer."
+                        Case HostFailureCategory.RequiredCapabilityUnavailable
+                            result = "Une fonction requise pour cette tâche n’est actuellement pas disponible. La tâche n’a donc pas pu être terminée de manière fiable."
+                        Case HostFailureCategory.DeliverableValidationFailed
+                            result = "Le résultat demandé n’a pas pu être validé complètement et de manière fiable. Il n’a donc pas été remis comme résultat final."
+                        Case Else
+                            result = "La tâche n’a pas pu être terminée de manière fiable en raison d’une erreur d’exécution interne. Veuillez réessayer."
+                    End Select
+                Case "it"
+                    Select Case category
+                        Case HostFailureCategory.ContextProgressStalled
+                            result = "L’elaborazione è stata interrotta perché le ripetute riletture delle fonti non producevano progressi sufficienti, neppure dopo un cambio di strategia. L’attività rimane incompleta."
+                        Case HostFailureCategory.TransportRateLimited
+                            result = "Il servizio di IA è temporaneamente sovraccarico o soggetto a limiti di frequenza. L’operazione non ha quindi potuto essere completata in modo affidabile. Riprova più tardi."
+                        Case HostFailureCategory.TransportUnavailable
+                            result = "Il servizio di IA è temporaneamente non disponibile. L’operazione non ha quindi potuto essere completata in modo affidabile. Riprova più tardi."
+                        Case HostFailureCategory.TransportTimeout
+                            result = "La richiesta al servizio di IA ha superato il tempo massimo consentito. Riprova."
+                        Case HostFailureCategory.RequiredCapabilityUnavailable
+                            result = "Una funzione necessaria per questa operazione non è attualmente disponibile. L’operazione non ha quindi potuto essere completata in modo affidabile."
+                        Case HostFailureCategory.DeliverableValidationFailed
+                            result = "Il risultato richiesto non ha potuto essere convalidato in modo completo e affidabile e pertanto non è stato consegnato come risultato finale."
+                        Case Else
+                            result = "L’operazione non ha potuto essere completata in modo affidabile a causa di un errore interno di esecuzione. Riprova."
+                    End Select
+                Case Else
+                    Select Case category
+                        Case HostFailureCategory.ContextProgressStalled
+                            result = "Processing stopped because repeatedly reloading sources made insufficient progress even after a change of strategy. The task remains incomplete."
+                        Case HostFailureCategory.TransportRateLimited
+                            result = "The AI service is temporarily busy or rate-limited, so the task could not be completed reliably. Please try again later."
+                        Case HostFailureCategory.TransportUnavailable
+                            result = "The AI service is temporarily unavailable, so the task could not be completed reliably. Please try again later."
+                        Case HostFailureCategory.TransportTimeout
+                            result = "The request to the AI service exceeded the allowed time limit. Please try again."
+                        Case HostFailureCategory.RequiredCapabilityUnavailable
+                            result = "A capability required for this task is currently unavailable, so the task could not be completed reliably."
+                        Case HostFailureCategory.DeliverableValidationFailed
+                            result = "The requested result could not be fully and reliably validated, so it was not delivered as complete."
+                        Case Else
+                            result = "The task could not be completed reliably because of an internal execution error. Please try again."
+                    End Select
+            End Select
+
+            If producedUserDeliverable AndAlso result <> System.String.Empty Then
+                Select Case lang
+                    Case "de"
+                        result &= " Eine Ergebnisdatei wurde jedoch bereits erstellt und kann trotzdem verwendbar sein. Bitte prüfen Sie sie kurz und wiederholen Sie den Vorgang nur, wenn etwas fehlt, falsch ist oder die Datei nicht verwendbar ist."
+                    Case "fr"
+                        result &= " Un fichier de résultat a toutefois déjà été créé et peut néanmoins être utilisable. Veuillez le vérifier brièvement et ne relancez l’opération que s’il manque quelque chose, si le contenu est incorrect ou si le fichier n’est pas utilisable."
+                    Case "it"
+                        result &= " È tuttavia già stato creato un file di risultato che potrebbe essere comunque utilizzabile. Verificalo brevemente e ripeti l’operazione solo se manca qualcosa, il contenuto è errato o il file non è utilizzabile."
+                    Case Else
+                        result &= " A result file was nevertheless already created and may still be usable. Please review it briefly and retry only if something is missing, incorrect, or the file cannot be used."
+                End Select
+            End If
+
+            Return result <> System.String.Empty
+        End Function
+
+        ''' <summary>
+        ''' Extracts a safe, user-facing provisional answer from a rejected final turn.
+        ''' The TASK_STATUS footer is removed and provider/tool envelopes are never surfaced.
+        ''' </summary>
+        Public Shared Function TryExtractProvisionalUserFacingText(candidate As System.String,
+                                                                   ByRef result As System.String) As System.Boolean
+            result = System.String.Empty
+            Dim raw As System.String = If(candidate, System.String.Empty).Trim()
+            If raw = System.String.Empty Then Return False
+            If ContainsProviderToolEnvelope(raw) Then Return False
+
+            Dim parsed As TaskStatusParseResult = ParseStrictTaskStatus(raw)
+            If parsed Is Nothing OrElse Not parsed.IsPresent OrElse Not parsed.IsValid Then Return False
+            If parsed.Status <> TaskStatusKind.Complete AndAlso parsed.Status <> TaskStatusKind.Blocked Then Return False
+
+            Dim body As System.String = If(parsed.TextBeforeFooter, System.String.Empty).Trim()
+            If body = System.String.Empty Then Return False
+            If Not IsUserPresentableFinalText(body) Then Return False
+            If ContainsProviderToolEnvelope(body) Then Return False
+
+            result = body
+            Return True
+        End Function
+
+        ''' <summary>
+        ''' Only finalization failures where the model already produced a complete/blocked user answer
+        ''' may expose that answer as provisional. Missing grounding or missing mandatory tool work is
+        ''' intentionally excluded because the substance may be materially unsupported.
+        ''' </summary>
+        Public Shared Function CanSurfaceProvisionalBlockedResponse(finalizationReason As System.String) As System.Boolean
+            Dim reason As System.String = If(finalizationReason, System.String.Empty).Trim()
+
+            ' Keep this intentionally narrow. A complete answer rejected only because a tool failure
+            ' remains unresolved may still contain useful substance. Missing grounding, missing required
+            ' tools, or missing deliverables can make the substance itself incomplete or misleading.
+            Return System.String.Equals(
+                reason,
+                "complete_with_unresolved_tool_failure",
+                System.StringComparison.OrdinalIgnoreCase) OrElse System.String.Equals(
+                    reason, "unresolved_tool_failure", System.StringComparison.OrdinalIgnoreCase)
+        End Function
+
+        ''' <summary>
+        ''' Appends a deterministic caveat to a safe provisional answer without rewriting its substance.
+        ''' </summary>
+        Public Shared Function BuildProvisionalBlockedFinalMessage(provisionalText As System.String,
+                                                                   runState As ToolingRunState,
+                                                                   userLanguage As System.String) As System.String
+            Dim body As System.String = If(provisionalText, System.String.Empty).Trim()
+            If body = System.String.Empty Then Return System.String.Empty
+
+            Dim lang As System.String = If(userLanguage, System.String.Empty).Trim().ToLowerInvariant()
+            Dim sep As System.Int32 = lang.IndexOfAny(New System.Char() {"-"c, "_"c})
+            If sep > 0 Then lang = lang.Substring(0, sep)
+
+            Dim hasDeliverable As System.Boolean = HasProducedUserDeliverable(runState)
+            Dim note As System.String
+
+            Select Case lang
+                Case "de"
+                    If hasDeliverable Then
+                        note = "Die Ergebnisdatei wurde erstellt. Bei einem früheren Verarbeitungsschritt trat jedoch ein Fehler auf, sodass der Vorgang nicht vollständig als abgeschlossen bestätigt werden konnte. Bitte prüfen Sie die Datei kurz und wiederholen Sie den Auftrag nur, wenn etwas fehlt, falsch ist oder die Datei nicht verwendbar ist."
+                    Else
+                        note = "Das inhaltliche Ergebnis wurde erzeugt, aber ein früherer Verarbeitungsschritt blieb fehlerhaft. Bitte prüfen Sie die Antwort kurz und wiederholen Sie den Auftrag nur, wenn etwas fehlt oder falsch erscheint."
+                    End If
+                Case "fr"
+                    If hasDeliverable Then
+                        note = "Le fichier de résultat a été créé. Une étape de traitement antérieure a toutefois échoué, de sorte que l’opération n’a pas pu être confirmée comme entièrement terminée. Vérifiez brièvement le fichier et ne relancez l’opération que s’il manque quelque chose, si le contenu est incorrect ou si le fichier n’est pas utilisable."
+                    Else
+                        note = "Le résultat de fond a été généré, mais une étape de traitement antérieure est restée en échec. Vérifiez brièvement la réponse et ne relancez l’opération que si quelque chose manque ou semble incorrect."
+                    End If
+                Case "it"
+                    If hasDeliverable Then
+                        note = "Il file di risultato è stato creato. Tuttavia, una fase di elaborazione precedente non è riuscita, quindi l’operazione non ha potuto essere confermata come completamente conclusa. Verifica brevemente il file e ripeti l’operazione solo se manca qualcosa, il contenuto è errato o il file non è utilizzabile."
+                    Else
+                        note = "Il risultato sostanziale è stato generato, ma una fase di elaborazione precedente è rimasta in errore. Verifica brevemente la risposta e ripeti l’operazione solo se manca qualcosa o se qualcosa sembra errato."
+                    End If
+                Case Else
+                    If hasDeliverable Then
+                        note = "The result file was created. An earlier processing step failed, so the run could not be confirmed as fully complete. Please review the file briefly and retry only if something is missing, incorrect, or the file cannot be used."
+                    Else
+                        note = "The substantive result was generated, but an earlier processing step remained failed. Please review the response briefly and retry only if something is missing or appears incorrect."
+                    End If
+            End Select
+
+            Return body & vbCrLf & vbCrLf & note
+        End Function
+
         Public Shared Function BuildUserSafeBlockedFinalMessage(runState As ToolingRunState,
                                                                 errorCode As String,
                                                                 message As String,
                                                                 successCount As Integer,
                                                                 failedCount As Integer,
                                                                 Optional userLanguage As String = "",
-                                                                Optional appendTaskStatusFooter As Boolean = True) As String
+                                                                Optional appendTaskStatusFooter As Boolean = False) As String
+            Dim deterministicMessage As System.String = System.String.Empty
+            If TryBuildDeterministicHostFailureMessage(
+                errorCode,
+                message,
+                userLanguage,
+                deterministicMessage,
+                producedUserDeliverable:=HasProducedUserDeliverable(runState)) Then
+                If appendTaskStatusFooter Then
+                    deterministicMessage &= " " & BuildTaskStatusFooter("blocked", If(errorCode, "host_generated_blocked"))
+                End If
+                Return deterministicMessage.Trim()
+            End If
+
             Dim useMemoryMessage As Boolean =
                 String.Equals(errorCode, MissingRequiredMemoryAccessCode, StringComparison.OrdinalIgnoreCase) OrElse
                 String.Equals(errorCode, MemoryListDoneButMemoryGetRequiredCode, StringComparison.OrdinalIgnoreCase) OrElse
@@ -4954,16 +7092,13 @@ Namespace Agents
                         Continue For
                     End If
 
-                    If failure.RecoveryEvidenceObserved Then
-                        Continue For
-                    End If
+                    ' Replacement evidence is revalidated below: a later deletion, supersession
+                    ' or failed required effect must not leave a stale completion exemption.
 
-                    ' Defensive finalization rule: an earlier artifact-scoped producer/inspection
-                    ' failure is no longer blocking when that exact expected logical slot is now
-                    ' fully qualified by one existing Final with all host-verified required effects.
-                    ' This is deliberately narrow: unscoped failures, operation/subagent scopes,
-                    ' different slots and incomplete deliverable contracts remain blocking.
-                    If IsArtifactScopedFailureSupersededByValidatedDeliverable(runState, failure) Then
+                    ' Recheck the exact successful operation step or captured logical output slot.
+                    ' Operation scope must not hide a producer's separately captured artifact identity.
+                    ' Uncorrelated failures, sibling steps and unrelated Finals remain blocking.
+                    If IsFailureSupersededByVerifiedOutcome(runState, failure) Then
                         Continue For
                     End If
 
@@ -4998,28 +7133,110 @@ Namespace Agents
                    SubAgentRuntimeHardening.IsDeclaredTerminalOutcomeErrorCode(runState.LastErrorCode)
         End Function
 
-        Private Shared Function IsArtifactScopedFailureSupersededByValidatedDeliverable(
+        Private Shared Function HasSucceededExplicitRecoveryStep(runState As ToolingRunState, failure As ToolFailureRecord) As System.Boolean
+            If runState Is Nothing OrElse failure Is Nothing OrElse runState.OperationRegistry Is Nothing Then Return False
+            If Not System.String.IsNullOrWhiteSpace(failure.CrossScopeAlternativeRecoveryRequiredArtifactExtension) Then Return False
+            Dim scope As System.String = If(failure.RecoveryScopeKey, System.String.Empty)
+            If Not scope.StartsWith("operation:", System.StringComparison.Ordinal) Then Return False
+            For Each operation As ExplicitOperationRecord In runState.OperationRegistry.ExportRecords()
+                If operation.Status <> ExplicitOperationStatus.Succeeded Then Continue For
+                Dim stepId As System.String = If(operation.StepId, System.String.Empty).Trim()
+                If stepId = System.String.Empty Then stepId = "__default__"
+                Dim operationScope As System.String = "operation:" & operation.OperationId & "|step:" & stepId
+                If System.String.Equals(scope, operationScope, System.StringComparison.Ordinal) Then Return True
+            Next
+            Return False
+        End Function
+
+        ' Whole-path replacement is permitted only when the host explicitly opened that path.
+        ' It cannot be inferred from an unrelated successful call or an arbitrary existing file.
+        Private Shared Function HasVerifiedDeclaredPathReplacement(runState As ToolingRunState, failure As ToolFailureRecord) As System.Boolean
+            If Not failure.CrossScopeAlternativeRecoveryAllowed OrElse
+               runState.DeliverableCapableToolNames Is Nothing OrElse Not runState.DeliverableCapableToolNames.Contains(failure.ToolName) OrElse
+               Not runState.HasExpectedDeliverableContract OrElse runState.ExpectedDeliverableSlots Is Nothing OrElse
+               runState.ExpectedDeliverableSlots.Count = 0 OrElse runState.RegisteredDeliverableArtifacts Is Nothing Then Return False
+            For Each expected As ExpectedDeliverableSlot In runState.ExpectedDeliverableSlots
+                If expected Is Nothing OrElse Not runState.IsExpectedDeliverableSlotSatisfied(expected.LogicalDeliverableId, expected.OutputSlotId) Then Return False
+            Next
+            For Each artifact As DeliverableArtifact In runState.RegisteredDeliverableArtifacts
+                If artifact Is Nothing OrElse artifact.LifecycleState <> ArtifactLifecycleState.Final OrElse
+                   Not artifact.IsExplicitContract OrElse Not artifact.IsFinalDeliverable OrElse
+                   System.String.IsNullOrWhiteSpace(artifact.VerifiedContentSha256) OrElse
+                   artifact.VerifiedAfterFailureSequence < failure.Sequence OrElse
+                   Not runState.IsQualifiedFinalArtifactForDelivery(artifact) Then Continue For
+                If artifact.DeliveryIntent <> ArtifactDeliveryIntent.DeliverToUser AndAlso artifact.DeliveryIntent <> ArtifactDeliveryIntent.DeliverAndPersist Then Continue For
+                If System.String.IsNullOrWhiteSpace(artifact.SourceTool) OrElse
+                   Not runState.DeliverableCapableToolNames.Contains(artifact.SourceTool) Then Continue For
+                If System.String.Equals(artifact.SourceTool, failure.ToolName, System.StringComparison.OrdinalIgnoreCase) Then Continue For
+                Dim requiredExtension As System.String = If(failure.CrossScopeAlternativeRecoveryRequiredArtifactExtension, System.String.Empty)
+                If requiredExtension <> System.String.Empty AndAlso Not System.String.Equals(
+                    System.IO.Path.GetExtension(artifact.SessionPath), requiredExtension, System.StringComparison.OrdinalIgnoreCase) Then Continue For
+                Return True
+            Next
+            Return False
+        End Function
+
+        Private Shared Function IsFailureSupersededByVerifiedOutcome(
             runState As ToolingRunState,
             failure As ToolFailureRecord) As System.Boolean
 
             If runState Is Nothing OrElse failure Is Nothing Then Return False
+            If failure.Terminal Then Return False
+            If failure.RecoveryPolicy <> ToolFailureRecoveryPolicy.CompatibleAlternativeSuccessAllowed AndAlso
+               failure.RecoveryPolicy <> ToolFailureRecoveryPolicy.DifferentAlternativeSuccessOnly Then Return False
+            If failure.RecoveryEvidenceObserved AndAlso
+               Not System.String.IsNullOrWhiteSpace(failure.RecoveryEvidenceToolName) AndAlso
+               System.String.Equals(failure.RecoveryEvidenceStepKey,
+                   "tool:" & failure.RecoveryEvidenceToolName.Trim().ToLowerInvariant() & "|scope:" & failure.RecoveryScopeKey,
+                   System.StringComparison.Ordinal) AndAlso
+               HasSucceededExplicitRecoveryStep(runState, failure) Then Return True
             If Not runState.HasExpectedDeliverableContract Then Return False
 
-            Dim scope As System.String = If(failure.RecoveryScopeKey, System.String.Empty).Trim()
-            Const artifactPrefix As System.String = "artifact:"
-            If Not scope.StartsWith(artifactPrefix, System.StringComparison.Ordinal) Then Return False
-
-            Dim identity As System.String = scope.Substring(artifactPrefix.Length)
-            Dim separatorIndex As System.Int32 = identity.IndexOf("|"c)
-            If separatorIndex <= 0 OrElse separatorIndex >= identity.Length - 1 Then Return False
-            If identity.IndexOf("|"c, separatorIndex + 1) >= 0 Then Return False
-
-            Dim logicalId As System.String = identity.Substring(0, separatorIndex).Trim()
-            Dim slotId As System.String = identity.Substring(separatorIndex + 1).Trim()
+            Dim logicalId As System.String = System.String.Empty
+            Dim slotId As System.String = System.String.Empty
+            If Not System.String.IsNullOrWhiteSpace(failure.DeliverableTargetCorrelationSignature) Then
+                Try
+                    Dim identity As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(failure.DeliverableTargetCorrelationSignature)
+                    logicalId = If(identity.Value(Of System.String)("logical_deliverable_id"), System.String.Empty).Trim()
+                    slotId = If(identity.Value(Of System.String)("output_slot_id"), System.String.Empty).Trim()
+                Catch ex As System.Exception
+                    Return False
+                End Try
+            Else
+                ' Retain explicit artifact scopes for callers without captured tool arguments.
+                Dim scope As System.String = If(failure.RecoveryScopeKey, System.String.Empty).Trim()
+                Const artifactPrefix As System.String = "artifact:"
+                If Not scope.StartsWith(artifactPrefix, System.StringComparison.Ordinal) Then
+                    Return HasVerifiedDeclaredPathReplacement(runState, failure)
+                End If
+                Dim identity As System.String = scope.Substring(artifactPrefix.Length)
+                Dim separatorIndex As System.Int32 = identity.IndexOf("|"c)
+                If separatorIndex <= 0 OrElse separatorIndex >= identity.Length - 1 Then Return False
+                If identity.IndexOf("|"c, separatorIndex + 1) >= 0 Then Return False
+                logicalId = identity.Substring(0, separatorIndex).Trim()
+                slotId = identity.Substring(separatorIndex + 1).Trim()
+            End If
             If logicalId = System.String.Empty OrElse slotId = System.String.Empty Then Return False
-            If Not runState.IsExpectedDeliverableSlot(logicalId, slotId) Then Return False
+            If Not runState.IsExpectedDeliverableSlotSatisfied(logicalId, slotId) Then Return False
 
-            Return runState.IsExpectedDeliverableSlotSatisfied(logicalId, slotId)
+            For Each artifact As DeliverableArtifact In runState.RegisteredDeliverableArtifacts
+                If artifact Is Nothing OrElse artifact.LifecycleState <> ArtifactLifecycleState.Final Then Continue For
+                If Not System.String.Equals(artifact.LogicalDeliverableId, logicalId, System.StringComparison.Ordinal) OrElse
+                   Not System.String.Equals(artifact.OutputSlotId, slotId, System.StringComparison.Ordinal) Then Continue For
+                If Not artifact.IsFinalDeliverable OrElse Not artifact.IsExplicitContract Then Continue For
+                If System.String.IsNullOrWhiteSpace(artifact.ArtifactId) OrElse
+                   System.String.IsNullOrWhiteSpace(artifact.VerifiedContentSha256) Then Continue For
+                If artifact.DeliveryIntent <> ArtifactDeliveryIntent.DeliverToUser AndAlso
+                   artifact.DeliveryIntent <> ArtifactDeliveryIntent.DeliverAndPersist Then Continue For
+                If artifact.VerifiedAfterFailureSequence < failure.Sequence Then Continue For
+                If Not runState.IsQualifiedFinalArtifactForDelivery(artifact) Then Continue For
+                If Not System.IO.File.Exists(artifact.SessionPath) Then Continue For
+                Dim requiredExtension As System.String = If(failure.CrossScopeAlternativeRecoveryRequiredArtifactExtension, System.String.Empty)
+                If requiredExtension <> System.String.Empty AndAlso
+                   Not System.String.Equals(System.IO.Path.GetExtension(artifact.SessionPath), requiredExtension, System.StringComparison.OrdinalIgnoreCase) Then Continue For
+                Return True
+            Next
+            Return False
         End Function
 
         Public Shared Sub ClearNonBlockingUnresolvedToolFailure(runState As ToolingRunState,
@@ -5036,7 +7253,14 @@ Namespace Agents
             If runState.UnresolvedToolFailures IsNot Nothing AndAlso runState.UnresolvedToolFailures.Count > 0 Then
                 For i As System.Int32 = runState.UnresolvedToolFailures.Count - 1 To 0 Step -1
                     Dim failure As ToolFailureRecord = runState.UnresolvedToolFailures(i)
-                    If Not IsArtifactScopedFailureSupersededByValidatedDeliverable(runState, failure) Then Continue For
+                    If Not IsFailureSupersededByVerifiedOutcome(runState, failure) Then Continue For
+                    runState.LastRecoveredFailureSummary = "verified_outcome; failureSequence=" &
+                        failure.Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                        "; tool=" & failure.ToolName & "; recovery=" & If(recoveryLabel, System.String.Empty)
+                    If runState.RetryInvariantPendingFailureTools IsNot Nothing Then
+                        runState.RetryInvariantPendingFailureTools.Remove(
+                            BuildRetryInvariantKey(failure.ToolName, failure.RecoveryScopeKey))
+                    End If
                     runState.UnresolvedToolFailures.RemoveAt(i)
                     clearedRegistryFailure = True
                 Next

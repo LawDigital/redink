@@ -425,6 +425,22 @@ Partial Public Class ThisAddIn
             Return True
         End If
 
+        Dim preparedArguments As System.Collections.Generic.Dictionary(Of System.String, System.Object) = toolCall.Arguments
+        Dim normalizationFailure As System.String = System.String.Empty
+        If Not SharedLibrary.Agents.ToolCallSequencing.TryPrepareToolCallArgumentsForPreflight(
+            toolConfig,
+            toolCall.Arguments,
+            preparedArguments,
+            normalizationFailure) Then
+
+            validationError = If(
+                System.String.IsNullOrWhiteSpace(normalizationFailure),
+                "Tool arguments could not be normalized for validation.",
+                normalizationFailure)
+            Return False
+        End If
+        toolCall.Arguments = preparedArguments
+
         If String.IsNullOrWhiteSpace(toolConfig.ToolDefinition) Then
             Return True
         End If

@@ -17,6 +17,10 @@
 '  - word_format: set paragraph style and/or run formatting on match.
 '  - word_apply_template: clone template from skill references/ with substitutions.
 '  - word_save_as: copy .docx to new path (workspace or Desktop).
+'
+' KEY ARCHITECTURE
+'   • Surface: WordTools, ParaAtom (VB implementation).
+'   • Entry points/helpers: IsWordTool, BuildAll, Execute.
 ' =============================================================================
 
 Option Strict On
@@ -51,6 +55,7 @@ Namespace Agents
         Public Const ToolFormat As String = "word_format"
         Public Const ToolApplyTemplate As String = "word_apply_template"
         Public Const ToolSaveAs As String = "word_save_as"
+        Public Const ToolVerifyRevisions As String = "word_verify_revisions"
 
         Public Shared Function IsWordTool(name As String) As Boolean
             If String.IsNullOrWhiteSpace(name) Then Return False
@@ -58,7 +63,7 @@ Namespace Agents
             Select Case name
                 Case ToolExtract, ToolSearch, ToolWrite, ToolMarkup,
                      ToolCommentAdd, ToolCommentList, ToolCommentRemove,
-                     ToolFormat, ToolApplyTemplate, ToolSaveAs
+                     ToolFormat, ToolApplyTemplate, ToolSaveAs, ToolVerifyRevisions
                     Return True
                 Case Else
                     Return False
@@ -69,7 +74,7 @@ Namespace Agents
             Dim tools As New List(Of ModelConfig) From {
                 BuildExtract(), BuildSearch(), BuildWrite(), BuildMarkup(),
                 BuildCommentAdd(), BuildCommentList(), BuildCommentRemove(),
-                BuildFormat(), BuildApplyTemplate(), BuildSaveAs()
+                BuildFormat(), BuildApplyTemplate(), BuildSaveAs(), BuildVerifyRevisions()
             }
 
             For Each tool As ModelConfig In tools
@@ -131,6 +136,8 @@ Namespace Agents
                         resultJson = ExecuteApplyTemplate(arguments)
                     Case ToolSaveAs
                         resultJson = ExecuteSaveAs(arguments)
+                    Case ToolVerifyRevisions
+                        resultJson = ExecuteVerifyRevisions(arguments)
                     Case Else
                         Return Err_("unknown_word_tool", "Unknown tool '" & toolName & "'.")
                 End Select
@@ -160,6 +167,29 @@ Namespace Agents
             Dim p As String = PathPolicy.Resolve(GetStr(args, "path"), PathAccess.Read)
             If Not File.Exists(p) Then Return Err_("not_found", "File not found.")
 
+            Dim prefix(511) As System.Byte
+            Dim prefixLength As System.Int32
+            Using input As New System.IO.FileStream(p, System.IO.FileMode.Open, System.IO.FileAccess.Read,
+                                                    System.IO.FileShare.ReadWrite Or System.IO.FileShare.Delete)
+                Do While prefixLength < prefix.Length
+                    Dim readCount As System.Int32 = input.Read(prefix, prefixLength, prefix.Length - prefixLength)
+                    If readCount = 0 Then Exit Do
+                    prefixLength += readCount
+                Loop
+            End Using
+            System.Array.Resize(prefix, prefixLength)
+            Dim container As System.String = SharedMethods.DetectBinaryDocumentContainer(prefix)
+            If container = "ole_compound" Then
+                Return Err_("word_compound_format_requires_conversion",
+                    "This is an OLE compound document, not an OpenXML ZIP package. It may be legacy .doc or encrypted Office content. " &
+                    "For legacy .doc use text_export_to_text with the existing AllowLegacyDocFiles policy and host reader dispatcher, " &
+                    "or provide a converted .docx. Encrypted documents must first be decrypted through an authorized path. No ZIP parser was invoked.")
+            End If
+            If container <> "zip" Then
+                Return Err_("unsupported_word_container",
+                    "The file is not an OpenXML ZIP package. Use the format-appropriate text extraction tool; changing the filename extension does not convert it.")
+            End If
+
             ' Use the rich sandboxed extractor so the returned text includes footnotes,
             ' endnotes, headers/footers, automatic paragraph/list/heading numbering,
             ' cross-references, tables, and text-box/margin text — not just body runs.
@@ -174,8 +204,8 @@ Namespace Agents
             Dim truncated As Boolean = False
 
             If maxChars > 0 AndAlso joined.Length > maxChars Then
-                joined = joined.Substring(0, maxChars)
-                truncated = True
+                Return ToolResultStore.BuildSourcePreview(
+                    WorkflowContinuity.CurrentWorkflowId, ToolExtract, joined, maxChars, p).ToString(Newtonsoft.Json.Formatting.None)
             End If
 
             Return JsonConvert.SerializeObject(New With {
@@ -266,6 +296,14 @@ Namespace Agents
                         "missing_operation_id",
                         "Every word_write/word_markup logical operation requires an explicit opaque operation_id. Each batched task must carry its own operation_id.")
                 End If
+
+                If (task.Op = "insert_paragraph_after" OrElse task.Op = "insert_paragraph_before") AndAlso
+                   (task.HeadingLevel < 0 OrElse task.HeadingLevel > 6) Then
+
+                    Return Err_(
+                        "invalid_heading_level",
+                        "heading_level must be between 1 and 6 when supplied.")
+                End If
             Next
 
             Dim results As New List(Of Object)()
@@ -278,18 +316,22 @@ Namespace Agents
                 Dim body As W.Body =
                     doc.MainDocumentPart.Document.Body
 
+                Using revisionScope As System.IDisposable = BeginRevisionIdScope(doc)
                 For Each t As MarkupTask In tasks
                     Dim op As String =
                         If(String.IsNullOrWhiteSpace(t.Op), "replace", t.Op)
 
                     If op = "append" Then
                         For Each ln As String In SplitLines(t.Text)
-                            body.AppendChild(
+                            Dim appendedParagraph As W.Paragraph =
                                 MakeMarkdownParagraph(
                                     ln,
                                     body,
                                     asMarkup,
-                                    author))
+                                    author)
+
+                            If asMarkup Then MarkParagraphInserted(appendedParagraph, author, body)
+                            AppendParagraphToBody(appendedParagraph, body)
                         Next
 
                         anyApplied = True
@@ -363,6 +405,31 @@ Namespace Agents
                                 sp.Scope)
 
                             done = True
+                        ElseIf op = "insert_paragraph_after" OrElse op = "insert_paragraph_before" Then
+                            Dim mStart As Integer
+                            Dim mLen As Integer
+
+                            If Not TryFindInText(
+                                GetParagraphText(para),
+                                t.Find,
+                                mStart,
+                                mLen) Then
+
+                                Continue For
+                            End If
+
+                            InsertParagraphsRelativeToAnchor(
+                                para,
+                                t.Text,
+                                insertAfter:=(op = "insert_paragraph_after"),
+                                asMarkup:=asMarkup,
+                                author:=author,
+                                scope:=sp.Scope,
+                                explicitStyle:=t.Style,
+                                headingLevel:=t.HeadingLevel,
+                                inheritNumbering:=t.InheritNumbering)
+
+                            done = True
                         Else
                             done =
                                 ApplyMarkupOpToParagraphSurgical(
@@ -427,6 +494,7 @@ Namespace Agents
                         doc.MainDocumentPart.EndnotesPart.Endnotes.Save()
                     End If
                 End If
+                End Using
             End Using
 
             Dim appliedCount As Integer =
@@ -509,6 +577,9 @@ Namespace Agents
             Public Find As String
             Public Text As String
             Public OnlyFirst As Boolean
+            Public Style As System.String
+            Public HeadingLevel As System.Int32
+            Public InheritNumbering As System.Boolean
         End Structure
 
         Private Shared Function CloneRPr(rPr As W.RunProperties) As W.RunProperties
@@ -635,6 +706,93 @@ Namespace Agents
                 End If
             Next
         End Sub
+
+        Private Shared ReadOnly _activeRevisionIdAllocator As New System.Threading.AsyncLocal(Of RevisionIdAllocator)()
+
+        Private NotInheritable Class RevisionIdAllocator
+            Private _lastId As System.Int32
+
+            Public Sub New(document As WordprocessingDocument)
+                _lastId = ScanExistingMaximum(document)
+            End Sub
+
+            Public Function NextId() As System.Int32
+                _lastId += 1
+                Return _lastId
+            End Function
+
+            Private Shared Function ScanExistingMaximum(document As WordprocessingDocument) As System.Int32
+                Dim maxId As System.Int32 = 0
+                If document Is Nothing OrElse document.MainDocumentPart Is Nothing Then Return maxId
+
+                ScanRevisionIds(document.MainDocumentPart.Document, maxId)
+
+                For Each part As HeaderPart In document.MainDocumentPart.HeaderParts
+                    If part IsNot Nothing Then ScanRevisionIds(part.Header, maxId)
+                Next
+                For Each part As FooterPart In document.MainDocumentPart.FooterParts
+                    If part IsNot Nothing Then ScanRevisionIds(part.Footer, maxId)
+                Next
+                If document.MainDocumentPart.FootnotesPart IsNot Nothing Then
+                    ScanRevisionIds(document.MainDocumentPart.FootnotesPart.Footnotes, maxId)
+                End If
+                If document.MainDocumentPart.EndnotesPart IsNot Nothing Then
+                    ScanRevisionIds(document.MainDocumentPart.EndnotesPart.Endnotes, maxId)
+                End If
+                If document.MainDocumentPart.WordprocessingCommentsPart IsNot Nothing Then
+                    ScanRevisionIds(document.MainDocumentPart.WordprocessingCommentsPart.Comments, maxId)
+                End If
+
+                Return maxId
+            End Function
+
+            Private Shared Sub ScanRevisionIds(root As OpenXmlElement, ByRef maxId As System.Int32)
+                If root Is Nothing Then Return
+
+                Dim candidates As New System.Collections.Generic.List(Of OpenXmlElement) From {root}
+                candidates.AddRange(root.Descendants())
+
+                For Each element As OpenXmlElement In candidates
+                    If element Is Nothing OrElse Not IsRevisionElementName(element.LocalName) Then Continue For
+                    For Each attr As OpenXmlAttribute In element.GetAttributes()
+                        If Not System.String.Equals(attr.LocalName, "id", System.StringComparison.Ordinal) Then Continue For
+                        Dim value As System.Int32
+                        If System.Int32.TryParse(attr.Value, value) AndAlso value > maxId Then maxId = value
+                    Next
+                Next
+            End Sub
+
+            Private Shared Function IsRevisionElementName(localName As System.String) As System.Boolean
+                Select Case If(localName, System.String.Empty)
+                    Case "ins", "del", "moveFrom", "moveTo", "rPrChange", "pPrChange", "tblPrChange", "trPrChange", "tcPrChange", "sectPrChange", "numPrChange"
+                        Return True
+                    Case Else
+                        Return False
+                End Select
+            End Function
+        End Class
+
+        Private NotInheritable Class RevisionIdScope
+            Implements System.IDisposable
+
+            Private ReadOnly _previous As RevisionIdAllocator
+            Private _disposed As System.Boolean
+
+            Public Sub New(document As WordprocessingDocument)
+                _previous = _activeRevisionIdAllocator.Value
+                _activeRevisionIdAllocator.Value = New RevisionIdAllocator(document)
+            End Sub
+
+            Public Sub Dispose() Implements System.IDisposable.Dispose
+                If _disposed Then Return
+                _disposed = True
+                _activeRevisionIdAllocator.Value = _previous
+            End Sub
+        End Class
+
+        Private Shared Function BeginRevisionIdScope(document As WordprocessingDocument) As System.IDisposable
+            Return New RevisionIdScope(document)
+        End Function
 
         ' Coalescing emitter. Mode: 1 = plain, 2 = inserted (w:ins), 3 = deleted (w:del).
         Private NotInheritable Class MarkupEmitter
@@ -884,6 +1042,87 @@ Namespace Agents
             Return True
         End Function
 
+        Private Shared Sub MarkParagraphInserted(para As W.Paragraph, author As System.String, scope As OpenXmlElement)
+            If para Is Nothing Then Return
+
+            Dim pPr As W.ParagraphProperties = para.Elements(Of W.ParagraphProperties)().FirstOrDefault()
+            If pPr Is Nothing Then
+                pPr = New W.ParagraphProperties()
+                para.PrependChild(pPr)
+            End If
+
+            Dim mrp As W.ParagraphMarkRunProperties = pPr.Elements(Of W.ParagraphMarkRunProperties)().FirstOrDefault()
+            If mrp Is Nothing Then
+                mrp = New W.ParagraphMarkRunProperties()
+                pPr.AppendChild(mrp)
+            End If
+
+            If mrp.Elements(Of W.Inserted)().FirstOrDefault() Is Nothing Then
+                mrp.PrependChild(New W.Inserted() With {
+                    .Id = NextChangeId(scope).ToString(),
+                    .Author = author,
+                    .Date = System.DateTime.UtcNow
+                })
+            End If
+        End Sub
+
+        Private Shared Sub AppendParagraphToBody(para As W.Paragraph, body As W.Body)
+            If para Is Nothing OrElse body Is Nothing Then Return
+
+            Dim finalSectionProperties As W.SectionProperties =
+                body.Elements(Of W.SectionProperties)().LastOrDefault()
+
+            If finalSectionProperties IsNot Nothing Then
+                finalSectionProperties.InsertBeforeSelf(para)
+            Else
+                body.AppendChild(para)
+            End If
+        End Sub
+
+        Private Shared Function InsertParagraphsRelativeToAnchor(anchor As W.Paragraph,
+                                                                 text As System.String,
+                                                                 insertAfter As System.Boolean,
+                                                                 asMarkup As System.Boolean,
+                                                                 author As System.String,
+                                                                 scope As OpenXmlElement,
+                                                                 explicitStyle As System.String,
+                                                                 headingLevel As System.Int32,
+                                                                 inheritNumbering As System.Boolean) As System.Int32
+            If anchor Is Nothing Then Return 0
+
+            Dim lines As System.String() = SplitLines(text)
+            If lines.Length = 0 Then lines = New System.String() {System.String.Empty}
+
+            Dim insertedCount As System.Int32 = 0
+            Dim afterCursor As W.Paragraph = anchor
+
+            For i As System.Int32 = 0 To lines.Length - 1
+                Dim isFirst As System.Boolean = (i = 0)
+                Dim newPara As W.Paragraph =
+                    MakeMarkdownParagraph(
+                        lines(i),
+                        scope,
+                        asMarkup,
+                        author,
+                        If(isFirst, explicitStyle, Nothing),
+                        If(isFirst, headingLevel, 0),
+                        If(isFirst AndAlso inheritNumbering, anchor, Nothing))
+
+                If asMarkup Then MarkParagraphInserted(newPara, author, scope)
+
+                If insertAfter Then
+                    afterCursor.InsertAfterSelf(newPara)
+                    afterCursor = newPara
+                Else
+                    anchor.InsertBeforeSelf(newPara)
+                End If
+
+                insertedCount += 1
+            Next
+
+            Return insertedCount
+        End Function
+
         Private Shared Sub MarkParagraphDeleted(para As W.Paragraph, asMarkup As Boolean, author As String, scope As OpenXmlElement)
             If Not asMarkup Then
                 para.Remove()
@@ -1055,7 +1294,10 @@ Namespace Agents
                         .Op = NormOp(JStr(it, "op")),
                         .Find = JStr(it, "find"),
                         .Text = JStr(it, "text"),
-                        .OnlyFirst = JBool(it, "only_first", True)
+                        .OnlyFirst = JBool(it, "only_first", True),
+                        .Style = JStr(it, "style"),
+                        .HeadingLevel = JInt(it, "heading_level", 0),
+                        .InheritNumbering = JBool(it, "inherit_numbering", False)
                     })
                 Next
             Else
@@ -1064,7 +1306,10 @@ Namespace Agents
                     .Op = NormOp(GetStr(args, "op")),
                     .Find = GetStr(args, "find"),
                     .Text = GetStr(args, "text"),
-                    .OnlyFirst = GetBool(args, "only_first", True)
+                    .OnlyFirst = GetBool(args, "only_first", True),
+                    .Style = GetStr(args, "style"),
+                    .HeadingLevel = GetInt(args, "heading_level", 0),
+                    .InheritNumbering = GetBool(args, "inherit_numbering", False)
                 })
             End If
 
@@ -1158,6 +1403,16 @@ Namespace Agents
                 Case "false", "0", "no" : Return False
                 Case Else : Return defaultValue
             End Select
+        End Function
+
+        Private Shared Function JInt(t As JToken, name As System.String, defaultValue As System.Int32) As System.Int32
+            If t Is Nothing Then Return defaultValue
+            Dim v As JToken = t(name)
+            If v Is Nothing OrElse v.Type = JTokenType.Null Then Return defaultValue
+
+            Dim parsed As System.Int32
+            If System.Int32.TryParse(v.ToString(), parsed) Then Return parsed
+            Return defaultValue
         End Function
 
         ' --------------------------------------------------------------- comments
@@ -1270,12 +1525,22 @@ Namespace Agents
                             .Date = DateTime.UtcNow
                         }
 
-                        cmt.AppendChild(
-                            New W.Paragraph(
-                                New W.Run(
-                                    New W.Text(t.Text) With {
-                                        .Space = SpaceProcessingModeValues.Preserve
-                                    })))
+                        Dim commentParagraph As New W.Paragraph()
+                        Dim commentReferenceRun As New W.Run()
+                        Dim commentReferenceProperties As New W.RunProperties()
+                        commentReferenceProperties.AppendChild(
+                            New W.RunStyle() With {.Val = "CommentReference"})
+                        commentReferenceRun.AppendChild(commentReferenceProperties)
+                        commentReferenceRun.AppendChild(New W.AnnotationReferenceMark())
+                        commentParagraph.AppendChild(commentReferenceRun)
+
+                        Dim commentTextRun As New W.Run()
+                        commentTextRun.AppendChild(
+                            New W.Text(t.Text) With {
+                                .Space = SpaceProcessingModeValues.Preserve
+                            })
+                        commentParagraph.AppendChild(commentTextRun)
+                        cmt.AppendChild(commentParagraph)
 
                         commentsPart.Comments.AppendChild(cmt)
                         anyApplied = True
@@ -2082,12 +2347,12 @@ Namespace Agents
                                                    text As String,
                                                    asMarkup As Boolean,
                                                    author As String,
-                                                   body As W.Body)
+                                                   scope As OpenXmlElement)
             Dim runs As List(Of W.Run) = ParseInlineRuns(text)
 
             If asMarkup Then
                 Dim ins As New W.InsertedRun() With {
-                    .Id = NextChangeId(body).ToString(),
+                    .Id = NextChangeId(scope).ToString(),
                     .Author = author,
                     .Date = DateTime.UtcNow
                 }
@@ -2103,20 +2368,45 @@ Namespace Agents
         End Sub
 
         Private Shared Function MakeMarkdownParagraph(line As String,
-                                                      body As W.Body,
+                                                      scope As OpenXmlElement,
                                                       asMarkup As Boolean,
-                                                      author As String) As W.Paragraph
+                                                      author As String,
+                                                      Optional explicitStyle As System.String = Nothing,
+                                                      Optional headingLevel As System.Int32 = 0,
+                                                      Optional numberingSource As W.Paragraph = Nothing) As W.Paragraph
             Dim para As New W.Paragraph()
             Dim styleId As String = Nothing
             Dim content As String = DetectBlock(line, styleId)
 
-            If styleId IsNot Nothing Then
-                Dim pPr As New W.ParagraphProperties()
-                pPr.AppendChild(New W.ParagraphStyleId() With {.Val = styleId})
+            If styleId Is Nothing Then
+                If headingLevel >= 1 AndAlso headingLevel <= 6 Then
+                    styleId = "Heading" & headingLevel.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                ElseIf Not System.String.IsNullOrWhiteSpace(explicitStyle) Then
+                    styleId = explicitStyle.Trim()
+                End If
+            End If
+
+            Dim pPr As W.ParagraphProperties = Nothing
+            If styleId IsNot Nothing OrElse numberingSource IsNot Nothing Then
+                pPr = New W.ParagraphProperties()
                 para.AppendChild(pPr)
             End If
 
-            AppendInlineRunsWrapped(para, content, asMarkup, author, body)
+            If styleId IsNot Nothing Then
+                pPr.AppendChild(New W.ParagraphStyleId() With {.Val = styleId})
+            End If
+
+            If numberingSource IsNot Nothing Then
+                Dim sourcePPr As W.ParagraphProperties = numberingSource.Elements(Of W.ParagraphProperties)().FirstOrDefault()
+                If sourcePPr IsNot Nothing Then
+                    Dim sourceNumPr As W.NumberingProperties = sourcePPr.Elements(Of W.NumberingProperties)().FirstOrDefault()
+                    If sourceNumPr IsNot Nothing Then
+                        pPr.AppendChild(CType(sourceNumPr.CloneNode(True), W.NumberingProperties))
+                    End If
+                End If
+            End If
+
+            AppendInlineRunsWrapped(para, content, asMarkup, author, scope)
             Return para
         End Function
 
@@ -2163,21 +2453,25 @@ Namespace Agents
         End Function
 
         Private Shared Function NextChangeId(scope As OpenXmlElement) As Integer
-            Dim maxId As Integer = 0
+            Dim allocator As RevisionIdAllocator = _activeRevisionIdAllocator.Value
+            If allocator IsNot Nothing Then Return allocator.NextId()
 
-            For Each n As W.InsertedRun In scope.Descendants(Of W.InsertedRun)()
-                Dim v As Integer
-                If n.Id IsNot Nothing AndAlso Integer.TryParse(n.Id.Value, v) AndAlso v > maxId Then
-                    maxId = v
-                End If
-            Next
-
-            For Each n As W.DeletedRun In scope.Descendants(Of W.DeletedRun)()
-                Dim v As Integer
-                If n.Id IsNot Nothing AndAlso Integer.TryParse(n.Id.Value, v) AndAlso v > maxId Then
-                    maxId = v
-                End If
-            Next
+            Dim maxId As System.Int32 = 0
+            If scope IsNot Nothing Then
+                Dim candidates As New System.Collections.Generic.List(Of OpenXmlElement) From {scope}
+                candidates.AddRange(scope.Descendants())
+                For Each element As OpenXmlElement In candidates
+                    If element Is Nothing Then Continue For
+                    Select Case If(element.LocalName, System.String.Empty)
+                        Case "ins", "del", "moveFrom", "moveTo", "rPrChange", "pPrChange", "tblPrChange", "trPrChange", "tcPrChange", "sectPrChange", "numPrChange"
+                            For Each attr As OpenXmlAttribute In element.GetAttributes()
+                                If Not System.String.Equals(attr.LocalName, "id", System.StringComparison.Ordinal) Then Continue For
+                                Dim value As System.Int32
+                                If System.Int32.TryParse(attr.Value, value) AndAlso value > maxId Then maxId = value
+                            Next
+                    End Select
+                Next
+            End If
 
             Return maxId + 1
         End Function
@@ -2379,7 +2673,278 @@ Namespace Agents
             End Try
         End Function
 
+
+        Private Shared Function ExecuteVerifyRevisions(args As IDictionary(Of String, Object)) As String
+            Dim baselinePath As String = PathPolicy.Resolve(GetStr(args, "baseline_path"), PathAccess.Read)
+            Dim redlinePath As String = PathPolicy.Resolve(GetStr(args, "redline_path"), PathAccess.Read)
+            Dim expectedTargetRaw As String = GetStr(args, "expected_target_path")
+            Dim expectedTargetPath As String = Nothing
+            If Not String.IsNullOrWhiteSpace(expectedTargetRaw) Then expectedTargetPath = PathPolicy.Resolve(expectedTargetRaw, PathAccess.Read)
+            Dim requireCleanBaseline As Boolean = GetBool(args, "require_clean_baseline", True)
+
+            If Not File.Exists(baselinePath) Then Return Err_("baseline_not_found", "Baseline file not found.")
+            If Not File.Exists(redlinePath) Then Return Err_("redline_not_found", "Redline file not found.")
+            If expectedTargetPath IsNot Nothing AndAlso Not File.Exists(expectedTargetPath) Then Return Err_("target_not_found", "Expected target file not found.")
+
+            Dim baselineRevisionCount As Integer = CountSupportedRevisionElements(baselinePath)
+            If requireCleanBaseline AndAlso baselineRevisionCount <> 0 Then
+                Return JsonConvert.SerializeObject(New With {
+                    Key .status = "not_applicable",
+                    Key .reason = "baseline_contains_revisions",
+                    Key .baseline_revision_count = baselineRevisionCount,
+                    Key .baseline_path = baselinePath,
+                    Key .redline_path = redlinePath
+                })
+            End If
+
+            Dim unsupported As List(Of String) = FindUnsupportedRevisionKinds(redlinePath)
+            If unsupported.Count > 0 Then
+                Return JsonConvert.SerializeObject(New With {
+                    Key .status = "not_applicable",
+                    Key .reason = "unsupported_revision_kinds",
+                    Key .unsupported_revision_kinds = unsupported,
+                    Key .baseline_path = baselinePath,
+                    Key .redline_path = redlinePath
+                })
+            End If
+
+            Dim redlineRevisionCount As Integer = CountSupportedRevisionElements(redlinePath)
+            If redlineRevisionCount = 0 Then
+                Return JsonConvert.SerializeObject(New With {
+                    Key .status = "failed",
+                    Key .reason = "no_revisions_found",
+                    Key .baseline_revision_count = baselineRevisionCount,
+                    Key .redline_revision_count = redlineRevisionCount
+                })
+            End If
+
+            Dim rejectPath As String = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "redink-reject-" & System.Guid.NewGuid().ToString("N") & ".docx")
+            Dim acceptPath As String = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "redink-accept-" & System.Guid.NewGuid().ToString("N") & ".docx")
+            Try
+                File.Copy(redlinePath, rejectPath, True)
+                File.Copy(redlinePath, acceptPath, True)
+                ApplyRevisionView(rejectPath, acceptChanges:=False)
+                ApplyRevisionView(acceptPath, acceptChanges:=True)
+
+                Dim baselineText As String = NormalizeVerificationText(SharedMethods.DocxTextExtractor.ReadDocxSandboxed(baselinePath))
+                Dim rejectedText As String = NormalizeVerificationText(SharedMethods.DocxTextExtractor.ReadDocxSandboxed(rejectPath))
+                Dim acceptedText As String = NormalizeVerificationText(SharedMethods.DocxTextExtractor.ReadDocxSandboxed(acceptPath))
+                Dim rejectMatches As Boolean = String.Equals(baselineText, rejectedText, StringComparison.Ordinal)
+
+                Dim targetMatches As System.Nullable(Of Boolean) = Nothing
+                Dim expectedTargetHash As String = Nothing
+                If expectedTargetPath IsNot Nothing Then
+                    Dim targetText As String = NormalizeVerificationText(SharedMethods.DocxTextExtractor.ReadDocxSandboxed(expectedTargetPath))
+                    targetMatches = String.Equals(targetText, acceptedText, StringComparison.Ordinal)
+                    expectedTargetHash = Sha256Text(targetText)
+                End If
+
+                Dim overall As Boolean = rejectMatches AndAlso (Not targetMatches.HasValue OrElse targetMatches.Value)
+                Return JsonConvert.SerializeObject(New With {
+                    Key .status = If(overall, "verified", "failed"),
+                    Key .baseline_path = baselinePath,
+                    Key .redline_path = redlinePath,
+                    Key .expected_target_path = expectedTargetPath,
+                    Key .baseline_revision_count = baselineRevisionCount,
+                    Key .redline_revision_count = redlineRevisionCount,
+                    Key .reject_matches_baseline = rejectMatches,
+                    Key .accept_matches_expected_target = targetMatches,
+                    Key .baseline_text_sha256 = Sha256Text(baselineText),
+                    Key .rejected_text_sha256 = Sha256Text(rejectedText),
+                    Key .accepted_text_sha256 = Sha256Text(acceptedText),
+                    Key .expected_target_text_sha256 = expectedTargetHash
+                })
+            Finally
+                Try
+                    If System.IO.File.Exists(rejectPath) Then
+                        System.IO.File.Delete(rejectPath)
+                    End If
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("word_verify_revisions cleanup failed for reject copy: " & ex.Message)
+                End Try
+                Try
+                    If System.IO.File.Exists(acceptPath) Then
+                        System.IO.File.Delete(acceptPath)
+                    End If
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("word_verify_revisions cleanup failed for accept copy: " & ex.Message)
+                End Try
+            End Try
+        End Function
+
+
+        Private Shared Sub SaveVerificationRoot(root As OpenXmlElement)
+            If TypeOf root Is W.Document Then
+                CType(root, W.Document).Save()
+            ElseIf TypeOf root Is W.Footnotes Then
+                CType(root, W.Footnotes).Save()
+            ElseIf TypeOf root Is W.Endnotes Then
+                CType(root, W.Endnotes).Save()
+            End If
+        End Sub
+
+        Private Shared Function NormalizeVerificationText(value As String) As String
+            If value Is Nothing Then Return String.Empty
+            Return value.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
+        End Function
+
+        Private Shared Function Sha256Text(value As String) As String
+            Using sha As System.Security.Cryptography.SHA256 = System.Security.Cryptography.SHA256.Create()
+                Dim bytes As Byte() = System.Text.Encoding.UTF8.GetBytes(If(value, String.Empty))
+                Return String.Concat(sha.ComputeHash(bytes).Select(Function(b) b.ToString("x2", System.Globalization.CultureInfo.InvariantCulture)))
+            End Using
+        End Function
+
+        Private Shared Function CountSupportedRevisionElements(path As String) As Integer
+            Using doc As WordprocessingDocument = WordprocessingDocument.Open(path, False)
+                Return GetVerificationRoots(doc).Sum(
+                    Function(root)
+                        Return root.Descendants(Of W.InsertedRun)().Count() +
+                               root.Descendants(Of W.DeletedRun)().Count() +
+                               root.Descendants(Of W.Inserted)().Count(Function(ins) TypeOf ins.Parent Is W.ParagraphMarkRunProperties)
+                    End Function)
+            End Using
+        End Function
+
+        Private Shared Function FindUnsupportedRevisionKinds(path As String) As List(Of String)
+            Dim result As New HashSet(Of String)(StringComparer.Ordinal)
+            Using doc As WordprocessingDocument = WordprocessingDocument.Open(path, False)
+                For Each root As OpenXmlElement In GetVerificationRoots(doc)
+                    For Each el As OpenXmlElement In root.Descendants()
+                        Dim ln As String = el.LocalName
+                        Dim isSupportedParagraphMarkInsertion As Boolean =
+                            TypeOf el Is W.Inserted AndAlso TypeOf el.Parent Is W.ParagraphMarkRunProperties
+
+                        If (ln = "ins" AndAlso Not TypeOf el Is W.InsertedRun AndAlso Not isSupportedParagraphMarkInsertion) OrElse
+                           (ln = "del" AndAlso Not TypeOf el Is W.DeletedRun) OrElse
+                           ln.EndsWith("PrChange", StringComparison.Ordinal) OrElse
+                           ln = "moveFrom" OrElse ln = "moveTo" OrElse
+                           ln = "moveFromRangeStart" OrElse ln = "moveFromRangeEnd" OrElse
+                           ln = "moveToRangeStart" OrElse ln = "moveToRangeEnd" Then
+
+                            result.Add(ln)
+                        End If
+                    Next
+                Next
+            End Using
+            Return result.OrderBy(Function(x) x, StringComparer.Ordinal).ToList()
+        End Function
+
+        Private Shared Function GetVerificationRoots(doc As WordprocessingDocument) As List(Of OpenXmlElement)
+            Dim roots As New List(Of OpenXmlElement)()
+            If doc.MainDocumentPart IsNot Nothing AndAlso doc.MainDocumentPart.Document IsNot Nothing Then roots.Add(doc.MainDocumentPart.Document)
+            If doc.MainDocumentPart IsNot Nothing AndAlso doc.MainDocumentPart.FootnotesPart IsNot Nothing AndAlso doc.MainDocumentPart.FootnotesPart.Footnotes IsNot Nothing Then roots.Add(doc.MainDocumentPart.FootnotesPart.Footnotes)
+            If doc.MainDocumentPart IsNot Nothing AndAlso doc.MainDocumentPart.EndnotesPart IsNot Nothing AndAlso doc.MainDocumentPart.EndnotesPart.Endnotes IsNot Nothing Then roots.Add(doc.MainDocumentPart.EndnotesPart.Endnotes)
+            Return roots
+        End Function
+
+        Private Shared Sub ApplyRevisionView(path As String, acceptChanges As Boolean)
+            Using doc As WordprocessingDocument = WordprocessingDocument.Open(path, True)
+                For Each root As OpenXmlElement In GetVerificationRoots(doc)
+                    Dim inserted As List(Of W.InsertedRun) = root.Descendants(Of W.InsertedRun)().ToList()
+                    For Each ins As W.InsertedRun In inserted
+                        If acceptChanges Then
+                            For Each child As OpenXmlElement In ins.ChildElements.ToList()
+                                ins.InsertBeforeSelf(child.CloneNode(True))
+                            Next
+                        End If
+                        ins.Remove()
+                    Next
+                    Dim deleted As List(Of W.DeletedRun) = root.Descendants(Of W.DeletedRun)().ToList()
+                    For Each del As W.DeletedRun In deleted
+                        If Not acceptChanges Then
+                            For Each child As OpenXmlElement In del.ChildElements.ToList()
+                                Dim clone As OpenXmlElement = child.CloneNode(True)
+                                For Each dt As W.DeletedText In clone.Descendants(Of W.DeletedText)().ToList()
+                                    Dim t As New W.Text(dt.Text)
+                                    If dt.Space IsNot Nothing Then t.Space = dt.Space
+                                    dt.InsertBeforeSelf(t)
+                                    dt.Remove()
+                                Next
+                                del.InsertBeforeSelf(clone)
+                            Next
+                        End If
+                        del.Remove()
+                    Next
+
+                    Dim insertedParagraphMarks As List(Of W.Inserted) =
+                        root.Descendants(Of W.Inserted)().
+                            Where(Function(ins) TypeOf ins.Parent Is W.ParagraphMarkRunProperties).
+                            ToList()
+
+                    For Each insertedParagraphMark As W.Inserted In insertedParagraphMarks
+                        ApplyInsertedParagraphMarkView(insertedParagraphMark, acceptChanges)
+                    Next
+
+                    SaveVerificationRoot(root)
+                Next
+            End Using
+        End Sub
+
+        Private Shared Sub ApplyInsertedParagraphMarkView(insertedParagraphMark As W.Inserted,
+                                                                 acceptChanges As Boolean)
+            If insertedParagraphMark Is Nothing Then Return
+
+            Dim markRunProperties As W.ParagraphMarkRunProperties =
+                TryCast(insertedParagraphMark.Parent, W.ParagraphMarkRunProperties)
+            Dim paragraphProperties As W.ParagraphProperties = Nothing
+            Dim paragraph As W.Paragraph = Nothing
+
+            If markRunProperties IsNot Nothing Then
+                paragraphProperties = TryCast(markRunProperties.Parent, W.ParagraphProperties)
+            End If
+            If paragraphProperties IsNot Nothing Then
+                paragraph = TryCast(paragraphProperties.Parent, W.Paragraph)
+            End If
+
+            insertedParagraphMark.Remove()
+            If markRunProperties IsNot Nothing AndAlso markRunProperties.ChildElements.Count = 0 Then
+                markRunProperties.Remove()
+            End If
+
+            If acceptChanges OrElse paragraph Is Nothing OrElse paragraph.Parent Is Nothing Then Return
+
+            Dim parent As OpenXmlElement = paragraph.Parent
+            Dim siblings As System.Collections.Generic.List(Of OpenXmlElement) = parent.ChildElements.ToList()
+            Dim paragraphIndex As System.Int32 = siblings.IndexOf(paragraph)
+            Dim nextParagraph As W.Paragraph = Nothing
+
+            If paragraphIndex >= 0 AndAlso paragraphIndex + 1 < siblings.Count Then
+                nextParagraph = TryCast(siblings(paragraphIndex + 1), W.Paragraph)
+            End If
+
+            If nextParagraph IsNot Nothing Then
+                Dim paragraphContent As System.Collections.Generic.List(Of OpenXmlElement) =
+                    paragraph.ChildElements.Where(Function(child) Not TypeOf child Is W.ParagraphProperties).ToList()
+                Dim insertIndex As System.Int32 =
+                    If(nextParagraph.Elements(Of W.ParagraphProperties)().FirstOrDefault() Is Nothing, 0, 1)
+
+                For Each child As OpenXmlElement In paragraphContent
+                    child.Remove()
+                    nextParagraph.InsertAt(Of OpenXmlElement)(child, insertIndex)
+                    insertIndex += 1
+                Next
+
+                paragraph.Remove()
+            ElseIf paragraph.ChildElements.All(Function(child) TypeOf child Is W.ParagraphProperties) Then
+                paragraph.Remove()
+            End If
+        End Sub
+
         ' --------------------------------------------------------------- factories
+
+
+        Private Shared Function BuildVerifyRevisions() As ModelConfig
+            Return New ModelConfig() With {
+                .ToolName = ToolVerifyRevisions,
+                .Tool = True,
+                .ToolPriority = 891,
+                .ToolErrorHandling = "skip",
+                .ModelDescription = "Word (verify tracked-change roundtrip)",
+                .ToolDefinition = "{""name"":""" & ToolVerifyRevisions & """,""description"":""Read-only verification of a tracked-changes DOCX. Rejecting all supported inserted/deleted text-run revisions and inserted paragraph-mark revisions must reproduce the baseline; optionally accepting them must reproduce an expected target DOCX. The verifier never mutates caller files. A baseline with existing revisions or unsupported revision kinds returns not_applicable rather than silently changing semantics."",""parameters"":{""type"":""object"",""properties"":{""baseline_path"":{""type"":""string""},""redline_path"":{""type"":""string""},""expected_target_path"":{""type"":""string""},""require_clean_baseline"":{""type"":""boolean""}},""required"":[""baseline_path"",""redline_path""]}}",
+                .ToolInstructionsPrompt = ToolVerifyRevisions & ": Verify tracked changes without mutating the supplied files. Default require_clean_baseline=true. Treat status=not_applicable as an explicit boundary, never as success."
+            }
+        End Function
 
         Private Shared Function BuildExtract() As ModelConfig
             Return New ModelConfig() With {
@@ -2388,7 +2953,7 @@ Namespace Agents
                 .ToolPriority = 880,
                 .ToolErrorHandling = "skip",
                 .ModelDescription = "Word (extract text)",
-                .ToolDefinition = "{""name"":""" & ToolExtract & """,""description"":""Extract plain text from a .docx file, including the main body, footnotes, endnotes, headers/footers, tables, numbering, and text-box/margin text when present."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string""},""max_chars"":{""type"":""integer"",""description"":""Optional cap on returned text length.""}},""required"":[""path""]}}",
+                .ToolDefinition = "{""name"":""" & ToolExtract & """,""description"":""Extract plain text from an OpenXML .docx/.docm file. Legacy OLE .doc and encrypted documents return an explicit format-routing error; use text_export_to_text under the configured legacy policy. Includes the main body, footnotes, endnotes, headers/footers, tables, numbering, and text-box/margin text when present."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string""},""max_chars"":{""type"":""integer"",""description"":""Optional inline-preview cap. The complete extraction is stored under result_ref; retrieve omitted ranges with context_expand before using them. If snapshot storage fails, the full text is returned.""}},""required"":[""path""]}}",
                 .ToolInstructionsPrompt = ToolExtract & ": Extract plain text from a .docx file, including footnotes and endnotes."
             }
         End Function
@@ -2415,26 +2980,33 @@ Namespace Agents
                 .CapabilityTags = "docx_edit",
                 .ToolDefinition =
                     "{""name"":""" & ToolWrite & """," &
-                    """description"":""Modify text in a .docx WITHOUT tracked changes, in the main body AND in footnotes and endnotes, preserving fields, images, comments and run formatting. Ops: replace | insert_before | insert_after | append (append targets the main body) | delete_paragraph. 'find' must not span a paragraph break; to merge two paragraphs, replace the first and delete_paragraph the second. Pass multiple edits at once via 'tasks'.""," &
+                    """description"":""Modify text in a .docx WITHOUT tracked changes, in the main body AND in footnotes and endnotes, preserving fields, images, comments and run formatting. Ops: replace | insert_before | insert_after | insert_paragraph_before | insert_paragraph_after | append (append targets the main body) | delete_paragraph. For insert_paragraph_before/after, every line of text becomes a sibling paragraph in the anchor story. 'find' must not span a paragraph break; to merge two paragraphs, replace the first and delete_paragraph the second. Pass multiple edits at once via 'tasks'.""," &
                     """parameters"":{""type"":""object"",""properties"":{" &
                     """path"":{""type"":""string""}," &
                     """operation_id"":{""type"":""string"",""description"":""Stable caller-supplied logical operation id. Reuse exactly for retries of the same logical operation.""}," &
-                    """op"":{""type"":""string"",""enum"":[""replace"",""insert_before"",""insert_after"",""append"",""delete_paragraph""]}," &
+                    """op"":{""type"":""string"",""enum"":[""replace"",""insert_before"",""insert_after"",""insert_paragraph_before"",""insert_paragraph_after"",""append"",""delete_paragraph""]}," &
                     """find"":{""type"":""string""}," &
                     """text"":{""type"":""string""}," &
                     """only_first"":{""type"":""boolean"",""description"":""Default true.""}," &
+                    """style"":{""type"":""string"",""description"":""Optional Word paragraph style id for the first paragraph created by insert_paragraph_before/after when that line has no Markdown block style.""}," &
+                    """heading_level"":{""type"":""integer"",""minimum"":1,""maximum"":6,""description"":""Optional Heading1..Heading6 fallback for the first paragraph created by insert_paragraph_before/after. A leading Markdown # heading on that line takes precedence.""}," &
+                    """inherit_numbering"":{""type"":""boolean"",""description"":""For insert_paragraph_before/after only. Default false; when true, copy the anchor paragraph numbering properties to the first inserted paragraph.""}," &
                     """tasks"":{""type"":""array"",""description"":""Batch of edits applied in order; each may match text produced by earlier tasks."",""items"":{""type"":""object"",""properties"":{" &
                     """operation_id"":{""type"":""string"",""description"":""Stable caller-supplied logical operation id for this task.""}," &
-                    """op"":{""type"":""string"",""enum"":[""replace"",""insert_before"",""insert_after"",""append"",""delete_paragraph""]}," &
+                    """op"":{""type"":""string"",""enum"":[""replace"",""insert_before"",""insert_after"",""insert_paragraph_before"",""insert_paragraph_after"",""append"",""delete_paragraph""]}," &
                     """find"":{""type"":""string""}," &
                     """text"":{""type"":""string""}," &
-                    """only_first"":{""type"":""boolean""}},""required"":[""operation_id""]}}}," &
+                    """only_first"":{""type"":""boolean""}," &
+                    """style"":{""type"":""string""}," &
+                    """heading_level"":{""type"":""integer"",""minimum"":1,""maximum"":6}," &
+                    """inherit_numbering"":{""type"":""boolean""}},""required"":[""operation_id""]}}}," &
                     """required"":[""path""]}}",
                 .ToolInstructionsPrompt =
-                    ToolWrite & ": Edit a .docx without revision marks. Same behavior as word_markup but without tracked changes. " &
+                    ToolWrite & ": Edit a .docx without revision marks. Same behavior as word_markup but without tracked changes. insert_paragraph_before/after create sibling paragraphs in the matched anchor story; each text line becomes one paragraph. append creates main-body paragraphs before a final section-properties node. " &
                     "Batch related edits in one call via 'tasks'. Every logical operation MUST have an explicit opaque operation_id; each batched task needs its own operation_id. Preserve it unchanged, including retries. " &
                     "The result 'status' may be complete, partial, or none: partial/none is NOT a block or failure. " &
-                    "When status is partial/none, re-read the document to get the CURRENT text and retry ONLY the failed tasks[].find values; then report completion normally. " &
+                    "Every find anchor MUST come from the CURRENT DOCX being edited. Do not use text copied only from a source PDF, OCR export, earlier document version, or external reconstruction as a find anchor unless the same text was verified in the current DOCX. " &
+                    "When status is partial/none, re-read the document to get the CURRENT text and retry ONLY the failed tasks[].find values; then report completion normally. For broad semantic rewrites where exact current-document anchors are not the right abstraction, prefer process_word_document instead of reconstructing the document. " &
                     "Prefer the Outlook and Autopilot tools (like process_word_document) when they can accomplish the task; only fall back to word_* tools when those tools are not suitable, or when a skill or the user explicitly asks to use word_* tools."
             }
         End Function
@@ -2449,27 +3021,34 @@ Namespace Agents
                 .CapabilityTags = "docx_edit",
                 .ToolDefinition =
                     "{""name"":""" & ToolMarkup & """," &
-                    """description"":""Modify text in a .docx using tracked changes (Word revision marks), in the main body AND in footnotes and endnotes, preserving fields, images, comments, existing tracked changes and run formatting. Only inserted/deleted words are marked. Pass multiple edits at once via 'tasks'.""," &
+                    """description"":""Modify text in a .docx using tracked changes (Word revision marks), in the main body AND in footnotes and endnotes, preserving fields, images, comments, existing tracked changes and run formatting. Ops insert_paragraph_before/after create tracked sibling paragraphs; each text line becomes one paragraph and a leading # heading uses the existing Markdown heading mapping. Pass multiple edits at once via 'tasks'.""," &
                     """parameters"":{""type"":""object"",""properties"":{" &
                     """path"":{""type"":""string""}," &
                     """operation_id"":{""type"":""string"",""description"":""Stable caller-supplied logical operation id. Reuse exactly for retries of the same logical operation.""}," &
-                    """op"":{""type"":""string"",""enum"":[""replace"",""insert_before"",""insert_after"",""append"",""delete_paragraph""]}," &
+                    """op"":{""type"":""string"",""enum"":[""replace"",""insert_before"",""insert_after"",""insert_paragraph_before"",""insert_paragraph_after"",""append"",""delete_paragraph""]}," &
                     """find"":{""type"":""string""}," &
                     """text"":{""type"":""string""}," &
                     """author"":{""type"":""string""}," &
                     """only_first"":{""type"":""boolean""}," &
+                    """style"":{""type"":""string"",""description"":""Optional Word paragraph style id for the first paragraph created by insert_paragraph_before/after when that line has no Markdown block style.""}," &
+                    """heading_level"":{""type"":""integer"",""minimum"":1,""maximum"":6,""description"":""Optional Heading1..Heading6 fallback for the first paragraph created by insert_paragraph_before/after. A leading Markdown # heading on that line takes precedence.""}," &
+                    """inherit_numbering"":{""type"":""boolean"",""description"":""For insert_paragraph_before/after only. Default false; when true, copy the anchor paragraph numbering properties to the first inserted paragraph.""}," &
                     """tasks"":{""type"":""array"",""description"":""Batch of edits applied in order; each may match text produced by earlier tasks."",""items"":{""type"":""object"",""properties"":{" &
                     """operation_id"":{""type"":""string"",""description"":""Stable caller-supplied logical operation id for this task.""}," &
-                    """op"":{""type"":""string"",""enum"":[""replace"",""insert_before"",""insert_after"",""append"",""delete_paragraph""]}," &
+                    """op"":{""type"":""string"",""enum"":[""replace"",""insert_before"",""insert_after"",""insert_paragraph_before"",""insert_paragraph_after"",""append"",""delete_paragraph""]}," &
                     """find"":{""type"":""string""}," &
                     """text"":{""type"":""string""}," &
-                    """only_first"":{""type"":""boolean""}},""required"":[""operation_id""]}}}," &
+                    """only_first"":{""type"":""boolean""}," &
+                    """style"":{""type"":""string""}," &
+                    """heading_level"":{""type"":""integer"",""minimum"":1,""maximum"":6}," &
+                    """inherit_numbering"":{""type"":""boolean""}},""required"":[""operation_id""]}}}," &
                     """required"":[""path""]}}",
                 .ToolInstructionsPrompt =
-                    ToolMarkup & ": Edit a .docx with revision marks (tracked changes). " &
+                    ToolMarkup & ": Edit a .docx with revision marks (tracked changes). insert_paragraph_before/after create tracked sibling paragraphs in the matched anchor story; each text line becomes one paragraph and the new paragraph mark is tracked. append creates main-body paragraphs before a final section-properties node and tracks each appended paragraph mark. " &
                     "Batch related edits in one call via 'tasks'. Every logical operation MUST have an explicit opaque operation_id; each batched task needs its own operation_id. Preserve it unchanged, including retries. " &
                     "The result 'status' may be complete, partial, or none: partial/none is NOT a block or failure. " &
-                    "When status is partial/none, re-read the document to get the CURRENT text and retry ONLY the failed tasks[].find values; then report completion normally. " &
+                    "Every find anchor MUST come from the CURRENT DOCX being edited. Do not use text copied only from a source PDF, OCR export, earlier document version, or external reconstruction as a find anchor unless the same text was verified in the current DOCX. " &
+                    "When status is partial/none, re-read the document to get the CURRENT text and retry ONLY the failed tasks[].find values; then report completion normally. For broad semantic rewrites where exact current-document anchors are not the right abstraction, prefer process_word_document instead of reconstructing the document. " &
                     "Prefer the Outlook and Autopilot tools when they can accomplish the task; only fall back to word_* tools when those tools are not suitable, or when a skill or the user explicitly asks to use word_* tools."
             }
         End Function

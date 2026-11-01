@@ -43,7 +43,7 @@ Partial Public Class ThisAddIn
         Try
             Dim json As New JObject From {
                 {"T", "AutoPilot"},
-                {"V", 5},
+                {"V", 7},
                 {"AP_FilterRules", If(My.Settings.AP_FilterRules, "")},
                 {"AP_WhitelistedSenders", If(My.Settings.AP_WhitelistedSenders, "")},
                 {"AP_SubjectTriggerWord", If(My.Settings.AP_SubjectTriggerWord, "")},
@@ -59,6 +59,7 @@ Partial Public Class ThisAddIn
                 {"AP_AutoDeleteAfterHours", My.Settings.AP_AutoDeleteAfterHours},
                 {"AP_EnableWebGrounding", My.Settings.AP_EnableWebGrounding},
                 {"AP_EnableVoicemailProcessing", My.Settings.AP_EnableVoicemailProcessing},
+                {"AP_EnableScanProcessing", My.Settings.AP_EnableScanProcessing},
                 {"AP_VoicemailSenderAddress", If(My.Settings.AP_VoicemailSenderAddress, "")},
                 {"AP_VoicemailCallerIdMapPath", If(My.Settings.AP_VoicemailCallerIdMapPath, "")},
                 {"AP_EnableScheduler", My.Settings.AP_EnableScheduler},
@@ -66,12 +67,20 @@ Partial Public Class ThisAddIn
                 {"AP_EnableUserFiles", My.Settings.AP_EnableUserFiles},
                 {"AP_EnablePrivacyProtection", My.Settings.AP_EnablePrivacyProtection},
                 {"AP_SelectedExternalToolNames", If(My.Settings.AP_SelectedExternalToolNames, "")},
+                {"AP_AvailableExternalToolNames", If(My.Settings.AP_AvailableExternalToolNames, "")},
                 {"AP_DashboardWindowX", My.Settings.AP_DashboardWindowX},
                 {"AP_DashboardWindowY", My.Settings.AP_DashboardWindowY},
                 {"AP_DashboardWindowW", My.Settings.AP_DashboardWindowW},
                 {"AP_DashboardWindowH", My.Settings.AP_DashboardWindowH},
                 {"AP_SenderToolPolicyPath", If(My.Settings.AP_SenderToolPolicyPath, "")},
                 {"AP_ThreadRetentionDays", My.Settings.AP_ThreadRetentionDays},
+                {"AP_LogDiagnosticsMaxInputChars", My.Settings.AP_LogDiagnosticsMaxInputChars},
+                {"AP_LogDiagnosticsReportIntervalDays", My.Settings.AP_LogDiagnosticsReportIntervalDays},
+                {"AP_LogDiagnosticsReportEmail", If(My.Settings.AP_LogDiagnosticsReportEmail, "")},
+                {"AP_PromptCoachingEnabled", My.Settings.AP_PromptCoachingEnabled},
+                {"AP_PromptCoachingDefaultForAllUsers", My.Settings.AP_PromptCoachingDefaultForAllUsers},
+                {"AP_PromptCoachingImmediateDelivery", My.Settings.AP_PromptCoachingImmediateDelivery},
+                {"AP_PromptCoachingIncludedUsers", If(My.Settings.AP_PromptCoachingIncludedUsers, System.String.Empty)},
                 {"D", Date.UtcNow.ToString("o")}
             }
 
@@ -155,6 +164,7 @@ Partial Public Class ThisAddIn
             My.Settings.AP_AutoDeleteAfterHours = GetJsonInteger(json, "AP_AutoDeleteAfterHours", My.Settings.AP_AutoDeleteAfterHours)
             My.Settings.AP_EnableWebGrounding = GetJsonBoolean(json, "AP_EnableWebGrounding", My.Settings.AP_EnableWebGrounding)
             My.Settings.AP_EnableVoicemailProcessing = GetJsonBoolean(json, "AP_EnableVoicemailProcessing", My.Settings.AP_EnableVoicemailProcessing)
+            My.Settings.AP_EnableScanProcessing = GetJsonBoolean(json, "AP_EnableScanProcessing", False)
             My.Settings.AP_VoicemailSenderAddress = GetJsonString(json, "AP_VoicemailSenderAddress")
             My.Settings.AP_VoicemailCallerIdMapPath = GetJsonString(json, "AP_VoicemailCallerIdMapPath")
             My.Settings.AP_EnableScheduler = GetJsonBoolean(json, "AP_EnableScheduler", My.Settings.AP_EnableScheduler)
@@ -162,12 +172,20 @@ Partial Public Class ThisAddIn
             My.Settings.AP_EnableUserFiles = GetJsonBoolean(json, "AP_EnableUserFiles", My.Settings.AP_EnableUserFiles)
             My.Settings.AP_EnablePrivacyProtection = GetJsonBoolean(json, "AP_EnablePrivacyProtection", My.Settings.AP_EnablePrivacyProtection)
             My.Settings.AP_SelectedExternalToolNames = GetJsonString(json, "AP_SelectedExternalToolNames")
+            My.Settings.AP_AvailableExternalToolNames = GetJsonString(json, "AP_AvailableExternalToolNames")
             My.Settings.AP_DashboardWindowX = GetJsonInteger(json, "AP_DashboardWindowX", My.Settings.AP_DashboardWindowX)
             My.Settings.AP_DashboardWindowY = GetJsonInteger(json, "AP_DashboardWindowY", My.Settings.AP_DashboardWindowY)
             My.Settings.AP_DashboardWindowW = GetJsonInteger(json, "AP_DashboardWindowW", My.Settings.AP_DashboardWindowW)
             My.Settings.AP_DashboardWindowH = GetJsonInteger(json, "AP_DashboardWindowH", My.Settings.AP_DashboardWindowH)
             My.Settings.AP_SenderToolPolicyPath = GetJsonString(json, "AP_SenderToolPolicyPath")
             My.Settings.AP_ThreadRetentionDays = GetJsonInteger(json, "AP_ThreadRetentionDays", My.Settings.AP_ThreadRetentionDays)
+            My.Settings.AP_LogDiagnosticsReportEmail = GetJsonString(json, "AP_LogDiagnosticsReportEmail")
+            My.Settings.AP_PromptCoachingEnabled = GetJsonBoolean(json, "AP_PromptCoachingEnabled", My.Settings.AP_PromptCoachingEnabled)
+            My.Settings.AP_PromptCoachingDefaultForAllUsers = GetJsonBoolean(json, "AP_PromptCoachingDefaultForAllUsers", My.Settings.AP_PromptCoachingDefaultForAllUsers)
+            My.Settings.AP_PromptCoachingImmediateDelivery = GetJsonBoolean(json, "AP_PromptCoachingImmediateDelivery", My.Settings.AP_PromptCoachingImmediateDelivery)
+            My.Settings.AP_PromptCoachingIncludedUsers = GetJsonString(json, "AP_PromptCoachingIncludedUsers")
+            My.Settings.AP_LogDiagnosticsMaxInputChars = GetJsonInteger(json, "AP_LogDiagnosticsMaxInputChars", My.Settings.AP_LogDiagnosticsMaxInputChars)
+            My.Settings.AP_LogDiagnosticsReportIntervalDays = System.Math.Max(1, System.Math.Min(365, GetJsonInteger(json, "AP_LogDiagnosticsReportIntervalDays", My.Settings.AP_LogDiagnosticsReportIntervalDays)))
 
             My.Settings.Save()
 
@@ -183,6 +201,42 @@ Partial Public Class ThisAddIn
 #End Region
 
 #Region "Registry Low-Level Helpers"
+
+    Private Const RegistrySourcesFooterModeValueName As String = "SourcesFooterMode"
+
+    Private Shared Sub SaveAutoPilotSourcesFooterMode(mode As String)
+        Try
+            Dim normalized As String = If(mode, "external").Trim().ToLowerInvariant()
+            If normalized <> "off" Then normalized = "external"
+
+            Dim fullPath As String = RegistryAutoPilotFullPath
+            Dim hiveName As String = fullPath.Split("\"c)(0)
+            Dim subKeyPath As String = fullPath.Substring(hiveName.Length + 1)
+            Using subKey As RegistryKey = Registry.CurrentUser.CreateSubKey(subKeyPath, True)
+                If subKey IsNot Nothing Then
+                    subKey.SetValue(RegistrySourcesFooterModeValueName, normalized, RegistryValueKind.String)
+                End If
+            End Using
+        Catch ex As System.Exception
+            Debug.WriteLine($"[AutoPilot] Failed to save SourcesFooterMode: {ex.Message}")
+        End Try
+    End Sub
+
+    Private Shared Function LoadAutoPilotSourcesFooterMode() As String
+        Try
+            Dim fullPath As String = RegistryAutoPilotFullPath
+            Dim hiveName As String = fullPath.Split("\"c)(0)
+            Dim subKeyPath As String = fullPath.Substring(hiveName.Length + 1)
+            Using subKey As RegistryKey = Registry.CurrentUser.OpenSubKey(subKeyPath)
+                If subKey Is Nothing Then Return "external"
+                Dim raw As String = If(subKey.GetValue(RegistrySourcesFooterModeValueName, "external")?.ToString(), "external").Trim()
+                If String.Equals(raw, "off", StringComparison.OrdinalIgnoreCase) Then Return "off"
+            End Using
+        Catch ex As System.Exception
+            Debug.WriteLine($"[AutoPilot] Failed to load SourcesFooterMode: {ex.Message}")
+        End Try
+        Return "external"
+    End Function
 
     ''' <summary>
     ''' Writes a string to the registry AutoPilot backup location (default value).

@@ -115,8 +115,7 @@ Namespace SharedLibrary
             Me.Padding = New Padding(0)
 
             Try
-                Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                Me.Icon = Icon.FromHandle(bmp.GetHicon())
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(Me)
             Catch
             End Try
 
@@ -274,7 +273,7 @@ Namespace SharedLibrary
             End Try
         End Sub
 
-        Public Sub ShowWidget()
+        Public Sub ShowWidget(Optional owner As System.Windows.Forms.IWin32Window = Nothing)
             ApplyCalculatedMinimumSize()
             EnsureWidgetVisible()
 
@@ -282,7 +281,8 @@ Namespace SharedLibrary
                 Me.BringToFront()
                 Me.Activate()
             Else
-                Me.Show()
+                Dim safeOwner As System.Windows.Forms.IWin32Window = SharedMethods.IfOwnerOnCurrentThread(owner)
+                If safeOwner IsNot Nothing Then Me.Show(safeOwner) Else Me.Show()
             End If
         End Sub
 
@@ -384,6 +384,11 @@ Namespace SharedLibrary
             _isBusy = True
             UpdateUiState()
             SetDisplayText("Starting…")
+            ' Paint the status immediately, even if the adapter performs synchronous
+            ' configuration or filesystem checks before its first asynchronous yield.
+            If lblTranscript IsNot Nothing AndAlso Not lblTranscript.IsDisposed Then
+                lblTranscript.Refresh()
+            End If
 
             Try
                 Await _speechAdapter.StartListeningAsync(CancellationToken.None).ConfigureAwait(True)

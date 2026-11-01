@@ -91,6 +91,17 @@ Namespace SharedLibrary
         ''' <summary>Subfolder inside each store's SourcePath that holds index metadata and wiki pages.</summary>
         Public Const MetadataFolder As String = ".redink"
 
+        ''' <summary>Identifies reserved Knowledge Store output, including Raw and Wiki.
+        ''' Intake consumers must not recursively treat these artifacts as original sources.
+        ''' Does not inspect, create, modify or delete any file.</summary>
+        Public Shared Function IsGeneratedMetadataPath(path As System.String) As System.Boolean
+            If System.String.IsNullOrWhiteSpace(path) Then Return False
+            For Each component As System.String In path.Replace("\", "/").Split("/"c)
+                If System.String.Equals(component, MetadataFolder, System.StringComparison.OrdinalIgnoreCase) Then Return True
+            Next
+            Return False
+        End Function
+
         ''' <summary>Default filename used when a configured catalog path points to a directory only.</summary>
         Public Const DefaultCatalogFileName As String = "redink-ks-catalog.json"
 
@@ -121,18 +132,22 @@ Namespace SharedLibrary
         ' Replace LoadAll and add the helper methods below it.
 
         Public Shared Function LoadAll(context As ISharedContext) As List(Of KnowledgeStoreDefinition)
-            Dim merged As New List(Of KnowledgeStoreDefinition)()
-
             EnsureCatalogFile(context.INI_KnowledgeStorePathLocal, isLocal:=True)
             EnsureCatalogFile(context.INI_KnowledgeStorePath, isLocal:=False)
+            Return LoadOverviewReadOnly(context)
+        End Function
 
+        ''' <summary>Same catalog resolution/merge as LoadAll, without initialization, repair or writes.</summary>
+        Public Shared Function LoadOverviewReadOnly(context As ISharedContext) As System.Collections.Generic.List(Of KnowledgeStoreDefinition)
+            If context Is Nothing Then Throw New System.ArgumentNullException(NameOf(context))
+            Dim merged As New System.Collections.Generic.List(Of KnowledgeStoreDefinition)()
             merged.AddRange(LoadConfiguredStores(context.INI_KnowledgeStorePathLocal, isFromCentral:=False, context:=context))
             merged.AddRange(LoadConfiguredStores(context.INI_KnowledgeStorePath, isFromCentral:=True, context:=context))
 
             ApplyRuntimeMetadata(merged)
 
-            Dim deduped As New List(Of KnowledgeStoreDefinition)()
-            Dim seenIds As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+            Dim deduped As New System.Collections.Generic.List(Of KnowledgeStoreDefinition)()
+            Dim seenIds As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
 
             For Each def In merged
                 Dim id = If(def.StoreId, "").Trim()

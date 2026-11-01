@@ -15,6 +15,10 @@
 '  - User code wrapped: console.log captured, exceptions become error, timeouts
 '    return timeout error.
 '  - Return value JSON-stringified by wrapper, then unwrapped here.
+'
+' KEY ARCHITECTURE
+'   • Surface: WebView2JsSandbox (VB implementation).
+'   • Entry points/helpers: Initialize, RunAsync, PrepareDocumentAsync.
 ' =============================================================================
 
 Option Strict On

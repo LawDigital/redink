@@ -26,6 +26,10 @@
 ' External dependencies: DocumentFormat.OpenXml, System.Text.Json,
 '   SharedLibrary.SharedMethods (UI + LLM), NetOffice.PowerPointApi
 '   (only for optional thumbnail preview and PNG raster fallback).
+'
+' KEY ARCHITECTURE
+'   • Surface: ThisAddIn, RetemplateOptions (host partial/UI).
+'   • Entry points/helpers: RetemplatePresentation_UI, RetemplatePresentation, RunOnUiThread.
 ' =============================================================================
 
 Option Explicit On
@@ -1033,8 +1037,7 @@ Partial Public Class ThisAddIn
 
             ' Icon — same as all custom forms
             Try
-                Dim bmpIcon As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                frm.Icon = Icon.FromHandle(bmpIcon.GetHicon())
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(frm)
             Catch
             End Try
 

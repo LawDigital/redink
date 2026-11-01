@@ -5,6 +5,10 @@
 ' File: ThisAddIn.Processing.KnowledgeRAG.vb
 ' Purpose: Queries the configured knowledge stores and injects context into
 '          the system prompt for non-tooling Freestyle (kb) trigger processing.
+'
+' KEY ARCHITECTURE
+'   • Surface: ThisAddIn (host partial/UI).
+'   • Entry points/helpers: ConsultKnowledgeStore.
 ' =============================================================================
 
 Option Explicit On

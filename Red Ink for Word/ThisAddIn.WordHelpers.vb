@@ -1,4 +1,5 @@
-﻿' Copyright (c) LawDigital Ltd., Switzerland.
+﻿' Part of "Red Ink for Word"
+' Copyright (c) LawDigital Ltd., Switzerland.
 ' All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
@@ -150,38 +151,45 @@ Partial Public Class ThisAddIn
         "pre { background: #f6f8fa; padding: 10px; border-radius: 4px; overflow-x: auto; }" &
         "</style>"
 
-    Private Shared Sub ShowComparisonHtmlInWebView2(
+    Private Shared Async Sub ShowComparisonHtmlInWebView2(
         htmlContent As String,
         header As String,
         viewerHostFolder As String,
         Optional additionalButtons As System.Tuple(Of System.String, System.Action, System.Boolean)() = Nothing,
         Optional onClose As System.Action = Nothing)
 
-        Dim t As New System.Threading.Thread(
+        ' Comparison buttons use the running Word Application/Document objects.
+        ' Create, show and close the complete viewer on that host's STA; a second
+        ' STA would still run those callbacks on the wrong Office thread.
+        Dim cleanupStarted As System.Int32 = 0
+        Dim cleanupOnce As System.Action =
             Sub()
+                If System.Threading.Interlocked.Exchange(cleanupStarted, 1) <> 0 Then Return
                 Try
-                    Using viewer As New ComparisonHtmlViewerForm(htmlContent, header, viewerHostFolder, additionalButtons, onClose)
-                        Dim owner As System.Windows.Forms.IWin32Window = ResolveSameThreadDialogOwner()
-                        If owner IsNot Nothing Then
-                            viewer.ShowDialog(owner)
-                        Else
-                            viewer.ShowDialog()
-                        End If
-                    End Using
+                    If onClose IsNot Nothing Then onClose.Invoke()
                 Catch ex As System.Exception
-                    Try
-                        If onClose IsNot Nothing Then
-                            onClose.Invoke()
-                        End If
-                    Catch
-                    End Try
-
-                    ShowCustomMessageBox($"Failed to show comparison viewer: {ex.Message}", AN)
+                    System.Diagnostics.Debug.WriteLine("Comparison viewer cleanup: " & ex.Message)
                 End Try
-            End Sub)
-
-        t.SetApartmentState(System.Threading.ApartmentState.STA)
-        t.Start()
+            End Sub
+        Try
+            Await Global.SharedLibrary.SharedLibrary.SharedMethods.PostToHostUiAsync(
+                Sub()
+                    Dim viewer As ComparisonHtmlViewerForm = Nothing
+                    Try
+                        viewer = New ComparisonHtmlViewerForm(htmlContent, header, viewerHostFolder, additionalButtons, cleanupOnce)
+                        AddHandler viewer.Disposed, Sub(sender As System.Object, args As System.EventArgs) cleanupOnce.Invoke()
+                        Global.SharedLibrary.SharedLibrary.SharedMethods.ShowHostUiForm(viewer)
+                    Catch
+                        If viewer IsNot Nothing Then viewer.Dispose()
+                        Throw
+                    End Try
+                End Sub)
+        Catch ex As System.OperationCanceledException
+            cleanupOnce.Invoke()
+        Catch ex As System.Exception
+            cleanupOnce.Invoke()
+            ShowCustomMessageBox($"Failed to show comparison viewer: {ex.Message}", AN)
+        End Try
     End Sub
 
     ''' <summary>
@@ -2143,6 +2151,11 @@ Partial Public Class ThisAddIn
         Dim flattenBeforeOcr As Boolean = False
         Dim useMarkdownOutputWhenSupported As Boolean = False
         Dim ocrMarkdownInstruction As String = String.Empty
+        Dim ocrCleanupMode As OcrMarkdownCleanupMode = OcrMarkdownCleanupMode.None
+        Dim markdownPreparation As PdfMarkdownPreparationOptions = Nothing
+        Dim markdownPreparationSkippedCount As System.Int32 = 0
+        Dim conversionDiagnostics As New System.Text.StringBuilder()
+        Dim indexMetadataWarnings As New System.Collections.Generic.List(Of System.String)()
 
         If pdfCount >= 2 AndAlso SharedMethods.IsOcrAvailable(_context) Then
             Dim ocrChoice As Integer = ShowCustomYesNoBox(
@@ -2171,6 +2184,26 @@ Partial Public Class ThisAddIn
             doOcr = (ocrChoice = 1)
         End If
 
+        ' Per-conversion override: never mutate the user's persistent model configuration.
+        Dim conversionOcrBatchPages As System.Int32 = -1
+        If doOcr AndAlso pdfCount > 0 Then
+            Dim chunkChoice As System.Int32 = ShowCustomYesNoBox(
+                "OCR normally uses ChunkOCR=" & _context.INI_ChunkOCR.ToString(System.Globalization.CultureInfo.InvariantCulture) & "." & vbCrLf & vbCrLf &
+                "Choose a temporary page batch size for all PDFs in this conversion? 0 means no chunking; failed batches are automatically reduced.",
+                "Choose for this conversion", "Use configured ChunkOCR")
+            If chunkChoice = 0 Then Return
+            If chunkChoice = 1 Then
+                Dim validChunkSize As System.Boolean = False
+                Do
+                    Dim input As System.String = ShowCustomInputBox("Pages per OCR request (0 = no chunking). Applies to all PDFs in this conversion only:", AN, True,
+                        System.Math.Max(0, _context.INI_ChunkOCR).ToString(System.Globalization.CultureInfo.InvariantCulture))
+                    If System.String.IsNullOrWhiteSpace(input) Then Return
+                    validChunkSize = System.Int32.TryParse(input, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, conversionOcrBatchPages) AndAlso conversionOcrBatchPages >= 0
+                    If Not validChunkSize Then ShowCustomMessageBox("Enter a whole number greater than or equal to zero.")
+                Loop Until validChunkSize
+            End If
+        End If
+
         ' Offer PDF flattening before OCR when OCR is enabled
         If doOcr AndAlso pdfCount >= 1 Then
             Dim flattenChoice As Integer = ShowCustomYesNoBox(
@@ -2188,7 +2221,7 @@ Partial Public Class ThisAddIn
 
         If markdownEligibleFiles.Count > 0 Then
             Dim markdownChoice As Integer = ShowCustomYesNoBox(
-                "You can have your Word documents (.docx) and PDF files converted to Markdown, conserving at least some of their formatting. This is done without OCR." & vbCrLf & vbCrLf &
+                "You can have your Word documents (.docx) and PDF files converted to Markdown, preserving headings, lists and tables where possible. Readable PDFs can be converted directly; scanned PDFs use the OCR choice above." & vbCrLf & vbCrLf &
                 "If the quality is not what you need, you may want to try to have your files converted to PDF, flattened to an image and OCR'd by your model, if it supports so. You can use the same Word Helper you just used to process the PDF." & vbCrLf & vbCrLf &
                 "Do you want supported files to be saved as Markdown (.md) instead of plain text (.txt)?",
                 "Yes, use Markdown where supported",
@@ -2202,6 +2235,11 @@ Partial Public Class ThisAddIn
             If useMarkdownOutputWhenSupported Then
                 ocrMarkdownInstruction = Add_OcrMarkdownInstruction
             End If
+        End If
+
+        If useMarkdownOutputWhenSupported AndAlso pdfCount > 0 Then
+            markdownPreparation = SelectPdfMarkdownPreparationOptions(ocrCleanupMode)
+            If markdownPreparation Is Nothing Then Return
         End If
 
         ' Create output subdirectory if needed
@@ -2278,29 +2316,51 @@ Partial Public Class ThisAddIn
                             effectiveFilePath = tempFlattenedPath
                             flattenedPdfCount += 1
                             ProgressBarModule.GlobalProgressLabel = $"OCR processing file {i + 1} of {filesToProcess.Count}: {fileName}..."
-                        Catch ex As Exception
+                        Catch ex As System.Exception
+                            conversionDiagnostics.AppendLine("=== " & fileName & " / PDF flattening ===")
+                            conversionDiagnostics.AppendLine("Using original PDF after flattening failure: " & ex.ToString())
+                            conversionDiagnostics.AppendLine()
                             ' Flattening failed — fall back to original PDF
                             effectiveFilePath = filePath
                             If tempFlattenedPath IsNot Nothing Then
                                 Try : If IO.File.Exists(tempFlattenedPath) Then IO.File.Delete(tempFlattenedPath)
                                 Catch : End Try
                             End If
-                            tempFlattenedPath = Nothing
+                            ' Retain the path so the final cleanup can retry if deletion failed.
                         End Try
                     End If
 
                     Try
+                        If isPdf AndAlso useMarkdownForThisFile AndAlso markdownPreparation IsNot Nothing Then
+                            markdownPreparation.ShowProgressWindow = True
+                            markdownPreparation.SourceName = "File " & (i + 1).ToString(System.Globalization.CultureInfo.InvariantCulture) & " / " & filesToProcess.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) & ": " & fileName
+                        End If
                         ' Read file content — askUser=False ensures Hidesplash=True in PerformOCR/ReadBinaryFileViaLLM,
                         ' preventing the countdown splash from interrupting batch processing.
                         ' The user has already made all choices upfront (OCR on/off, flatten on/off, Markdown on/off).
-                        Dim content As String = Await GetFileContent(
+                        Dim fileRead As FileReadResult = Await GetFileContentEx(
                             effectiveFilePath,
                             Silent:=True,
                             DoOCR:=useOcrForThisFile,
                             AskUser:=False,
                             OcrAdditionalInstruction:=If(useMarkdownForThisFile AndAlso useOcrForThisFile, ocrMarkdownInstruction, ""),
                             ShowOCRProgress:=True,
-                            ReturnMarkdown:=useMarkdownForThisFile)
+                            ReturnMarkdown:=useMarkdownForThisFile,
+                            OcrCleanupMode:=If(useMarkdownForThisFile AndAlso useOcrForThisFile, ocrCleanupMode, OcrMarkdownCleanupMode.None),
+                            OcrBatchPages:=conversionOcrBatchPages,
+                            MarkdownPreparation:=If(isPdf AndAlso useMarkdownForThisFile, markdownPreparation, Nothing))
+                        ' Capture diagnostics before empty/error Continue For paths. No report side files.
+                        If fileRead.ExtractionWarnings.Count > 0 OrElse Not System.String.IsNullOrWhiteSpace(fileRead.OcrCleanupReport) OrElse fileRead.MarkdownPreparationSkipped Then
+                            conversionDiagnostics.AppendLine("=== " & fileName & " / OCR and Markdown ===")
+                            For Each warning As System.String In fileRead.ExtractionWarnings
+                                conversionDiagnostics.AppendLine(warning)
+                            Next
+                            If Not System.String.IsNullOrWhiteSpace(fileRead.OcrCleanupReport) Then conversionDiagnostics.AppendLine(fileRead.OcrCleanupReport)
+                            If fileRead.MarkdownPreparationSkipped Then conversionDiagnostics.AppendLine("Markdown preparation skipped; original extraction retained.")
+                            conversionDiagnostics.AppendLine()
+                        End If
+                        If fileRead.MarkdownPreparationSkipped Then markdownPreparationSkippedCount += 1
+                        Dim content As System.String = fileRead.Content
 
                         If String.IsNullOrWhiteSpace(content) Then
                             emptyContentFiles.Add($"{fileName} ({IO.Path.GetExtension(filePath).ToLowerInvariant()})")
@@ -2334,6 +2394,22 @@ Partial Public Class ThisAddIn
                         End If
 
                         IO.File.WriteAllText(outputPath, content, System.Text.Encoding.UTF8)
+                        If Not System.String.IsNullOrEmpty(fileRead.OcrCleanupReport) Then
+                            ' The report was captured above for the conversion clipboard log.
+                            If markdownPreparation IsNot Nothing AndAlso markdownPreparation.SaveRawCopy AndAlso
+                               Not System.String.Equals(fileRead.OcrCleanupRawContent, content, System.StringComparison.Ordinal) Then
+                                Dim rawPath As System.String = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(outputPath),
+                                    System.IO.Path.GetFileNameWithoutExtension(outputPath) & ".unbereinigt.md")
+                                Dim rawBase As System.String = System.IO.Path.GetFileNameWithoutExtension(rawPath)
+                                Dim suffix As System.Int32 = 2
+                                While System.IO.File.Exists(rawPath)
+                                    rawPath = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(outputPath), rawBase & " (" & suffix.ToString(System.Globalization.CultureInfo.InvariantCulture) & ").md")
+                                    suffix += 1
+                                End While
+                                System.IO.File.WriteAllText(rawPath, fileRead.OcrCleanupRawContent, New System.Text.UTF8Encoding(False))
+                                conversionDiagnostics.AppendLine("Uncleaned Markdown copy saved: " & rawPath)
+                            End If
+                        End If
                         successCount += 1
 
                         If useMarkdownForThisFile Then
@@ -2351,15 +2427,27 @@ Partial Public Class ThisAddIn
                         End If
 
                     Finally
-                        ' Clean up temp flattened PDF
+                        ' Clean up on success, failure and Continue For paths.
                         If tempFlattenedPath IsNot Nothing Then
-                            Try : If IO.File.Exists(tempFlattenedPath) Then IO.File.Delete(tempFlattenedPath)
-                            Catch : End Try
+                            Try
+                                If System.IO.File.Exists(tempFlattenedPath) Then System.IO.File.Delete(tempFlattenedPath)
+                            Catch cleanupFailure As System.Exception
+                                conversionDiagnostics.AppendLine("=== " & fileName & " / temporary PDF cleanup ===")
+                                conversionDiagnostics.AppendLine(cleanupFailure.ToString())
+                                failedFiles.Add(fileName & ": could not remove temporary working PDF: " & tempFlattenedPath)
+                            End Try
                         End If
                     End Try
 
-                Catch ex As Exception
+                Catch ex As System.OperationCanceledException
+                    conversionDiagnostics.AppendLine("=== " & fileName & " / conversion cancelled ===")
+                    conversionDiagnostics.AppendLine("Cancelled by the user; no partially prepared Markdown was saved.")
+                    Exit For
+                Catch ex As System.Exception
                     failedFiles.Add($"{fileName}: {ex.Message}")
+                    conversionDiagnostics.AppendLine("=== " & fileName & " / conversion exception ===")
+                    conversionDiagnostics.AppendLine(ex.ToString())
+                    conversionDiagnostics.AppendLine()
                 End Try
             Next
 
@@ -2421,7 +2509,8 @@ Partial Public Class ThisAddIn
                         indexOutputPath = Await CreateSemanticSearchIndexWithUserOptionsAsync(
                             combinedOutputPath,
                             IO.Path.Combine(combineBaseDir, combineBaseName & ".indexed.txt"),
-                            "Preparing combined content ...").ConfigureAwait(True)
+                            "Preparing combined content ...",
+                            indexMetadataWarnings).ConfigureAwait(True)
                     End If
 
                 Catch ex As Exception
@@ -2450,12 +2539,24 @@ Partial Public Class ThisAddIn
                         IO.Path.Combine(
                             IO.Path.GetDirectoryName(singleExtractedOutputPath),
                             IO.Path.GetFileNameWithoutExtension(singleExtractedOutputPath) & ".indexed.txt"),
-                        "Preparing extracted content ...").ConfigureAwait(True)
+                        "Preparing extracted content ...",
+                        indexMetadataWarnings).ConfigureAwait(True)
                 Catch ex As Exception
                     ShowCustomMessageBox($"Failed to create the semantic-search index: {ex.Message}")
                     indexOutputPath = Nothing
                 End Try
             End If
+        End If
+
+        ' A source-derived fallback is deliberately visible: the source is fully
+        ' indexed, but affected segments have less precise semantic metadata.
+        If indexMetadataWarnings.Count > 0 Then
+            conversionDiagnostics.AppendLine("=== SEMANTIC INDEX METADATA FALLBACKS ===")
+            conversionDiagnostics.AppendLine("The source text and byte offsets were preserved. The following segments used source-derived title/summary after metadata-generation failures:")
+            For Each warningText As System.String In indexMetadataWarnings
+                conversionDiagnostics.AppendLine(warningText)
+            Next
+            conversionDiagnostics.AppendLine()
         End If
 
         ' Build summary
@@ -2483,6 +2584,13 @@ Partial Public Class ThisAddIn
         ElseIf Not String.IsNullOrWhiteSpace(indexOutputPath) Then
             summary.AppendLine()
             summary.AppendLine($"Index file: {indexOutputPath}")
+        End If
+
+        If indexMetadataWarnings.Count > 0 Then
+            summary.AppendLine()
+            summary.AppendLine("Warning: " & indexMetadataWarnings.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                " index segment(s) use source-derived metadata after LLM failures; the complete original text remains indexed.")
+            summary.AppendLine("The affected segment IDs and failure categories are in the clipboard log and the index file.")
         End If
 
         If doOcr Then
@@ -2564,6 +2672,11 @@ Partial Public Class ThisAddIn
             clipboardLog.AppendLine()
         End If
 
+        If markdownPreparationSkippedCount > 0 Then
+            summary.AppendLine("Markdown preparation was skipped for " & markdownPreparationSkippedCount.ToString(System.Globalization.CultureInfo.InvariantCulture) & " file(s); original extraction retained.")
+            summary.AppendLine("See the OCR/Markdown details in the log copied to the clipboard.")
+        End If
+
         If emptyContentFiles.Count > 0 Then
             clipboardLog.AppendLine("=== EMPTY CONTENT FILES ===")
             For Each f In emptyContentFiles
@@ -2588,12 +2701,17 @@ Partial Public Class ThisAddIn
             clipboardLog.AppendLine()
         End If
 
-        ' Copy log to clipboard if there were any issues
-        If failedFiles.Count > 0 OrElse emptyContentFiles.Count > 0 OrElse unsupportedFiles.Count > 0 OrElse legacyDocFilesSkipped.Count > 0 Then
+        If conversionDiagnostics.Length > 0 Then
+            clipboardLog.AppendLine("=== OCR / MARKDOWN DIAGNOSTICS ===")
+            clipboardLog.Append(conversionDiagnostics.ToString())
+        End If
+
+        ' Conversion diagnostics belong to this clipboard report, independently of usage logging.
+        If failedFiles.Count > 0 OrElse emptyContentFiles.Count > 0 OrElse unsupportedFiles.Count > 0 OrElse legacyDocFilesSkipped.Count > 0 OrElse conversionDiagnostics.Length > 0 Then
             Dim logText As String = clipboardLog.ToString().TrimEnd()
             SharedMethods.PutInClipboard(logText)
             summary.AppendLine()
-            summary.AppendLine("(Detailed log copied to clipboard)")
+            summary.AppendLine("(Detailed conversion log copied to clipboard; paste it into a text editor with Ctrl+V.)")
         End If
 
         ShowCustomMessageBox(summary.ToString().TrimEnd(), AN & " Convert to Text")
@@ -2602,7 +2720,8 @@ Partial Public Class ThisAddIn
     Private Async Function CreateSemanticSearchIndexWithUserOptionsAsync(
         sourcePath As String,
         defaultOutputPath As String,
-        preparationMessage As String) As System.Threading.Tasks.Task(Of String)
+        preparationMessage As String,
+        metadataWarnings As System.Collections.Generic.List(Of System.String)) As System.Threading.Tasks.Task(Of String)
 
         If String.IsNullOrWhiteSpace(sourcePath) OrElse
            String.IsNullOrWhiteSpace(defaultOutputPath) Then
@@ -2715,7 +2834,8 @@ Partial Public Class ThisAddIn
                         segCount.ToString(System.Globalization.CultureInfo.InvariantCulture) & ")")
                 End Sub)
 
-            Await SharedMethods.CreateSemanticSearchIndexedTextFileAsync(
+            Dim generationResult As SharedMethods.SemanticSearchIndexGenerationResult =
+                Await SharedMethods.CreateSemanticSearchIndexedTextFileAsync(
                 sourcePath,
                 outputPath,
                 _context,
@@ -2729,6 +2849,14 @@ Partial Public Class ThisAddIn
                 },
                 generationProgress,
                 indexProgress.Token).ConfigureAwait(True)
+
+            If metadataWarnings IsNot Nothing Then
+                ' Project boundary: keep the structured warning type in SharedLibrary and
+                ' project it into a Word-specific diagnostic line only for UI logging.
+                For Each warning In generationResult.MetadataGenerationWarnings
+                    metadataWarnings.Add(warning.SegmentId & " [" & warning.ErrorType & "]: " & warning.Message)
+                Next
+            End If
         End Using
 
         Return outputPath

@@ -108,8 +108,7 @@ Namespace SharedLibrary
             settingsForm.ShowInTaskbar = False
             settingsForm.TopMost = True
 
-            Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-            settingsForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(settingsForm)
 
             Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
             settingsForm.Font = standardFont
@@ -319,7 +318,15 @@ Namespace SharedLibrary
             Dim saveConfigToolTip As New System.Windows.Forms.ToolTip()
             saveConfigToolTip.SetToolTip(saveConfigButton, $"Will save the current configuration to a local copy of '{AN2}.ini' (overwriting any existing such file).")
 
-            Dim CentralConfigAvailable As Boolean = System.IO.File.Exists(System.IO.Path.Combine(ExpandEnvironmentVariables(GetFromRegistry(RegPath_Base, RegPath_IniPath, True)), $"{AN2}.ini"))
+            Dim centralRegistrySource As String = GetFromRegistry(RegPath_Base, RegPath_IniPath, True)
+            Dim CentralConfigAvailable As Boolean = False
+            If Not String.IsNullOrWhiteSpace(centralRegistrySource) Then
+                If ConfigurationResourceLoader.ClassifyConfigurationSource(centralRegistrySource) = ConfigurationSourceKind.Https Then
+                    CentralConfigAvailable = True
+                Else
+                    CentralConfigAvailable = System.IO.File.Exists(System.IO.Path.Combine(ExpandEnvironmentVariables(centralRegistrySource), $"{AN2}.ini"))
+                End If
+            End If
             Dim delLocalConfigButton As New System.Windows.Forms.Button()
             Dim LocalConfigAvailable As Boolean = System.IO.File.Exists(GetDefaultINIPath(context.RDV))
             If CentralConfigAvailable Then
@@ -603,6 +610,8 @@ Namespace SharedLibrary
 
                                                    ' Immediately apply the running background state without a restart
                                                    KnowledgeStoreIdleService.SetEnabled(CapturedContext.INI_KnowledgeStoreBackgroundIndexing)
+                                                   SemanticArchiveMaintenanceProvider.ApplyCurrentSettings(CapturedContext)
+                                                   SemanticArchivePermissionMaintenanceProvider.ApplyCurrentSettings()
 
                                                    CapturedContext.MenusAdded = False
                                                End Sub
@@ -765,8 +774,19 @@ Namespace SharedLibrary
                                                CapturedContext.INI_NoLocalConfig = originalNoLocalConfigValue
                                            End If
 
+                                           Try
+                                               SemanticArchiveConfiguration.SavePendingUserSettings(CapturedContext)
+                                           Catch ex As System.Exception
+                                               Using SharedMethods.PushDialogOwner(settingsForm)
+                                                   ShowCustomMessageBox("The Semantic Archive preferences could not be saved: " & ex.Message)
+                                               End Using
+                                               Return
+                                           End Try
+
                                            ' Immediately apply the running background state without a restart
                                            KnowledgeStoreIdleService.SetEnabled(CapturedContext.INI_KnowledgeStoreBackgroundIndexing)
+                                           SemanticArchiveMaintenanceProvider.ApplyCurrentSettings(CapturedContext)
+                                           SemanticArchivePermissionMaintenanceProvider.ApplyCurrentSettings()
 
                                            CapturedContext.MenusAdded = False
                                            settingsForm.Close()
@@ -779,6 +799,17 @@ Namespace SharedLibrary
                                                settingsForm.Close()
                                            End Sub
 
+
+            AddHandler settingsForm.FormClosed,
+                Sub(sender As System.Object, e As System.Windows.Forms.FormClosedEventArgs)
+                    Try
+                        ' Switch/expert actions may have staged SA edits before the user cancels or closes this dialog.
+                        SemanticArchiveConfiguration.DiscardPendingUserSettings(CapturedContext)
+                    Catch ex As System.Exception
+                        ' Pending writes have already been removed even when reloading user preferences fails.
+                        System.Diagnostics.Trace.TraceError("Semantic Archive settings draft discarded; effective preferences could not be reloaded: " & ex.Message)
+                    End Try
+                End Sub
 
             ' (5) Recalculate final form size AFTER buttons are placed
             settingsForm.ClientSize = New System.Drawing.Size(
@@ -1024,8 +1055,7 @@ Namespace SharedLibrary
                 passwordForm.AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink
 
                 Try
-                    Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                    passwordForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(passwordForm)
                 Catch
                 End Try
 
@@ -1263,10 +1293,7 @@ Namespace SharedLibrary
         ''' </summary>
         Private Shared Sub WritePythonAgentPathToIni(context As ISharedContext, value As String)
             Try
-                Dim iniPath As String = GetActiveConfigFilePath(context)
-                If String.IsNullOrWhiteSpace(iniPath) OrElse Not System.IO.File.Exists(iniPath) Then
-                    iniPath = GetDefaultINIPath(context.RDV)
-                End If
+                Dim iniPath As String = GetWritableLocalConfigPath(context)
 
                 If String.IsNullOrEmpty(value) Then
                     ConfigWizardEngine.RemoveIniValues(iniPath, New String() {"PythonAgentPath"})
@@ -1696,13 +1723,14 @@ Namespace SharedLibrary
         ''' <param name="settingKey">Setting key to check.</param>
         ''' <returns><c>True</c> if the key is listed as Boolean; otherwise, <c>False</c>.</returns>
         Public Shared Function IsBooleanSetting(settingKey As String) As Boolean
+            settingKey = SemanticArchiveConfiguration.CanonicalizeIniKey(settingKey)
             ' Determine if a setting is a Boolean based on its key
             Dim booleanSettings As New List(Of String) From {
         "DoubleS", "NoEmDash", "Clean", "MarkdownBubbles", "KeepFormat1", "MarkdownConvert", "ReplaceText1", "SimpleMenuOverride",
         "KeepFormat2", "KeepParaFormatInline", "ReplaceText2", "DoMarkupOutlook", "DoMarkupWord", "SimpleMenuDefault", "UseHostColorOutlook",
         "APIDebug", "Crashlog", "AutoPilotAutoStart", "AutoPilotSchedulerLocalChat", "ISearch_Approve", "ISearch", "Lib", "ContextMenu", "NoLocalConfig", "SecondAPI", "APIEncrypted", "APIEncrypted_2",
-        "OAuth2", "OAuth2_2", "PromptLib", "Ignore", "ToolingLogWindow", "ToolingDryRun", "ForceDrawioLocal", "AllowLegacyDocFiles", "JsRunDisable", "BrowserToolsDisable", "PlayWrightUseLocalCache", "EnablePrivacyForSearch",
-        "DictionarySegmentPrompt", "UpdateIni", "UpdateIniAllowRemote", "UpdateIniNoSignature", "UpdateIniSilentLog", "NoHelperDownload", "LicenseCounterAnon", "KnowledgeStoreUseLLMIndex", "KnowledgeStoreBackgroundIndexing"
+        "OAuth2", "OAuth2_2", "PromptLib", "Ignore", "ToolingLogWindow", "ToolingDryRun", "ToolResponseCompactOnlyAfterEmpty", "ForceDrawioLocal", "AllowLegacyDocFiles", "JsRunDisable", "BrowserToolsDisable", "PlayWrightUseLocalCache", "EnablePrivacyForSearch",
+        "DictionarySegmentPrompt", "UpdateIni", "UpdateIniAllowRemote", "UpdateIniNoSignature", "UpdateIniSilentLog", "NoHelperDownload", "LicenseCounterAnon", "KnowledgeStoreUseLLMIndex", "KnowledgeStoreBackgroundIndexing", "SemanticArchiveBackgroundIndexingEnabled", "SemanticArchiveBackgroundIndexing", "SemanticArchivePermissionMaintenanceEnabled"
             }
             Return booleanSettings.Contains(settingKey)
         End Function
@@ -1715,6 +1743,7 @@ Namespace SharedLibrary
         ''' <param name="context">Shared context containing the in-memory configuration values.</param>
         ''' <returns>The setting value as a string, or an empty string if the key is not handled.</returns>
         Public Shared Function GetSettingValue(settingName As String, ByRef context As ISharedContext) As String
+            settingName = SemanticArchiveConfiguration.CanonicalizeIniKey(settingName)
             ' Return the value of the setting based on its name
             Select Case settingName
                 Case "APIKey"
@@ -2065,6 +2094,8 @@ Namespace SharedLibrary
                     Return context.INI_LicenseCounterPath
                 Case "LicenseCounterMethod"
                     Return context.INI_LicenseCounterMethod
+                Case "LicenseCounterIntervall"
+                    Return context.INI_LicenseCounterIntervall.ToString(System.Globalization.CultureInfo.InvariantCulture)
                 Case "LicenseCounterAnon"
                     Return context.INI_LicenseCounterAnon.ToString()
                 Case "AutoPilot"
@@ -2076,6 +2107,38 @@ Namespace SharedLibrary
                     Return context.INI_ToolingDryRun.ToString()
                 Case "ToolingMaximumIterations"
                     Return context.INI_ToolingMaximumIterations.ToString()
+                Case "AutoPilotLogDiagnosticsMaxInputChars"
+                    Return context.INI_AutoPilotLogDiagnosticsMaxInputChars.ToString()
+                Case "TextAnalyzeMaxSourceChars"
+                    Return context.INI_TextAnalyzeMaxSourceChars.ToString()
+                Case "TextAnalyzeMaxInstructionChars"
+                    Return context.INI_TextAnalyzeMaxInstructionChars.ToString()
+                Case "TextAnalyzeMaxAdditionalContextChars"
+                    Return context.INI_TextAnalyzeMaxAdditionalContextChars.ToString()
+                Case "ToolResponseRecoveryBudgetChars"
+                    Return context.INI_ToolResponseRecoveryBudgetChars.ToString()
+                Case "ToolResponseCompactOnlyAfterEmpty"
+                    Return context.INI_ToolResponseCompactOnlyAfterEmpty.ToString()
+                Case "ToolResponseKeepRecentFullCount"
+                    Return context.INI_ToolResponseKeepRecentFullCount.ToString()
+                Case "ToolResultReferenceThresholdChars"
+                    Return context.INI_ToolResultReferenceThresholdChars.ToString()
+                Case "ToolResultReferencePreviewChars"
+                    Return context.INI_ToolResultReferencePreviewChars.ToString()
+                Case "SubAgentLargeToolResponseThresholdChars"
+                    Return context.INI_SubAgentLargeToolResponseThresholdChars.ToString()
+                Case "SubAgentLargeToolResponseExcerptChars"
+                    Return context.INI_SubAgentLargeToolResponseExcerptChars.ToString()
+                Case "ContextExpandDefaultChars"
+                    Return context.INI_ContextExpandDefaultChars.ToString()
+                Case "ContextExpandMaxChars"
+                    Return context.INI_ContextExpandMaxChars.ToString()
+                Case "EvidenceReplayCoreMaxChars"
+                    Return context.INI_EvidenceReplayCoreMaxChars.ToString()
+                Case "EvidenceReplayMaxExactStringChars"
+                    Return context.INI_EvidenceReplayMaxExactStringChars.ToString()
+                Case "EvidenceReplayPreferredArrayItemProperties"
+                    Return context.INI_EvidenceReplayPreferredArrayItemProperties.ToString()
                 Case "ToolResponsePayloadBudgetChars"
                     Return context.INI_ToolResponsePayloadBudgetChars.ToString()
                 Case "BudgetMediumCompactionThresholdChars"
@@ -2108,6 +2171,18 @@ Namespace SharedLibrary
                     Return context.INI_AssemblePath
                 Case "AssemblePathLocal"
                     Return context.INI_AssemblePathLocal
+                Case "SemanticArchiveCatalogPathLocal"
+                    Return context.INI_SemanticArchiveCatalogPathLocal
+                Case "SemanticArchiveCatalogLibraryPath"
+                    Return context.INI_SemanticArchiveCatalogLibraryPath
+                Case "SemanticArchiveBackgroundIndexingEnabled", "SemanticArchiveBackgroundIndexing"
+                    Return context.INI_SemanticArchiveBackgroundIndexing.ToString()
+                Case "SemanticArchiveBackgroundIndexingWindow"
+                    Return context.INI_SemanticArchiveBackgroundIndexingWindow
+                Case "SemanticArchivePermissionMaintenanceEnabled"
+                    Return context.INI_SemanticArchivePermissionMaintenanceEnabled.ToString()
+                Case "SemanticArchivePermissionMaintenanceWindow"
+                    Return context.INI_SemanticArchivePermissionMaintenanceWindow
                 Case "KnowledgeStorePath"
                     Return context.INI_KnowledgeStorePath
                 Case "KnowledgeStorePathLocal"
@@ -2147,6 +2222,7 @@ Namespace SharedLibrary
         ''' <param name="value">String representation of the value to assign (parsed for numeric/Boolean keys).</param>
         ''' <param name="context">Shared context that receives the updated in-memory configuration values.</param>
         Public Shared Sub SetSettingValue(settingName As String, value As String, ByRef context As ISharedContext)
+            settingName = SemanticArchiveConfiguration.CanonicalizeIniKey(settingName)
             ' Set the value of the setting based on its name
 
             Select Case Trim(settingName)
@@ -2376,6 +2452,38 @@ Namespace SharedLibrary
                     context.INI_M365TenantId = value
                 Case "M365Scopes"
                     context.INI_M365Scopes = value
+                Case "AutoPilotLogDiagnosticsMaxInputChars"
+                    context.INI_AutoPilotLogDiagnosticsMaxInputChars = ParseAgentContextInteger(value, "AutoPilotLogDiagnosticsMaxInputChars", DEFAULT_AUTO_PILOT_LOG_DIAGNOSTICS_MAX_INPUT_CHARS, 10000, True)
+                Case "TextAnalyzeMaxSourceChars"
+                    context.INI_TextAnalyzeMaxSourceChars = ParseAgentContextInteger(value, "TextAnalyzeMaxSourceChars", DEFAULT_TEXT_ANALYZE_MAX_SOURCE_CHARS, 1)
+                Case "TextAnalyzeMaxInstructionChars"
+                    context.INI_TextAnalyzeMaxInstructionChars = ParseAgentContextInteger(value, "TextAnalyzeMaxInstructionChars", DEFAULT_TEXT_ANALYZE_MAX_INSTRUCTION_CHARS, 1)
+                Case "TextAnalyzeMaxAdditionalContextChars"
+                    context.INI_TextAnalyzeMaxAdditionalContextChars = ParseAgentContextInteger(value, "TextAnalyzeMaxAdditionalContextChars", DEFAULT_TEXT_ANALYZE_MAX_ADDITIONAL_CONTEXT_CHARS, 0)
+                Case "ToolResponseRecoveryBudgetChars"
+                    context.INI_ToolResponseRecoveryBudgetChars = ParseAgentContextInteger(value, "ToolResponseRecoveryBudgetChars", DEFAULT_TOOL_RESPONSE_RECOVERY_BUDGET_CHARS, 1)
+                Case "ToolResponseCompactOnlyAfterEmpty"
+                    context.INI_ToolResponseCompactOnlyAfterEmpty = ParseAgentContextBoolean(value, "ToolResponseCompactOnlyAfterEmpty", DEFAULT_TOOL_RESPONSE_COMPACT_ONLY_AFTER_EMPTY)
+                Case "ToolResponseKeepRecentFullCount"
+                    context.INI_ToolResponseKeepRecentFullCount = ParseAgentContextInteger(value, "ToolResponseKeepRecentFullCount", DEFAULT_TOOL_RESPONSE_KEEP_RECENT_FULL_COUNT, 0)
+                Case "ToolResultReferenceThresholdChars"
+                    context.INI_ToolResultReferenceThresholdChars = ParseAgentContextInteger(value, "ToolResultReferenceThresholdChars", DEFAULT_TOOL_RESULT_REFERENCE_THRESHOLD_CHARS, 0)
+                Case "ToolResultReferencePreviewChars"
+                    context.INI_ToolResultReferencePreviewChars = ParseAgentContextInteger(value, "ToolResultReferencePreviewChars", DEFAULT_TOOL_RESULT_REFERENCE_PREVIEW_CHARS, 0)
+                Case "SubAgentLargeToolResponseThresholdChars"
+                    context.INI_SubAgentLargeToolResponseThresholdChars = ParseAgentContextInteger(value, "SubAgentLargeToolResponseThresholdChars", DEFAULT_SUB_AGENT_LARGE_TOOL_RESPONSE_THRESHOLD_CHARS, 1)
+                Case "SubAgentLargeToolResponseExcerptChars"
+                    context.INI_SubAgentLargeToolResponseExcerptChars = ParseAgentContextInteger(value, "SubAgentLargeToolResponseExcerptChars", DEFAULT_SUB_AGENT_LARGE_TOOL_RESPONSE_EXCERPT_CHARS, 0)
+                Case "ContextExpandDefaultChars"
+                    context.INI_ContextExpandDefaultChars = ParseAgentContextInteger(value, "ContextExpandDefaultChars", DEFAULT_CONTEXT_EXPAND_DEFAULT_CHARS, 1)
+                Case "ContextExpandMaxChars"
+                    context.INI_ContextExpandMaxChars = ParseAgentContextInteger(value, "ContextExpandMaxChars", DEFAULT_CONTEXT_EXPAND_MAX_CHARS, 1)
+                Case "EvidenceReplayCoreMaxChars"
+                    context.INI_EvidenceReplayCoreMaxChars = ParseAgentContextInteger(value, "EvidenceReplayCoreMaxChars", DEFAULT_EVIDENCE_REPLAY_CORE_MAX_CHARS, 1)
+                Case "EvidenceReplayMaxExactStringChars"
+                    context.INI_EvidenceReplayMaxExactStringChars = ParseAgentContextInteger(value, "EvidenceReplayMaxExactStringChars", DEFAULT_EVIDENCE_REPLAY_MAX_EXACT_STRING_CHARS, 0)
+                Case "EvidenceReplayPreferredArrayItemProperties"
+                    context.INI_EvidenceReplayPreferredArrayItemProperties = ParseAgentContextInteger(value, "EvidenceReplayPreferredArrayItemProperties", DEFAULT_EVIDENCE_REPLAY_PREFERRED_ARRAY_ITEM_PROPERTIES, 1)
                 Case "ToolResponsePayloadBudgetChars"
                     context.INI_ToolResponsePayloadBudgetChars = Integer.Parse(value)
                 Case "BudgetMediumCompactionThresholdChars"
@@ -2486,6 +2594,8 @@ Namespace SharedLibrary
                     context.INI_LicenseCounterPath = value
                 Case "LicenseCounterMethod"
                     context.INI_LicenseCounterMethod = value
+                Case "LicenseCounterIntervall"
+                    context.INI_LicenseCounterIntervall = ParseLicenseCounterIntervall(value)
                 Case "LicenseCounterAnon"
                     context.INI_LicenseCounterAnon = Boolean.Parse(value)
                 Case "AutoPilot"
@@ -2520,6 +2630,13 @@ Namespace SharedLibrary
                     context.INI_AssemblePath = value
                 Case "AssemblePathLocal"
                     context.INI_AssemblePathLocal = value
+                Case "SemanticArchiveCatalogPathLocal"
+                    context.INI_SemanticArchiveCatalogPathLocal = value
+                Case "SemanticArchiveCatalogLibraryPath"
+                    context.INI_SemanticArchiveCatalogLibraryPath = value
+                Case "SemanticArchiveBackgroundIndexingEnabled", "SemanticArchiveBackgroundIndexing", "SemanticArchiveBackgroundIndexingWindow",
+                     "SemanticArchivePermissionMaintenanceEnabled", "SemanticArchivePermissionMaintenanceWindow"
+                    SemanticArchiveConfiguration.StagePersonalControl(context, settingName, value)
                 Case "KnowledgeStorePath"
                     context.INI_KnowledgeStorePath = value
                 Case "KnowledgeStorePathLocal"
@@ -2672,6 +2789,11 @@ Namespace SharedLibrary
         ''' </summary>
         ''' <param name="context">Shared context providing the in-memory configuration values to persist.</param>
         Public Shared Sub UpdateAppConfig(ByRef context As ISharedContext)
+            UpdateAppConfigCore(context, Nothing)
+        End Sub
+
+        Private Shared Sub UpdateAppConfigCore(ByRef context As ISharedContext,
+                                              semanticArchiveIniValues As System.Collections.Generic.IDictionary(Of System.String, System.String))
             Try
 
                 Dim IniFilePath As String = ""
@@ -2680,27 +2802,31 @@ Namespace SharedLibrary
                 Dim DefaultPath2 As String = ""
                 Dim TempIniFilePath As String = ""
 
-                ' Determine the configuration file path
-
+                ' Resolve the write target without ever mutating a remote active source.
                 RegFilePath = GetFromRegistry(RegPath_Base, RegPath_IniPath, True)
                 DefaultPath = GetDefaultINIPath(context.RDV)
                 DefaultPath2 = GetDefaultINIPath("Word")
 
-                If Not String.IsNullOrWhiteSpace(RegFilePath) AndAlso RegPath_IniPrio Then
-                    IniFilePath = System.IO.Path.Combine(ExpandEnvironmentVariables(RegFilePath), $"{AN2}.ini")
-                ElseIf System.IO.File.Exists(DefaultPath) Then
-                    IniFilePath = DefaultPath
-                ElseIf System.IO.File.Exists(DefaultPath2) Then
-                    IniFilePath = DefaultPath2
-                ElseIf Not String.IsNullOrWhiteSpace(RegFilePath) Then
-                    IniFilePath = System.IO.Path.Combine(ExpandEnvironmentVariables(RegFilePath), $"{AN2}.ini")
+                Dim activeSource As String = GetActiveConfigSource(context)
+                If ConfigurationResourceLoader.ClassifyConfigurationSource(activeSource) = ConfigurationSourceKind.Https Then
+                    If context.INI_NoLocalConfig Then
+                        ShowCustomMessageBox("Local configuration changes are disabled by NoLocalConfig=True.")
+                        Return
+                    End If
+
+                    IniFilePath = GetWritableLocalConfigPath(context)
+                    If Not System.IO.File.Exists(IniFilePath) Then
+                        Dim remoteReadPath As String = ConfigurationResourceLoader.ResolveForRead(activeSource, "redink.ini")
+                        Dim localDirectory As String = System.IO.Path.GetDirectoryName(IniFilePath)
+                        If Not String.IsNullOrWhiteSpace(localDirectory) Then System.IO.Directory.CreateDirectory(localDirectory)
+                        System.IO.File.Copy(remoteReadPath, IniFilePath, overwrite:=False)
+                    End If
                 Else
-                    IniFilePath = DefaultPath
+                    IniFilePath = activeSource
                 End If
 
                 IniFilePath = RemoveCR(IniFilePath)
 
-                ' Validate IniFilePath
                 If Not System.IO.File.Exists(IniFilePath) Then
                     ShowCustomMessageBox($"The configuration file '{IniFilePath}' was not found.")
                     Return
@@ -2710,6 +2836,12 @@ Namespace SharedLibrary
                 TempIniFilePath = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(IniFilePath), $"{AN2}_temp.ini")
 
                 ' Define all expected keys and their default or in-memory values
+                ' Export configured INI defaults, not unrelated personal overrides or unsaved live edits.
+                Dim semanticArchiveConfigured As SemanticArchiveConfiguration.ControlsSnapshot = SemanticArchiveConfiguration.ReadConfiguredControls(context)
+                If semanticArchiveIniValues IsNot Nothing Then
+                    ' Expert edits stay local to this write plan. Only InitializeConfig after a successful write activates them.
+                    semanticArchiveConfigured = SemanticArchiveConfiguration.MergeConfiguredControls(semanticArchiveConfigured, semanticArchiveIniValues)
+                End If
                 Dim expectedKeys As New Dictionary(Of String, String) From {
                     {"APIKey", context.INI_APIKeyBack},
                     {"Endpoint", context.INI_Endpoint},
@@ -2930,6 +3062,7 @@ Namespace SharedLibrary
                     {"SP_RemoveClutter", context.SP_RemoveClutter},
                     {"SP_Redact", context.SP_Redact},
                     {"SP_CheckforII", context.SP_CheckforII},
+                    {"SP_CheckforPhishing", context.SP_CheckforPhishing},
                     {"SP_Extract", context.SP_Extract},
                     {"SP_ExtractBuilder", context.SP_ExtractBuilder},
                     {"SP_ExtractSchema", context.SP_ExtractSchema},
@@ -2986,6 +3119,22 @@ Namespace SharedLibrary
                     {"ToolingLogWindow", context.INI_ToolingLogWindow.ToString()},
                     {"ToolingDryRun", context.INI_ToolingDryRun.ToString()},
                     {"ToolingMaximumIterations", context.INI_ToolingMaximumIterations.ToString()},
+                    {"AutoPilotLogDiagnosticsMaxInputChars", context.INI_AutoPilotLogDiagnosticsMaxInputChars.ToString()},
+                    {"TextAnalyzeMaxSourceChars", context.INI_TextAnalyzeMaxSourceChars.ToString()},
+                    {"TextAnalyzeMaxInstructionChars", context.INI_TextAnalyzeMaxInstructionChars.ToString()},
+                    {"TextAnalyzeMaxAdditionalContextChars", context.INI_TextAnalyzeMaxAdditionalContextChars.ToString()},
+                    {"ToolResponseRecoveryBudgetChars", context.INI_ToolResponseRecoveryBudgetChars.ToString()},
+                    {"ToolResponseCompactOnlyAfterEmpty", context.INI_ToolResponseCompactOnlyAfterEmpty.ToString()},
+                    {"ToolResponseKeepRecentFullCount", context.INI_ToolResponseKeepRecentFullCount.ToString()},
+                    {"ToolResultReferenceThresholdChars", context.INI_ToolResultReferenceThresholdChars.ToString()},
+                    {"ToolResultReferencePreviewChars", context.INI_ToolResultReferencePreviewChars.ToString()},
+                    {"SubAgentLargeToolResponseThresholdChars", context.INI_SubAgentLargeToolResponseThresholdChars.ToString()},
+                    {"SubAgentLargeToolResponseExcerptChars", context.INI_SubAgentLargeToolResponseExcerptChars.ToString()},
+                    {"ContextExpandDefaultChars", context.INI_ContextExpandDefaultChars.ToString()},
+                    {"ContextExpandMaxChars", context.INI_ContextExpandMaxChars.ToString()},
+                    {"EvidenceReplayCoreMaxChars", context.INI_EvidenceReplayCoreMaxChars.ToString()},
+                    {"EvidenceReplayMaxExactStringChars", context.INI_EvidenceReplayMaxExactStringChars.ToString()},
+                    {"EvidenceReplayPreferredArrayItemProperties", context.INI_EvidenceReplayPreferredArrayItemProperties.ToString()},
                     {"ToolResponsePayloadBudgetChars", context.INI_ToolResponsePayloadBudgetChars.ToString()},
                     {"BudgetMediumCompactionThresholdChars", context.INI_BudgetMediumCompactionThresholdChars.ToString()},
                     {"BudgetAggressiveCompactionThresholdChars", context.INI_BudgetAggressiveCompactionThresholdChars.ToString()},
@@ -3000,13 +3149,20 @@ Namespace SharedLibrary
                     {"UpdateIniSilentLog", context.INI_UpdateIniSilentLog.ToString()},
                     {"LicenseCounterPath", context.INI_LicenseCounterPath},
                     {"LicenseCounterMethod", context.INI_LicenseCounterMethod},
+                    {"LicenseCounterIntervall", context.INI_LicenseCounterIntervall.ToString(System.Globalization.CultureInfo.InvariantCulture)},
                     {"LicenseCounterAnon", context.INI_LicenseCounterAnon.ToString()},
                     {"AssemblePath", context.INI_AssemblePath},
                     {"AssemblePathLocal", context.INI_AssemblePathLocal},
+                    {"SemanticArchiveCatalogPathLocal", context.INI_SemanticArchiveCatalogPathLocal},
+                    {"SemanticArchiveCatalogLibraryPath", context.INI_SemanticArchiveCatalogLibraryPath},
                     {"KnowledgeStorePath", context.INI_KnowledgeStorePath},
                     {"KnowledgeStorePathLocal", context.INI_KnowledgeStorePathLocal},
                     {"KnowledgeStoreOwner", context.INI_KnowledgeStoreOwner},
                     {"KnowledgeStoreUseLLMIndex", context.INI_KnowledgeStoreUseLLMIndex.ToString()},
+                    {"SemanticArchiveBackgroundIndexingEnabled", semanticArchiveConfigured.BackgroundEnabled.ToString()},
+                    {"SemanticArchiveBackgroundIndexingWindow", semanticArchiveConfigured.BackgroundWindow},
+                    {"SemanticArchivePermissionMaintenanceEnabled", semanticArchiveConfigured.PermissionEnabled.ToString()},
+                    {"SemanticArchivePermissionMaintenanceWindow", semanticArchiveConfigured.PermissionWindow},
                     {"KnowledgeStoreBackgroundIndexing", context.INI_KnowledgeStoreBackgroundIndexing.ToString()},
                     {"KnowledgeStoreBackgroundIndexingWindow", context.INI_KnowledgeStoreBackgroundIndexingWindow},
                     {"FormulaInstruction", context.INI_FormulaInstruction},
@@ -3056,6 +3212,8 @@ Namespace SharedLibrary
                     If keyValue.Length = 2 Then
                         Dim key As String = keyValue(0).Trim()
                         Dim value As String = keyValue(1).Trim()
+                        key = SemanticArchiveConfiguration.CanonicalizeIniKey(key)
+                        If SemanticArchiveConfiguration.IsGlobalKey(key) AndAlso foundKeys.Contains(key) Then Continue For
 
                         ' Update values for known keys
                         If expectedKeys.ContainsKey(key) Then
@@ -3146,6 +3304,7 @@ Namespace SharedLibrary
                     BackupSharedUserSettingsToRegistry()
                 End If
 
+                SemanticArchiveConfiguration.SavePendingUserSettings(context)
                 context.INIloaded = False
 
                 If IniFilePath = DefaultPath Then
@@ -3222,6 +3381,7 @@ Namespace SharedLibrary
                 {"SP_RemoveClutter", Default_SP_RemoveClutter},
                 {"SP_Redact", Default_SP_Redact},
                 {"SP_CheckforII", Default_SP_CheckforII},
+                {"SP_CheckforPhishing", Default_SP_CheckforPhishing},
                 {"SP_Extract", Default_SP_Extract},
                 {"SP_ExtractBuilder", Default_SP_ExtractBuilder},
                 {"SP_ExtractSchema", Default_SP_ExtractSchema},
@@ -3303,6 +3463,22 @@ Namespace SharedLibrary
                 {"ISearch", DEFAULT_BOOL_ISEARCH_ENABLED},
                 {"ToolingLogWindow", DEFAULT_BOOL_TOOLINGLOGWINDOW},
                 {"ToolingMaximumIterations", DEFAULT_TOOLING_MAXIMUMITERATIONS},
+                {"AutoPilotLogDiagnosticsMaxInputChars", DEFAULT_AUTO_PILOT_LOG_DIAGNOSTICS_MAX_INPUT_CHARS},
+                {"TextAnalyzeMaxSourceChars", DEFAULT_TEXT_ANALYZE_MAX_SOURCE_CHARS},
+                {"TextAnalyzeMaxInstructionChars", DEFAULT_TEXT_ANALYZE_MAX_INSTRUCTION_CHARS},
+                {"TextAnalyzeMaxAdditionalContextChars", DEFAULT_TEXT_ANALYZE_MAX_ADDITIONAL_CONTEXT_CHARS},
+                {"ToolResponseRecoveryBudgetChars", DEFAULT_TOOL_RESPONSE_RECOVERY_BUDGET_CHARS},
+                {"ToolResponseCompactOnlyAfterEmpty", DEFAULT_TOOL_RESPONSE_COMPACT_ONLY_AFTER_EMPTY},
+                {"ToolResponseKeepRecentFullCount", DEFAULT_TOOL_RESPONSE_KEEP_RECENT_FULL_COUNT},
+                {"ToolResultReferenceThresholdChars", DEFAULT_TOOL_RESULT_REFERENCE_THRESHOLD_CHARS},
+                {"ToolResultReferencePreviewChars", DEFAULT_TOOL_RESULT_REFERENCE_PREVIEW_CHARS},
+                {"SubAgentLargeToolResponseThresholdChars", DEFAULT_SUB_AGENT_LARGE_TOOL_RESPONSE_THRESHOLD_CHARS},
+                {"SubAgentLargeToolResponseExcerptChars", DEFAULT_SUB_AGENT_LARGE_TOOL_RESPONSE_EXCERPT_CHARS},
+                {"ContextExpandDefaultChars", DEFAULT_CONTEXT_EXPAND_DEFAULT_CHARS},
+                {"ContextExpandMaxChars", DEFAULT_CONTEXT_EXPAND_MAX_CHARS},
+                {"EvidenceReplayCoreMaxChars", DEFAULT_EVIDENCE_REPLAY_CORE_MAX_CHARS},
+                {"EvidenceReplayMaxExactStringChars", DEFAULT_EVIDENCE_REPLAY_MAX_EXACT_STRING_CHARS},
+                {"EvidenceReplayPreferredArrayItemProperties", DEFAULT_EVIDENCE_REPLAY_PREFERRED_ARRAY_ITEM_PROPERTIES},
                 {"ToolResponsePayloadBudgetChars", DEFAULT_TOOL_RESPONSE_PAYLOAD_BUDGET_CHARS},
                 {"BudgetMediumCompactionThresholdChars", DEFAULT_BUDGET_MEDIUM_COMPACTION_THRESHOLD_CHARS},
                 {"BudgetAggressiveCompactionThresholdChars", DEFAULT_BUDGET_AGGRESSIVE_COMPACTION_THRESHOLD_CHARS},
@@ -3328,7 +3504,14 @@ Namespace SharedLibrary
                 {"SP_Assemble_Execute", Default_SP_Assemble_Execute},
                 {"SP_Assemble_Summarize", Default_SP_Assemble_Summarize},
                 {"LicenseCounterMethod", DEFAULT_LICENSECOUNTERMETHOD},
-                {"LicenseCounterAnon", DEFAULT_LICENSECOUNTERANON}
+                {"LicenseCounterIntervall", DEFAULT_LICENSECOUNTERINTERVALL},
+                {"LicenseCounterAnon", DEFAULT_LICENSECOUNTERANON},
+                {"SemanticArchiveCatalogPathLocal", DEFAULT_SEMANTICARCHIVE_CATALOG_PATH_LOCAL},
+                {"SemanticArchiveCatalogLibraryPath", DEFAULT_SEMANTICARCHIVE_CATALOG_LIBRARY_PATH},
+                {"SemanticArchiveBackgroundIndexingEnabled", DEFAULT_SEMANTICARCHIVE_BACKGROUND_INDEXING_ENABLED},
+                {"SemanticArchiveBackgroundIndexingWindow", DEFAULT_SEMANTICARCHIVE_BACKGROUND_INDEXING_WINDOW},
+                {"SemanticArchivePermissionMaintenanceEnabled", DEFAULT_SEMANTICARCHIVE_PERMISSION_MAINTENANCE_ENABLED},
+                {"SemanticArchivePermissionMaintenanceWindow", DEFAULT_SEMANTICARCHIVE_PERMISSION_MAINTENANCE_WINDOW}
             }
         End Function
 
@@ -3541,6 +3724,8 @@ Namespace SharedLibrary
                     {"DiscussInkyPathLocal", context.INI_DiscussInkyPathLocal},
                     {"AssemblePath", context.INI_AssemblePath},
                     {"AssemblePathLocal", context.INI_AssemblePathLocal},
+                    {"SemanticArchiveCatalogPathLocal", context.INI_SemanticArchiveCatalogPathLocal},
+                    {"SemanticArchiveCatalogLibraryPath", context.INI_SemanticArchiveCatalogLibraryPath},
                     {"KnowledgeStorePath", context.INI_KnowledgeStorePath},
                     {"KnowledgeStorePathLocal", context.INI_KnowledgeStorePathLocal},
                     {"KnowledgeStoreOwner", context.INI_KnowledgeStoreOwner},
@@ -3562,6 +3747,26 @@ Namespace SharedLibrary
                     {"ToolingLogWindow", context.INI_ToolingLogWindow.ToString()},
                     {"ToolingDryRun", context.INI_ToolingDryRun.ToString()},
                     {"ToolingMaximumIterations", context.INI_ToolingMaximumIterations.ToString()},
+                    {"ToolResponsePayloadBudgetChars", context.INI_ToolResponsePayloadBudgetChars.ToString()},
+                    {"BudgetMediumCompactionThresholdChars", context.INI_BudgetMediumCompactionThresholdChars.ToString()},
+                    {"BudgetAggressiveCompactionThresholdChars", context.INI_BudgetAggressiveCompactionThresholdChars.ToString()},
+                    {"BudgetCompactionPreviewChars", context.INI_BudgetCompactionPreviewChars.ToString()},
+                    {"AutoPilotLogDiagnosticsMaxInputChars", context.INI_AutoPilotLogDiagnosticsMaxInputChars.ToString()},
+                    {"TextAnalyzeMaxSourceChars", context.INI_TextAnalyzeMaxSourceChars.ToString()},
+                    {"TextAnalyzeMaxInstructionChars", context.INI_TextAnalyzeMaxInstructionChars.ToString()},
+                    {"TextAnalyzeMaxAdditionalContextChars", context.INI_TextAnalyzeMaxAdditionalContextChars.ToString()},
+                    {"ToolResponseRecoveryBudgetChars", context.INI_ToolResponseRecoveryBudgetChars.ToString()},
+                    {"ToolResponseCompactOnlyAfterEmpty", context.INI_ToolResponseCompactOnlyAfterEmpty.ToString()},
+                    {"ToolResponseKeepRecentFullCount", context.INI_ToolResponseKeepRecentFullCount.ToString()},
+                    {"ToolResultReferenceThresholdChars", context.INI_ToolResultReferenceThresholdChars.ToString()},
+                    {"ToolResultReferencePreviewChars", context.INI_ToolResultReferencePreviewChars.ToString()},
+                    {"SubAgentLargeToolResponseThresholdChars", context.INI_SubAgentLargeToolResponseThresholdChars.ToString()},
+                    {"SubAgentLargeToolResponseExcerptChars", context.INI_SubAgentLargeToolResponseExcerptChars.ToString()},
+                    {"ContextExpandDefaultChars", context.INI_ContextExpandDefaultChars.ToString()},
+                    {"ContextExpandMaxChars", context.INI_ContextExpandMaxChars.ToString()},
+                    {"EvidenceReplayCoreMaxChars", context.INI_EvidenceReplayCoreMaxChars.ToString()},
+                    {"EvidenceReplayMaxExactStringChars", context.INI_EvidenceReplayMaxExactStringChars.ToString()},
+                    {"EvidenceReplayPreferredArrayItemProperties", context.INI_EvidenceReplayPreferredArrayItemProperties.ToString()},
                     {"UpdateIni", context.INI_UpdateIni.ToString()},
                     {"UpdateIniAllowRemote", context.INI_UpdateIniAllowRemote.ToString()},
                     {"UpdateIniNoSignature", context.INI_UpdateIniNoSignature.ToString()},
@@ -3572,15 +3777,19 @@ Namespace SharedLibrary
                     {"UpdateIniSilentLog", context.INI_UpdateIniSilentLog.ToString()},
                     {"LicenseCounterMethod", context.INI_LicenseCounterMethod},
                     {"LicenseCounterPath", context.INI_LicenseCounterPath},
+                    {"LicenseCounterIntervall", context.INI_LicenseCounterIntervall.ToString(System.Globalization.CultureInfo.InvariantCulture)},
                     {"LicenseCounterAnon", context.INI_LicenseCounterAnon.ToString()},
                     {"KnowledgeStoreBackgroundIndexing", context.INI_KnowledgeStoreBackgroundIndexing.ToString()},
                     {"KnowledgeStoreBackgroundIndexingWindow", context.INI_KnowledgeStoreBackgroundIndexingWindow}
                 }
 
+                ' This reset is scoped to the INI: preserve the catalog pointer and all existing
+                ' personal My.Settings choices; remove optional SA INI controls so central defaults apply.
+                ' No catalog, generation, source or derived artifact is removed.
                 ' Read the original ini file content
                 Dim originalContent As String = System.IO.File.ReadAllText(IniFilePath)
                 Dim updatedContent As New StringBuilder()
-                Dim foundKeys As New HashSet(Of String)()
+                Dim foundKeys As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
 
                 ' Split into lines and process each line
                 Dim iniLines As String() = originalContent.Split({vbCrLf}, StringSplitOptions.None)
@@ -3598,6 +3807,9 @@ Namespace SharedLibrary
                     If keyValue.Length = 2 Then
                         Dim key As String = keyValue(0).Trim()
                         Dim value As String = keyValue(1).Trim()
+                        key = SemanticArchiveConfiguration.CanonicalizeIniKey(key)
+                        If SemanticArchiveConfiguration.IsOperationalKey(key) Then Continue For
+                        If SemanticArchiveConfiguration.IsGlobalKey(key) AndAlso foundKeys.Contains(key) Then Continue For
 
                         ' Retain keys that are in the expectedKeys dictionary
                         If expectedKeys.ContainsKey(key) Then
@@ -3644,24 +3856,56 @@ Namespace SharedLibrary
         ''' </summary>
         ''' <param name="context">Shared context providing the current application identifier (<c>RDV</c>).</param>
         ''' <returns>The active configuration file path with CR characters removed.</returns>
-        Public Shared Function GetActiveConfigFilePath(context As ISharedContext) As String
+        Public Shared Function GetActiveConfigSource(context As ISharedContext) As String
             Dim regPath As String = GetFromRegistry(RegPath_Base, RegPath_IniPath, True)
             Dim defaultPathApp As String = GetDefaultINIPath(context.RDV)
             Dim defaultPathWord As String = GetDefaultINIPath("Word")
             Dim candidate As String
 
             If Not String.IsNullOrWhiteSpace(regPath) AndAlso RegPath_IniPrio Then
-                candidate = System.IO.Path.Combine(ExpandEnvironmentVariables(regPath), $"{AN2}.ini")
+                candidate = ResolveRegistryConfigurationSource(regPath)
             ElseIf System.IO.File.Exists(defaultPathApp) Then
                 candidate = defaultPathApp
             ElseIf System.IO.File.Exists(defaultPathWord) Then
                 candidate = defaultPathWord
             ElseIf Not String.IsNullOrWhiteSpace(regPath) Then
-                candidate = System.IO.Path.Combine(ExpandEnvironmentVariables(regPath), $"{AN2}.ini")
+                candidate = ResolveRegistryConfigurationSource(regPath)
             Else
                 candidate = defaultPathApp
             End If
+
             Return RemoveCR(candidate)
+        End Function
+
+        Private Shared Function ResolveRegistryConfigurationSource(ByVal registryValue As String) As String
+            Dim raw As String = RemoveCR(If(registryValue, "").Trim())
+            If String.IsNullOrWhiteSpace(raw) Then Return ""
+
+            Select Case ConfigurationResourceLoader.ClassifyConfigurationSource(raw)
+                Case ConfigurationSourceKind.Https
+                    Return raw
+                Case ConfigurationSourceKind.UnsupportedUri
+                    Return raw
+                Case Else
+                    Return System.IO.Path.Combine(ExpandEnvironmentVariables(raw), $"{AN2}.ini")
+            End Select
+        End Function
+
+        Public Shared Function GetActiveConfigReadPath(context As ISharedContext) As String
+            Return ConfigurationResourceLoader.ResolveForRead(GetActiveConfigSource(context), "redink.ini")
+        End Function
+
+        Public Shared Function GetWritableLocalConfigPath(context As ISharedContext) As String
+            If context Is Nothing Then Return ""
+            Return GetDefaultINIPath(context.RDV)
+        End Function
+
+        ''' <summary>
+        ''' Compatibility reader returning the local read path of the active configuration.
+        ''' Writers must use GetWritableLocalConfigPath instead.
+        ''' </summary>
+        Public Shared Function GetActiveConfigFilePath(context As ISharedContext) As String
+            Return GetActiveConfigReadPath(context)
         End Function
 
 
@@ -3719,8 +3963,7 @@ Namespace SharedLibrary
 
             ' Icon / logo
             Try
-                Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                form.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(form)
             Catch
             End Try
 
@@ -3801,8 +4044,6 @@ Namespace SharedLibrary
                 Sub()
                     Dim wasTopMost As Boolean = form.TopMost
                     form.TopMost = False
-                    form.Enabled = False
-                    Application.DoEvents()
 
                     Try
                         ' Load wizard definition
@@ -3818,7 +4059,8 @@ Namespace SharedLibrary
                         ' Read current values from the selected file
                         Dim iniValues = ConfigWizardEngine.ReadIniValues(iniPath)
 
-                        ' Show wizard form
+                        ' Show with the existing, same-thread owner. ShowDialog disables and
+                        ' re-enables it automatically; do not manually disable it first.
                         Using wizForm As New ConfigWizardForm(context, wizDef, iniPath, iniValues)
                             Dim result = wizForm.ShowDialog(form)
 
@@ -4249,6 +4491,7 @@ Namespace SharedLibrary
         Public Shared Sub ShowExpertConfiguration(ByRef context As ISharedContext, ownerform As Form, Optional temporaryNoLocalConfigOverride As Boolean = False, Optional originalNoLocalConfigValue As Boolean = False)
             ' Dictionary to store variable names and their current values
             Dim variableValues As New Dictionary(Of String, Object)
+            Dim semanticArchiveConfigured As SemanticArchiveConfiguration.ControlsSnapshot = SemanticArchiveConfiguration.ReadConfiguredControls(context)
 
             ' Populate the dictionary with all the required variables
             variableValues.Add("APIKey", context.INI_APIKeyBack) ' Use Context.INI_APIKeyBack, display as Context.INI_APIKey
@@ -4422,6 +4665,12 @@ Namespace SharedLibrary
             variableValues.Add("DocStylePathLocal", context.INI_DocStylePathLocal)
             variableValues.Add("AssemblePath", context.INI_AssemblePath)
             variableValues.Add("AssemblePathLocal", context.INI_AssemblePathLocal)
+            variableValues.Add("SemanticArchiveCatalogPathLocal", context.INI_SemanticArchiveCatalogPathLocal)
+            variableValues.Add("SemanticArchiveCatalogLibraryPath", context.INI_SemanticArchiveCatalogLibraryPath)
+            variableValues.Add("SemanticArchiveBackgroundIndexingEnabled", semanticArchiveConfigured.BackgroundEnabled)
+            variableValues.Add("SemanticArchiveBackgroundIndexingWindow", semanticArchiveConfigured.BackgroundWindow)
+            variableValues.Add("SemanticArchivePermissionMaintenanceEnabled", semanticArchiveConfigured.PermissionEnabled)
+            variableValues.Add("SemanticArchivePermissionMaintenanceWindow", semanticArchiveConfigured.PermissionWindow)
             variableValues.Add("KnowledgeStorePath", context.INI_KnowledgeStorePath)
             variableValues.Add("KnowledgeStorePathLocal", context.INI_KnowledgeStorePathLocal)
             variableValues.Add("KnowledgeStoreOwner", context.INI_KnowledgeStoreOwner)
@@ -4479,6 +4728,7 @@ Namespace SharedLibrary
             variableValues.Add("SP_RemoveClutter", context.SP_RemoveClutter)
             variableValues.Add("SP_Redact", context.SP_Redact)
             variableValues.Add("SP_CheckforII", context.SP_CheckforII)
+            variableValues.Add("SP_CheckforPhishing", context.SP_CheckforPhishing)
             variableValues.Add("SP_Extract", context.SP_Extract)
             variableValues.Add("SP_ExtractBuilder", context.SP_ExtractBuilder)
             variableValues.Add("SP_ExtractSchema", context.SP_ExtractSchema)
@@ -4536,11 +4786,28 @@ Namespace SharedLibrary
             variableValues.Add("NoHelperDownload", context.INI_NoHelperDownload)
             variableValues.Add("LicenseCounterPath", context.INI_LicenseCounterPath)
             variableValues.Add("LicenseCounterMethod", context.INI_LicenseCounterMethod)
+            variableValues.Add("LicenseCounterIntervall", context.INI_LicenseCounterIntervall)
             variableValues.Add("LicenseCounterAnon", context.INI_LicenseCounterAnon)
             variableValues.Add("AutoPilot", context.INI_AutoPilot)
             variableValues.Add("ToolingLogWindow", context.INI_ToolingLogWindow)
             variableValues.Add("ToolingDryRun", context.INI_ToolingDryRun)
             variableValues.Add("ToolingMaximumIterations", context.INI_ToolingMaximumIterations)
+            variableValues.Add("AutoPilotLogDiagnosticsMaxInputChars", context.INI_AutoPilotLogDiagnosticsMaxInputChars)
+            variableValues.Add("TextAnalyzeMaxSourceChars", context.INI_TextAnalyzeMaxSourceChars)
+            variableValues.Add("TextAnalyzeMaxInstructionChars", context.INI_TextAnalyzeMaxInstructionChars)
+            variableValues.Add("TextAnalyzeMaxAdditionalContextChars", context.INI_TextAnalyzeMaxAdditionalContextChars)
+            variableValues.Add("ToolResponseRecoveryBudgetChars", context.INI_ToolResponseRecoveryBudgetChars)
+            variableValues.Add("ToolResponseCompactOnlyAfterEmpty", context.INI_ToolResponseCompactOnlyAfterEmpty)
+            variableValues.Add("ToolResponseKeepRecentFullCount", context.INI_ToolResponseKeepRecentFullCount)
+            variableValues.Add("ToolResultReferenceThresholdChars", context.INI_ToolResultReferenceThresholdChars)
+            variableValues.Add("ToolResultReferencePreviewChars", context.INI_ToolResultReferencePreviewChars)
+            variableValues.Add("SubAgentLargeToolResponseThresholdChars", context.INI_SubAgentLargeToolResponseThresholdChars)
+            variableValues.Add("SubAgentLargeToolResponseExcerptChars", context.INI_SubAgentLargeToolResponseExcerptChars)
+            variableValues.Add("ContextExpandDefaultChars", context.INI_ContextExpandDefaultChars)
+            variableValues.Add("ContextExpandMaxChars", context.INI_ContextExpandMaxChars)
+            variableValues.Add("EvidenceReplayCoreMaxChars", context.INI_EvidenceReplayCoreMaxChars)
+            variableValues.Add("EvidenceReplayMaxExactStringChars", context.INI_EvidenceReplayMaxExactStringChars)
+            variableValues.Add("EvidenceReplayPreferredArrayItemProperties", context.INI_EvidenceReplayPreferredArrayItemProperties)
             variableValues.Add("ToolResponsePayloadBudgetChars", context.INI_ToolResponsePayloadBudgetChars)
             variableValues.Add("BudgetMediumCompactionThresholdChars", context.INI_BudgetMediumCompactionThresholdChars)
             variableValues.Add("BudgetAggressiveCompactionThresholdChars", context.INI_BudgetAggressiveCompactionThresholdChars)
@@ -4691,6 +4958,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_RemoveClutter") Then context.SP_RemoveClutter = CStr(updatedValues("SP_RemoveClutter"))
                 If updatedValues.ContainsKey("SP_Redact") Then context.SP_Redact = CStr(updatedValues("SP_Redact"))
                 If updatedValues.ContainsKey("SP_CheckforII") Then context.SP_CheckforII = CStr(updatedValues("SP_CheckforII"))
+                If updatedValues.ContainsKey("SP_CheckforPhishing") Then context.SP_CheckforPhishing = CStr(updatedValues("SP_CheckforPhishing"))
                 If updatedValues.ContainsKey("SP_Extract") Then context.SP_Extract = CStr(updatedValues("SP_Extract"))
                 If updatedValues.ContainsKey("SP_ExtractBuilder") Then context.SP_ExtractBuilder = CStr(updatedValues("SP_ExtractBuilder"))
                 If updatedValues.ContainsKey("SP_ExtractSchema") Then context.SP_ExtractSchema = CStr(updatedValues("SP_ExtractSchema"))
@@ -4836,12 +5104,29 @@ Namespace SharedLibrary
                     If updatedValues.ContainsKey("NoHelperDownload") Then context.INI_NoHelperDownload = CBool(updatedValues("NoHelperDownload"))
                     If updatedValues.ContainsKey("LicenseCounterPath") Then context.INI_LicenseCounterPath = CStr(updatedValues("LicenseCounterPath"))
                     If updatedValues.ContainsKey("LicenseCounterMethod") Then context.INI_LicenseCounterMethod = CStr(updatedValues("LicenseCounterMethod"))
+                    If updatedValues.ContainsKey("LicenseCounterIntervall") Then context.INI_LicenseCounterIntervall = ParseLicenseCounterIntervall(System.Convert.ToString(updatedValues("LicenseCounterIntervall"), System.Globalization.CultureInfo.InvariantCulture))
                     If updatedValues.ContainsKey("LicenseCounterAnon") Then context.INI_LicenseCounterAnon = CBool(updatedValues("LicenseCounterAnon"))
                     If updatedValues.ContainsKey("InkyMemoryCap") Then context.INI_InkyMemoryCap = CInt(updatedValues("InkyMemoryCap"))
                     If updatedValues.ContainsKey("AutoPilot") Then context.INI_AutoPilot = CStr(updatedValues("AutoPilot"))
                     If updatedValues.ContainsKey("ToolingLogWindow") Then context.INI_ToolingLogWindow = CBool(updatedValues("ToolingLogWindow"))
                     If updatedValues.ContainsKey("ToolingDryRun") Then context.INI_ToolingDryRun = CBool(updatedValues("ToolingDryRun"))
                     If updatedValues.ContainsKey("ToolingMaximumIterations") Then context.INI_ToolingMaximumIterations = CInt(updatedValues("ToolingMaximumIterations"))
+                    If updatedValues.ContainsKey("AutoPilotLogDiagnosticsMaxInputChars") Then context.INI_AutoPilotLogDiagnosticsMaxInputChars = ParseAgentContextInteger(System.Convert.ToString(updatedValues("AutoPilotLogDiagnosticsMaxInputChars"), System.Globalization.CultureInfo.InvariantCulture), "AutoPilotLogDiagnosticsMaxInputChars", DEFAULT_AUTO_PILOT_LOG_DIAGNOSTICS_MAX_INPUT_CHARS, 10000, True)
+                    If updatedValues.ContainsKey("TextAnalyzeMaxSourceChars") Then context.INI_TextAnalyzeMaxSourceChars = ParseAgentContextInteger(System.Convert.ToString(updatedValues("TextAnalyzeMaxSourceChars"), System.Globalization.CultureInfo.InvariantCulture), "TextAnalyzeMaxSourceChars", DEFAULT_TEXT_ANALYZE_MAX_SOURCE_CHARS, 1)
+                    If updatedValues.ContainsKey("TextAnalyzeMaxInstructionChars") Then context.INI_TextAnalyzeMaxInstructionChars = ParseAgentContextInteger(System.Convert.ToString(updatedValues("TextAnalyzeMaxInstructionChars"), System.Globalization.CultureInfo.InvariantCulture), "TextAnalyzeMaxInstructionChars", DEFAULT_TEXT_ANALYZE_MAX_INSTRUCTION_CHARS, 1)
+                    If updatedValues.ContainsKey("TextAnalyzeMaxAdditionalContextChars") Then context.INI_TextAnalyzeMaxAdditionalContextChars = ParseAgentContextInteger(System.Convert.ToString(updatedValues("TextAnalyzeMaxAdditionalContextChars"), System.Globalization.CultureInfo.InvariantCulture), "TextAnalyzeMaxAdditionalContextChars", DEFAULT_TEXT_ANALYZE_MAX_ADDITIONAL_CONTEXT_CHARS, 0)
+                    If updatedValues.ContainsKey("ToolResponseRecoveryBudgetChars") Then context.INI_ToolResponseRecoveryBudgetChars = ParseAgentContextInteger(System.Convert.ToString(updatedValues("ToolResponseRecoveryBudgetChars"), System.Globalization.CultureInfo.InvariantCulture), "ToolResponseRecoveryBudgetChars", DEFAULT_TOOL_RESPONSE_RECOVERY_BUDGET_CHARS, 1)
+                    If updatedValues.ContainsKey("ToolResponseCompactOnlyAfterEmpty") Then context.INI_ToolResponseCompactOnlyAfterEmpty = ParseAgentContextBoolean(System.Convert.ToString(updatedValues("ToolResponseCompactOnlyAfterEmpty"), System.Globalization.CultureInfo.InvariantCulture), "ToolResponseCompactOnlyAfterEmpty", DEFAULT_TOOL_RESPONSE_COMPACT_ONLY_AFTER_EMPTY)
+                    If updatedValues.ContainsKey("ToolResponseKeepRecentFullCount") Then context.INI_ToolResponseKeepRecentFullCount = ParseAgentContextInteger(System.Convert.ToString(updatedValues("ToolResponseKeepRecentFullCount"), System.Globalization.CultureInfo.InvariantCulture), "ToolResponseKeepRecentFullCount", DEFAULT_TOOL_RESPONSE_KEEP_RECENT_FULL_COUNT, 0)
+                    If updatedValues.ContainsKey("ToolResultReferenceThresholdChars") Then context.INI_ToolResultReferenceThresholdChars = ParseAgentContextInteger(System.Convert.ToString(updatedValues("ToolResultReferenceThresholdChars"), System.Globalization.CultureInfo.InvariantCulture), "ToolResultReferenceThresholdChars", DEFAULT_TOOL_RESULT_REFERENCE_THRESHOLD_CHARS, 0)
+                    If updatedValues.ContainsKey("ToolResultReferencePreviewChars") Then context.INI_ToolResultReferencePreviewChars = ParseAgentContextInteger(System.Convert.ToString(updatedValues("ToolResultReferencePreviewChars"), System.Globalization.CultureInfo.InvariantCulture), "ToolResultReferencePreviewChars", DEFAULT_TOOL_RESULT_REFERENCE_PREVIEW_CHARS, 0)
+                    If updatedValues.ContainsKey("SubAgentLargeToolResponseThresholdChars") Then context.INI_SubAgentLargeToolResponseThresholdChars = ParseAgentContextInteger(System.Convert.ToString(updatedValues("SubAgentLargeToolResponseThresholdChars"), System.Globalization.CultureInfo.InvariantCulture), "SubAgentLargeToolResponseThresholdChars", DEFAULT_SUB_AGENT_LARGE_TOOL_RESPONSE_THRESHOLD_CHARS, 1)
+                    If updatedValues.ContainsKey("SubAgentLargeToolResponseExcerptChars") Then context.INI_SubAgentLargeToolResponseExcerptChars = ParseAgentContextInteger(System.Convert.ToString(updatedValues("SubAgentLargeToolResponseExcerptChars"), System.Globalization.CultureInfo.InvariantCulture), "SubAgentLargeToolResponseExcerptChars", DEFAULT_SUB_AGENT_LARGE_TOOL_RESPONSE_EXCERPT_CHARS, 0)
+                    If updatedValues.ContainsKey("ContextExpandDefaultChars") Then context.INI_ContextExpandDefaultChars = ParseAgentContextInteger(System.Convert.ToString(updatedValues("ContextExpandDefaultChars"), System.Globalization.CultureInfo.InvariantCulture), "ContextExpandDefaultChars", DEFAULT_CONTEXT_EXPAND_DEFAULT_CHARS, 1)
+                    If updatedValues.ContainsKey("ContextExpandMaxChars") Then context.INI_ContextExpandMaxChars = ParseAgentContextInteger(System.Convert.ToString(updatedValues("ContextExpandMaxChars"), System.Globalization.CultureInfo.InvariantCulture), "ContextExpandMaxChars", DEFAULT_CONTEXT_EXPAND_MAX_CHARS, 1)
+                    If updatedValues.ContainsKey("EvidenceReplayCoreMaxChars") Then context.INI_EvidenceReplayCoreMaxChars = ParseAgentContextInteger(System.Convert.ToString(updatedValues("EvidenceReplayCoreMaxChars"), System.Globalization.CultureInfo.InvariantCulture), "EvidenceReplayCoreMaxChars", DEFAULT_EVIDENCE_REPLAY_CORE_MAX_CHARS, 1)
+                    If updatedValues.ContainsKey("EvidenceReplayMaxExactStringChars") Then context.INI_EvidenceReplayMaxExactStringChars = ParseAgentContextInteger(System.Convert.ToString(updatedValues("EvidenceReplayMaxExactStringChars"), System.Globalization.CultureInfo.InvariantCulture), "EvidenceReplayMaxExactStringChars", DEFAULT_EVIDENCE_REPLAY_MAX_EXACT_STRING_CHARS, 0)
+                    If updatedValues.ContainsKey("EvidenceReplayPreferredArrayItemProperties") Then context.INI_EvidenceReplayPreferredArrayItemProperties = ParseAgentContextInteger(System.Convert.ToString(updatedValues("EvidenceReplayPreferredArrayItemProperties"), System.Globalization.CultureInfo.InvariantCulture), "EvidenceReplayPreferredArrayItemProperties", DEFAULT_EVIDENCE_REPLAY_PREFERRED_ARRAY_ITEM_PROPERTIES, 1)
                     If updatedValues.ContainsKey("ToolResponsePayloadBudgetChars") Then context.INI_ToolResponsePayloadBudgetChars = CInt(updatedValues("ToolResponsePayloadBudgetChars"))
                     If updatedValues.ContainsKey("BudgetMediumCompactionThresholdChars") Then context.INI_BudgetMediumCompactionThresholdChars = CInt(updatedValues("BudgetMediumCompactionThresholdChars"))
                     If updatedValues.ContainsKey("BudgetAggressiveCompactionThresholdChars") Then context.INI_BudgetAggressiveCompactionThresholdChars = CInt(updatedValues("BudgetAggressiveCompactionThresholdChars"))
@@ -4857,6 +5142,14 @@ Namespace SharedLibrary
                     If updatedValues.ContainsKey("ISearch_ResponseURLStart") Then context.INI_ISearch_ResponseURLStart = CStr(updatedValues("ISearch_ResponseURLStart"))
                     If updatedValues.ContainsKey("AssemblePath") Then context.INI_AssemblePath = CStr(updatedValues("AssemblePath"))
                     If updatedValues.ContainsKey("AssemblePathLocal") Then context.INI_AssemblePathLocal = CStr(updatedValues("AssemblePathLocal"))
+                    If updatedValues.ContainsKey("SemanticArchiveCatalogPathLocal") Then context.INI_SemanticArchiveCatalogPathLocal = CStr(updatedValues("SemanticArchiveCatalogPathLocal"))
+                    If updatedValues.ContainsKey("SemanticArchiveCatalogLibraryPath") Then context.INI_SemanticArchiveCatalogLibraryPath = CStr(updatedValues("SemanticArchiveCatalogLibraryPath"))
+                    Dim semanticArchiveUpdates As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.OrdinalIgnoreCase)
+                    For Each semanticArchiveKey As System.String In SemanticArchiveConfiguration.GlobalKeys()
+                        If SemanticArchiveConfiguration.IsOperationalKey(semanticArchiveKey) AndAlso updatedValues.ContainsKey(semanticArchiveKey) Then
+                            semanticArchiveUpdates(semanticArchiveKey) = System.Convert.ToString(updatedValues(semanticArchiveKey), System.Globalization.CultureInfo.InvariantCulture)
+                        End If
+                    Next
                     If updatedValues.ContainsKey("KnowledgeStorePath") Then context.INI_KnowledgeStorePath = CStr(updatedValues("KnowledgeStorePath"))
                     If updatedValues.ContainsKey("KnowledgeStorePathLocal") Then context.INI_KnowledgeStorePathLocal = CStr(updatedValues("KnowledgeStorePathLocal"))
                     If updatedValues.ContainsKey("KnowledgeStoreOwner") Then context.INI_KnowledgeStoreOwner = CStr(updatedValues("KnowledgeStoreOwner"))
@@ -4872,7 +5165,7 @@ Namespace SharedLibrary
                     End If
 
                     ' Call UpdateAppConfig after all updates
-                    UpdateAppConfig(context)
+                    UpdateAppConfigCore(context, semanticArchiveUpdates)
                 End If
         End Sub
 

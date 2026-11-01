@@ -11,6 +11,7 @@ Notes:
 - `python_execute` requires the `redink-pythonagent` helper to be installed and configured; Python execution is unavailable without it.
 - The `Outlook` column refers to Outlook tooling outside AutoPilot, primarily Local Chat / Agent mode.
 - `AutoPilot` is listed separately because it does not expose the full Outlook tool surface.
+- `semantic_archive_list`, `semantic_archive_search` and `semantic_archive_read` are selectable when `SemanticArchiveCatalogPathLocal` is configured. Discovery uses only the selected catalog metadata. Search/read also require published usable content and current source access. Local scope is the explicit session choice, otherwise saved defaults, otherwise enabled catalog archives; explicitly choosing none remains an opt-out. A normal agent run can use them without an `(sa)` trigger; tool arguments never expand the host-resolved scope. AutoPilot mail, voicemail and scheduled runs additionally require fresh independently verified requester authorization and otherwise return `requester_identity_unverified`.
 
 
 ## Skill/agent resource dependency semantics
@@ -32,6 +33,10 @@ Notes:
 | `internet_search` | Searches the public internet and returns readable content from top results. | Yes | Yes | Yes |
 | `web_grounding` | Uses a web-enabled model to perform cited live-web research. | Yes | Yes | Yes |
 | `knowledge_search` | Searches the user's local knowledge store for relevant internal content. | Yes | Yes | Yes |
+| `semantic_archive_list` | Lists host-selected enabled archive IDs, names and descriptions without traversing originals. Bounded pages use NextOffset and CatalogRevision. Descriptors are not document evidence. | Yes | Yes | Yes |
+| `semantic_archive_search` | Finds original files in the host-selected Semantic Archives; returns scoped opaque hit/continuation references and bounded coverage. Available only with SemanticArchiveCatalogPathLocal configured and a host-resolved archive scope (local explicit/default/enabled-catalog selection, remote request-bound selection). | Yes | Yes | Yes |
+| `semantic_archive_read` | Loads bounded exact excerpts from authorized archive hit references, rechecking requester access, live validity, generation and provenance. Existing document indexes always use the shared section selector, including literal-text hits; an empty/failed indexed selection does not fall back to whole-file text. | Yes | Yes | Yes |
+| `log_count` | Deterministically counts current-host skill invocations from `INI_LogPath`; returns statistics only for skills in the caller's effective permission scope. | No | Yes | Yes |
 | `tool_loader` | Lazily loads full tool definitions only when a specific tool is needed. | Yes | Yes | Yes |
 | `resolve_capability_route` | Internal top-level routing handshake. Before substantive ordinary tooling, selects a specifically applicable advertised skill; otherwise a suitable top-level agent; otherwise `none`. Uses manifest metadata only and does not preload skill/agent bodies. Availability is host/runtime controlled. | Yes | Yes | Yes |
 | `report_progress` | Announces a short user-facing major-step progress update. Use it before the first substantive tool action and again whenever a new major phase begins. | Yes | Yes | No |
@@ -47,7 +52,7 @@ Notes:
 | `text_write` | Writes, replaces, or appends a UTF-8 text file. | Yes | Yes | Yes |
 | `text_search` | Searches text files for substring or regex matches. | Yes | Yes | Yes |
 | `text_export_to_text` | Silently extracts readable text from a supported file or from supported files in a directory and writes UTF-8 `.txt` outputs without host UI prompts. | Yes | Yes | Yes |
-| `text_analyze_file` | Reads one existing plain-text file completely inside the tool, sends the full text plus caller instructions to one isolated LLM call, and returns only the model response; no chunking or retrieval. Very good and memory efficient for analyzing text for certain criteria. For documents, have them first converted to a text file using `text_export_to_text`. | Yes | Yes | Yes |
+| `text_analyze_file` | Reads one complete plain-text file (`input_path`) or workflow-owned stored result (`input_result_ref`) inside one isolated LLM call and returns the analysis without the source dump. Supply exactly one source. Optional `expected_snapshot_sha256` checks file bytes with `input_path`. Convert documents with `text_export_to_text` first; do not page a complete stored source through the parent just to send it to this analyzer. Nested incomplete source wrappers still require source retrieval; full-wrapper analysis is not full-document coverage. | Yes | Yes | Yes |
 | `semantic_index_create_from_file` | Creates a self-indexed semantic-search text file from an existing text file. | Yes | Yes | Yes |
 | `semantic_index_create_from_text` | Creates a self-indexed semantic-search text file from supplied in-memory text. | Yes | Yes | Yes |
 | `semantic_index_validate` | Validates whether a file is a readable semantic-search index and returns basic counts. | Yes | Yes | Yes |
@@ -75,6 +80,7 @@ Notes:
 | `word_search` | Searches a `.docx` file on disk for text or regex matches. | Yes | Yes | Yes |
 | `word_write` | Inserts, replaces, appends, or deletes a paragraph in a `.docx` file on disk while preserving footnotes, endnotes, fields, images, comments, existing revision content, and run formatting. Supports batch `tasks`; matching is resilient within a single paragraph and results report `complete` / `partial` / `none` plus unmatched-anchor suggestions. | Yes | Yes | Yes |
 | `word_markup` | Edits a `.docx` file on disk with tracked changes while preserving footnotes, endnotes, fields, images, comments, existing revision content, and run formatting. Uses word-level markup by default, collapses large rewrites, supports batch `tasks`, supports `delete_paragraph`, and reports `complete` / `partial` / `none` plus unmatched-anchor suggestions. | Yes | Yes | Yes |
+| `word_verify_revisions` | Read-only verification of a tracked-changes DOCX: reject supported new text revisions and compare with a clean baseline; optionally accept and compare with an expected target. Returns `not_applicable` for pre-existing/unsupported revisions rather than mutating semantics. | Yes | No | No |
 | `word_comment_add` | Adds one or more Word comments to matched spans in a `.docx` file on disk while preserving footnotes, endnotes, fields, images, existing revision content, and formatting. Supports batch `tasks`, resilient single-paragraph matching, and reports `complete` / `partial` / `none` plus unmatched-anchor suggestions. | Yes | Yes | Yes |
 | `word_comment_list` | Lists comments in a `.docx` file on disk. | Yes | Yes | Yes |
 | `word_comment_remove` | Removes comments from a `.docx` file on disk. | Yes | Yes | Yes |
@@ -120,7 +126,7 @@ These binary-safe tools operate across the PathPolicy-governed roots (the agent 
 
 | Tool | Description | Word | Outlook | AutoPilot |
 |---|---|---:|---:|---:|
-| `process_word_document` | Processes a Word document or attachment through the document-processing pipeline. | No | Yes | Yes |
+| `process_word_document` | Transforms an existing DOCX, PPTX or XLSX while preserving native formatting and structure; preferred for translating, correcting, shortening or applying one textual instruction across a whole presentation. | No | Yes | Yes |
 | `comment_word_document` | Adds comment bubbles to a Word document. | No | Yes | Yes |
 | `extract_pdf_text` | Extracts readable text from a PDF file. | No | Yes | Yes |
 | `merge_pdfs` | Merges multiple PDFs into one output PDF. | No | Yes | Yes |
@@ -140,18 +146,21 @@ These binary-safe tools operate across the PathPolicy-governed roots (the agent 
 | `search_in_attachments` | Searches across attachment content for relevant matches. | No | Yes | Yes |
 | `summarize_thread` | Summarizes an email thread. | No | No | Yes |
 | `pdf_to_word` | Converts a PDF into a Word document. | No | Yes | Yes |
-| `create_word_document` | Creates a new Word document output. | No | Yes | Yes |
+
+`pdf_to_word` creates a Microsoft Word automation instance and invokes `Word.Documents.Open` followed by `Document.SaveAs2`. The user's configured Word environment is authoritative: connected COM/VSTO add-ins and Word PDF `FileConverters` are not disabled, bypassed, screened, or ranked. If Word selects an installed converter, that converter is allowed to run; removing an unwanted converter is the user's responsibility. A successful usable DOCX becomes the authoritative baseline for source-preserving follow-up work. For broad semantic revisions that require tracked changes, prefer `process_word_document` on the converted DOCX and its compare output; use `word_markup` only for exact edits whose anchors were read from the current DOCX. OCR may support analysis but must not silently replace a successful converted baseline with a reconstructed document. The tool itself does not start Office Safe Mode or invoke Windows file associations or a Red Ink OCR/layout adapter directly. If Word conversion fails or the result is genuinely unusable/non-editable, text/OCR reconstruction remains a separate controlled fallback workflow and is never reported as exact layout preservation. `layout_required` additionally rejects an effectively image-only result. Legacy `layout_ocr` requests remain rejected by `pdf_to_word` itself.
+| `create_word_document` | Creates a Word output from inline `markdown_content` or existing `markdown_path`; optional `expected_source_sha256` pins the file input. Existing renderer/design contracts apply. Optional `table_borders` (preserve/none/grid), `table_header_shading` and `table_body_shading` (six-digit RGB or none) explicitly override body-table formatting; omission preserves styles. The generic renderer supports `header_text`, `footer_text` and `show_page_numbers` (default true). | No | Yes | Yes |
 | `complete_word_tables` | Completes existing Word tables, placeholders, and form fields in place. | No | Yes | Yes |
 | `create_excel_spreadsheet` | Creates a new Excel workbook output. | No | Yes | Yes |
 | `create_powerpoint` | Creates a new PowerPoint presentation output. | No | Yes | Yes |
 | `create_code_file` | Creates a source code or text-based file output. | No | Yes | Yes |
 | `comment_pdf_document` | Adds annotation comments to a PDF. | No | Yes | Yes |
-| `extract_data_from_attachments` | Pulls structured information from one or more attachments. | No | Yes | Yes |
+| `extract_data_from_docs` | Reads/converts authorized document paths (`file_paths`) and/or attachments (`attachment_names`) and returns structured data with explicit partial-input errors. | No | Yes | Yes |
 | `redact_pdf` | Redacts content in a PDF. | No | Yes | Yes |
 | `overlay_pdf` | Overlays one PDF onto another PDF. | No | Yes | Yes |
 | `create_audio_file` | Generates an audio file output. | No | Yes | Yes |
 | `generate_image` | Generates an image file output. | No | Yes | Yes |
 | `manage_scheduled_tasks` | Creates, lists, updates, pauses, resumes, or deletes scheduled tasks. | No | Yes | Yes |
+| `manage_prompt_coaching` | Manages the verified mail sender's optional Inky tips and personal daily/immediate/system delivery schedule; no other user target is accepted. | No | No | Yes |
 | `manage_user_memory` | Manages per-user persistent memory storage. | No | Yes | Yes |
 | `manage_user_files` | Manages files in per-user storage. | No | Yes | Yes |
 | `report_inability` | Returns a structured inability report when the requested action cannot be completed. | No | Yes | Yes |
@@ -171,6 +180,8 @@ These binary-safe tools operate across the PathPolicy-governed roots (the agent 
 | `agent_workspace_create_folder_structure` | Creates multiple folders under a workspace path in one operation. | No | Yes | Yes |
 | `agent_workspace_trash` | Moves workspace files or folders to the Recycle Bin. | No | Yes | Yes |
 | `agent_workspace_inventory_report` | Creates a Word or Excel inventory report for workspace files. | No | Yes | Yes |
+
+`manage_prompt_coaching` accepts only `action`: `status`, `enable`, `disable`, `reset`, `daily`, `immediate`, `delivery_default`. ON/OFF preserve timing; DAILY/IMMEDIATE enable tips with personal timing; SYSTEM (`delivery_default`) changes timing only; DEFAULT (`reset`) resets both choices to the system defaults/inclusion list. Personal timing overrides the startup delivery default, never global disable or explicit opt-out. It remains available for an authorized current mail sender under sender-tool restrictions and when delivery is globally disabled; Local Chat and scheduled tasks cannot use it. The model-independent fallback is one exact full-body command: `INKY_TIPS ON`, `INKY_TIPS OFF`, `INKY_TIPS DAILY`, `INKY_TIPS IMMEDIATE`, `INKY_TIPS SYSTEM`, `INKY_TIPS STATUS`, or `INKY_TIPS DEFAULT`, without a signature or quoted text. Normal sender, actual configured subject-trigger and approval rules still apply. Recommendations are sent only for high-impact contextual improvements which pass an additional quality review; immediate delivery does not imply a message after every mail.
 
 ## Word live-document tools
 
@@ -209,7 +220,7 @@ After that routing phase, several ordinary tool families may still overlap. Use 
   - `worddoc_*` operate on a document already OPEN in Word (Word host only), addressing the active or a named open document. They support resilient live-document matching for text operations; `worddoc_insert_text`, `worddoc_replace`, and `worddoc_delete` support `track_changes` (default `true`), and `worddoc_replace`/`worddoc_delete` also support `match_scope` for exact-span, sentence-level, or paragraph-level edits.
   - `word_*` (for example `word_extract_text`, `word_write`, `word_markup`, `word_format`, `word_comment_add`) operate on a `.docx` FILE by path and are available in Word, Outlook, and AutoPilot.
   - `word_doc_*` (`word_doc_read`/`word_doc_edit`/`word_doc_create`/`word_doc_export_pdf`) go through the Word host bridge for the active document (Word host only).
-- **Editing the open Word document in the Word chatbot** is normally done through the inline `[#REPLACE …]`/`[#INSERTAFTER …]` command channel, which takes precedence over tool calls.
+- **Editing the open Word document in the Word chatbot** is normally done through the host-defined JSON Word command channel, which takes precedence over tool calls.
 - **Word content edits on a file.** `word_write` and `word_markup` now preserve inline Word content such as footnotes, endnotes, fields, images, comments, existing revision content, and run formatting while editing only the matched text. Both support batch `tasks`; `word_markup` is the tracked-changes variant, while `word_write` performs the same kind of edit without revision marks. Use `delete_paragraph` to remove a paragraph (and, in markup mode, to mark its paragraph mark deleted so two paragraphs can merge when the change is accepted). `word_comment_add` uses the same resilient single-paragraph matching and bulk-task model for comment placement. These file-level tools report `complete`, `partial`, or `none`; when a task is not found, inspect the per-task unmatched-anchor suggestions, re-read the current document text, and retry only the missed tasks rather than treating the result as blocked.
 - **Workspace vs. text tools.** `workspace_*` act inside the connected workspace boundary; `text_*` act on allowed-boundary files by path. Both are available on all three surfaces.
 - **Skills vs. agents.** `skill_use` loads instructions into the SHARED conversation; `agent_<name>` delegates a self-contained sub-task in an ISOLATED context.
@@ -217,3 +228,10 @@ After that routing phase, several ordinary tool families may still overlap. Use 
 ## Online Sources
 
 The selected online sources must also be included as "allowed tools" if they shall be available to a skill or agent. Wildcards (for example `swiss-caselaw*`) can be used, as well as the universal placeholder `selected_online_sources`.
+
+### Additive file-backed text/Word contract (P1)
+
+`text_read` keeps `path`, `max_chars`, byte `size`, `text` and `truncated`; adds optional `start_char` (`offset` alias), `expected_snapshot_sha256`, and window/hash metadata. Explicit windows use UTF-16 offsets and avoid surrogate-pair splits; omitted offsets retain legacy prefix behavior. `text_export_to_text` keeps its existing arguments/statuses and adds observed size/hash/PDF/OCR metadata plus a session-scoped extraction resource id, secret-free adapter/config fingerprints and host-known processed ranges. Successful identical source/config requests reuse one immutable-source extraction (single-flight); failed/cancelled work is not cached. Existing unrelated outputs remain unverified, while an output published by the current session can be provenance-verified without rerunning OCR. `create_word_document` accepts exactly one of `markdown_content` or `markdown_path`; file contents use the same renderers and design contracts. It also supports the standard optional explicit single-artifact fields so a created basis file can satisfy one slot in a multi-file final contract. Capability availability remains as listed above; this does not register a new Word creator in hosts that did not expose one.
+
+
+Compatibility note: `extract_data_from_docs` is the current tool name. Update older resources referring to `extract_data_from_attachments`; that old name is not an exposed alias.

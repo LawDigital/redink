@@ -13,6 +13,10 @@
 '  - AddSkills(...): registers discovered skills as lazy skill_<name> entries.
 '  - AddAgents(...): registers discovered agents as lazy agent_<name> entries.
 '  - This file is additive; does not alter existing call sites.
+'
+' KEY ARCHITECTURE
+'   • Surface: ToolRegistryBuilder (VB implementation).
+'   • Entry points/helpers: ToSafeToolSuffix, BuildSkillToolName, BuildAgentToolName.
 ' =============================================================================
 
 Option Strict On
@@ -194,7 +198,7 @@ Namespace Agents
             If declaredDeliverableCount > 0 Then
                 instr.Append(" This skill declares exactly ")
                 instr.Append(declaredDeliverableCount.ToString(System.Globalization.CultureInfo.InvariantCulture))
-                instr.Append(" expected final artifact slot(s); expected_artifacts is mandatory before the skill runs.")
+                instr.Append(" expected final artifact slot(s); the host creates and returns their opaque slot identities when the skill starts.")
             End If
 
             Dim properties As New Newtonsoft.Json.Linq.JObject(
@@ -206,38 +210,10 @@ Namespace Agents
 
             Dim required As New Newtonsoft.Json.Linq.JArray("input")
 
-            If declaredDeliverableCount > 0 Then
-                properties("expected_artifacts") =
-                    New Newtonsoft.Json.Linq.JObject(
-                        New Newtonsoft.Json.Linq.JProperty("type", "array"),
-                        New Newtonsoft.Json.Linq.JProperty(
-                            "description",
-                            "REQUIRED exact expected-final-artifact contract declared by this skill. Use opaque logical_deliverable_id/output_slot_id pairs."),
-                        New Newtonsoft.Json.Linq.JProperty("minItems", declaredDeliverableCount),
-                        New Newtonsoft.Json.Linq.JProperty("maxItems", declaredDeliverableCount),
-                        New Newtonsoft.Json.Linq.JProperty(
-                            "items",
-                            New Newtonsoft.Json.Linq.JObject(
-                                New Newtonsoft.Json.Linq.JProperty("type", "object"),
-                                New Newtonsoft.Json.Linq.JProperty(
-                                    "properties",
-                                    New Newtonsoft.Json.Linq.JObject(
-                                        New Newtonsoft.Json.Linq.JProperty(
-                                            "logical_deliverable_id",
-                                            New Newtonsoft.Json.Linq.JObject(
-                                                New Newtonsoft.Json.Linq.JProperty("type", "string"))),
-                                        New Newtonsoft.Json.Linq.JProperty(
-                                            "output_slot_id",
-                                            New Newtonsoft.Json.Linq.JObject(
-                                                New Newtonsoft.Json.Linq.JProperty("type", "string"))))),
-                                New Newtonsoft.Json.Linq.JProperty(
-                                    "required",
-                                    New Newtonsoft.Json.Linq.JArray(
-                                        "logical_deliverable_id",
-                                        "output_slot_id")))))
+            ' expected_artifacts is intentionally not model-authored here. For skills that
+            ' declare final deliverables, SkillInvokeTool creates the exact opaque slot contract
+            ' host-side and returns it in the successful skill payload.
 
-                required.Add("expected_artifacts")
-            End If
 
             Dim definition As New Newtonsoft.Json.Linq.JObject(
                 New Newtonsoft.Json.Linq.JProperty("name", toolName),
@@ -261,7 +237,8 @@ Namespace Agents
                 .ModelDescription = "Skill: " & sk.Name & " (" & originLabel & ")",
                 .Tool = True,
                 .ToolPriority = 500,
-                .ToolErrorHandling = "skip"
+                .ToolErrorHandling = "skip",
+                .ToolCallArgumentNormalizer = Function(arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object)) SkillInvokeTool.PrepareKnownSkillHostOwnedDeclaredDeliverableContractForPreflight(sk, arguments)
             }
         End Function
 

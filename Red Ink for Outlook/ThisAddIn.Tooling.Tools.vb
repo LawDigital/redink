@@ -97,7 +97,7 @@ Partial Public Class ThisAddIn
     Private Const InternalDownloadWebFilesToolInstructionsPrompt As String =
         "download_web_files: Downloads one or more remote files and saves the original binary bytes to disk. " &
         "Use this only when the user wants the actual file saved locally. " &
-        "Provide urls (required array). Optionally provide target_directory (relative subfolder under the current workspace when available; otherwise under the safe download root) and overwrite (boolean, default false). " &
+        "Provide urls (required array). Optionally provide target_directory (relative subfolder under the current workspace when available; otherwise under the session staging root) and overwrite (boolean, default false). " &
         "Use this tool instead of retrieve_web_content when the user wants the actual PDF or other binary file, not merely extracted text."
 
     Private Const InternalDownloadWebFilesToolDefinition As String =
@@ -106,7 +106,7 @@ Partial Public Class ThisAddIn
         "Authenticated SharePoint, OneDrive, Teams, and similar cloud storage URLs are not supported.""," &
         """parameters"":{""type"":""object"",""properties"":{" &
         """urls"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Array of absolute HTTP/HTTPS URLs to download.""}," &
-        """target_directory"":{""type"":""string"",""description"":""Optional relative target folder. If a writable workspace is active, this is resolved under the workspace root; otherwise under the safe download root.""}," &
+        """target_directory"":{""type"":""string"",""description"":""Optional relative target folder. If a writable workspace is active, this is resolved under the workspace root; otherwise under the session staging root.""}," &
         """overwrite"":{""type"":""boolean"",""description"":""Optional. Default false. If false, existing files are not overwritten; unique names are created instead.""}}" &
         ",""required"":[""urls""]}}"
 
@@ -192,13 +192,30 @@ Partial Public Class ThisAddIn
                                                  Optional maxChars As Integer = 0,
                                                  Optional includeLinks As Boolean = False,
                                                  Optional linkExtensions As System.Collections.Generic.List(Of String) = Nothing,
-                                                 Optional expandInteractiveSections As Boolean = False) As System.Threading.Tasks.Task(Of WebRetrievalResult)
+                                                 Optional expandInteractiveSections As Boolean = False,
+                                                 Optional cancellationToken As System.Threading.CancellationToken = Nothing) As System.Threading.Tasks.Task(Of WebRetrievalResult)
 
-        Dim tcs As New System.Threading.Tasks.TaskCompletionSource(Of WebRetrievalResult)()
+        Dim tcs As New System.Threading.Tasks.TaskCompletionSource(Of WebRetrievalResult)(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
+        Dim hostExitToken As System.Threading.CancellationToken = HostWindowLifetimeToken
+        If cancellationToken.IsCancellationRequested OrElse hostExitToken.IsCancellationRequested Then
+            tcs.TrySetCanceled()
+            Return tcs.Task
+        End If
+        If Not IsSafeWebUrl(baseUrl) Then
+            Dim blocked As New WebRetrievalResult() With {
+                .FinalUrl = baseUrl,
+                .LinksJson = "[]",
+                .ErrorMessage = $"Blocked unsafe URL: {baseUrl}",
+                .TextContent = $"Blocked unsafe URL: {baseUrl}"
+            }
+            tcs.TrySetResult(blocked)
+            Return tcs.Task
+        End If
         Dim normalizedExtensions As System.Collections.Generic.List(Of String) = NormalizeLinkExtensions(linkExtensions)
 
         Dim thread As New System.Threading.Thread(
         Sub()
+            System.Threading.SynchronizationContext.SetSynchronizationContext(Nothing)
             Dim result As New WebRetrievalResult() With {
                 .FinalUrl = baseUrl,
                 .LinksJson = "[]"
@@ -223,7 +240,7 @@ Partial Public Class ThisAddIn
                     result.ErrorMessage = $"Blocked unsafe URL: {baseUrl}"
                     result.TextContent = result.ErrorMessage
                     navigationFailed = True
-                    Return
+                    Throw New System.InvalidOperationException(result.ErrorMessage)
                 End If
 
                 userDataFolder = SharedLibrary.SharedLibrary.SharedMethods.CreateWebView2TransientFolder()
@@ -470,7 +487,9 @@ Partial Public Class ThisAddIn
                         End Try
                     End Sub)
 
-                While Not contentExtracted AndAlso Not navigationFailed AndAlso (System.DateTime.Now - startTime) < timeout
+                While Not contentExtracted AndAlso Not navigationFailed AndAlso
+                      Not cancellationToken.IsCancellationRequested AndAlso Not hostExitToken.IsCancellationRequested AndAlso
+                      (System.DateTime.Now - startTime) < timeout
                     System.Windows.Forms.Application.DoEvents()
                     System.Threading.Thread.Sleep(50)
                 End While
@@ -485,7 +504,8 @@ Partial Public Class ThisAddIn
                     System.String.IsNullOrWhiteSpace(result.TextContent) OrElse
                     result.TextContent = result.ErrorMessage
 
-                If onlyErrorOrTimeout AndAlso Not includeLinks Then
+                If onlyErrorOrTimeout AndAlso Not includeLinks AndAlso
+                   Not cancellationToken.IsCancellationRequested AndAlso Not hostExitToken.IsCancellationRequested Then
                     Try
                         System.Diagnostics.Debug.WriteLine("[WebView2] Empty rendered content; trying HTTP fallback.")
 
@@ -493,7 +513,8 @@ Partial Public Class ThisAddIn
                             client.Timeout = System.TimeSpan.FromSeconds(WebToolTimeoutSeconds)
                             client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RedInk/1.0")
 
-                            Dim fallbackHtml As String = client.GetStringAsync(baseUrl).GetAwaiter().GetResult()
+                            Dim fallbackHtml As System.String = SharedLibrary.SharedLibrary.SharedMethods.ReadWebToolTextResponseAsync(
+                                client, baseUrl, System.TimeSpan.FromSeconds(WebToolTimeoutSeconds), cancellationToken).GetAwaiter().GetResult()
 
                             If Not System.String.IsNullOrWhiteSpace(fallbackHtml) Then
                                 Dim fallbackText As String = fallbackHtml
@@ -557,6 +578,9 @@ Partial Public Class ThisAddIn
                 System.Diagnostics.Debug.WriteLine("[WebView2] Error: " & ex.Message)
 
             Finally
+                Dim workerUiContext As System.Windows.Forms.WindowsFormsSynchronizationContext =
+                    TryCast(System.Threading.SynchronizationContext.Current,
+                            System.Windows.Forms.WindowsFormsSynchronizationContext)
                 Try
                     If webView IsNot Nothing Then
                         webView.Dispose()
@@ -580,6 +604,18 @@ Partial Public Class ThisAddIn
                     End If
                 Catch ex As System.Exception
                     System.Diagnostics.Debug.WriteLine("[WebView2] User data folder cleanup error: " & ex.Message)
+                End Try
+                Try
+                    System.Windows.Forms.Application.ExitThread()
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("[WebView2] Message loop cleanup error: " & ex.Message)
+                End Try
+                Try
+                    If workerUiContext IsNot Nothing Then workerUiContext.Dispose()
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("[WebView2] Synchronization context cleanup error: " & ex.Message)
+                Finally
+                    System.Threading.SynchronizationContext.SetSynchronizationContext(Nothing)
                 End Try
             End Try
 
@@ -605,10 +641,15 @@ Partial Public Class ThisAddIn
             End If
 
             result.TextContent = finalText
-            tcs.TrySetResult(result)
+            If cancellationToken.IsCancellationRequested OrElse hostExitToken.IsCancellationRequested Then
+                tcs.TrySetCanceled()
+            Else
+                tcs.TrySetResult(result)
+            End If
         End Sub)
 
         thread.SetApartmentState(System.Threading.ApartmentState.STA)
+        thread.IsBackground = True
         thread.Start()
 
         Return tcs.Task
@@ -1455,23 +1496,15 @@ Partial Public Class ThisAddIn
     ''' <param name="url">Absolute URL to retrieve.</param>
     ''' <param name="maxDepth">Unused by this implementation; retained for caller compatibility.</param>
     ''' <param name="client">HTTP client used for retrieval.</param>
-    ''' <returns>Response body as a string, or an error string on failure.</returns>
-    Private Async Function RetrieveWebsiteContent(url As String, maxDepth As Integer, client As System.Net.Http.HttpClient) As Task(Of String)
-        Try
-            client.Timeout = TimeSpan.FromSeconds(WebToolTimeoutSeconds)
-
-            If Not client.DefaultRequestHeaders.UserAgent.Any() Then
-                client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RedInk/1.0")
-            End If
-
-            Return Await client.GetStringAsync(url)
-        Catch ex As TaskCanceledException
-            Return $"Timed out after {WebToolTimeoutSeconds} seconds while retrieving {url}."
-        Catch ex As OperationCanceledException
-            Return $"Timed out after {WebToolTimeoutSeconds} seconds while retrieving {url}."
-        Catch ex As Exception
-            Return $"Error retrieving {url}: {ex.Message}"
-        End Try
+    ''' <returns>Bounded textual response; transport, binary-content and size failures throw to the per-URL error handler.</returns>
+    Private Async Function RetrieveWebsiteContent(url As System.String, maxDepth As System.Int32,
+                                                  client As System.Net.Http.HttpClient,
+                                                  Optional cancellationToken As System.Threading.CancellationToken = Nothing) As System.Threading.Tasks.Task(Of System.String)
+        If Not client.DefaultRequestHeaders.UserAgent.Any() Then
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RedInk/1.0")
+        End If
+        Return Await SharedLibrary.SharedLibrary.SharedMethods.ReadWebToolTextResponseAsync(
+            client, url, System.TimeSpan.FromSeconds(WebToolTimeoutSeconds), cancellationToken)
     End Function
 
 #End Region
@@ -1575,6 +1608,7 @@ Partial Public Class ThisAddIn
             End If
 
             Dim results As New StringBuilder()
+            Dim retrievedCount As System.Int32 = 0
 
             If UseWebView2 Then
                 For i = 0 To urls.Count - 1
@@ -1590,7 +1624,8 @@ Partial Public Class ThisAddIn
                             0,
                             includeLinks,
                             linkExtensions,
-                            expandInteractiveSections)
+                            expandInteractiveSections,
+                            cancellationToken)
 
                         Dim resolvedUrl As String = If(pageResult?.FinalUrl, requestedUrl)
                         Dim content As String = If(pageResult?.TextContent, "")
@@ -1599,10 +1634,13 @@ Partial Public Class ThisAddIn
                         results.AppendLine($"<URL_{i + 1}>{resolvedUrl}</URL_{i + 1}>")
 
                         If Not String.IsNullOrWhiteSpace(content) Then
+                            Dim preparedContent As System.String = SharedLibrary.SharedLibrary.SharedMethods.PrepareWebToolTextForReplay(content, requestedUrl)
                             results.AppendLine($"<CONTENT_{i + 1}>")
-                            results.AppendLine(content)
+                            results.AppendLine(preparedContent)
+                            retrievedCount += 1
                             results.AppendLine($"</CONTENT_{i + 1}>")
                         Else
+                            If includeLinks AndAlso Not System.String.IsNullOrWhiteSpace(linksJson) AndAlso linksJson.Trim() <> "[]" Then retrievedCount += 1
                             results.AppendLine($"<CONTENT_{i + 1}>No content retrieved</CONTENT_{i + 1}>")
                             ToolingFileLogger.LogWarn("Internal web tool: No content retrieved.", details:=$"url={requestedUrl}")
                         End If
@@ -1655,13 +1693,15 @@ Partial Public Class ThisAddIn
 
                         Try
                             context.Log($"  Fetching: {requestedUrl}")
-                            Dim content = Await RetrieveWebsiteContent(requestedUrl, INI_ISearch_MaxDepth, httpClient)
+                            Dim content = Await RetrieveWebsiteContent(requestedUrl, INI_ISearch_MaxDepth, httpClient, cancellationToken)
 
                             results.AppendLine($"<URL_{i + 1}>{requestedUrl}</URL_{i + 1}>")
 
                             If Not String.IsNullOrWhiteSpace(content) Then
+                                Dim preparedContent As System.String = SharedLibrary.SharedLibrary.SharedMethods.PrepareWebToolTextForReplay(content, requestedUrl)
                                 results.AppendLine($"<CONTENT_{i + 1}>")
-                                results.AppendLine(content)
+                                results.AppendLine(preparedContent)
+                                retrievedCount += 1
                                 results.AppendLine($"</CONTENT_{i + 1}>")
                             Else
                                 results.AppendLine($"<CONTENT_{i + 1}>No content retrieved</CONTENT_{i + 1}>")
@@ -1707,8 +1747,18 @@ Partial Public Class ThisAddIn
                 End Using
             End If
 
+            If retrievedCount < urls.Count Then
+                results.AppendLine("<RETRIEVAL_STATUS>" & If(retrievedCount = 0, "failed", "partial") &
+                    "; retrieved=" & retrievedCount.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    "; requested=" & urls.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    "; inspect each URL result; missing content was not retrieved.</RETRIEVAL_STATUS>")
+            End If
             response.Response = results.ToString()
-            response.Success = True
+            response.Success = retrievedCount > 0
+            If Not response.Success Then
+                response.ErrorCode = "web_content_unavailable"
+                response.ErrorMessage = "No requested source content or usable link result was retrieved. Inspect the per-URL errors and use the stated download/extraction or retrieval alternative."
+            End If
 
         Catch ex As OperationCanceledException
             response.Success = False
@@ -1743,7 +1793,7 @@ Partial Public Class ThisAddIn
         End If
 
         If HasToolName(selectedTools, "extract_pdf_text") Then
-            sb.AppendLine("- extract_pdf_text is for a single PDF or staged/session file at a time. Never pass a directory or folder path to extract_pdf_text.")
+            sb.AppendLine("- extract_pdf_text accepts one or more exact PDF session filenames in attachment_names. To read only one PDF, pass a one-item array. Omit the selector or use [] only when all eligible PDFs are intended. Invalid explicit targets fail without processing other attachments. Never pass a directory or folder path.")
         End If
 
         If HasToolName(selectedTools, "agent_workspace_find_files") OrElse
@@ -1796,6 +1846,7 @@ Partial Public Class ThisAddIn
 
         Return New ModelConfig() With {
             .ToolName = InternalSearchToolName,
+            .CapabilityTags = "source_retrieval",
             .ToolInstructionsPrompt = instructions,
             .ToolDefinition = definition,
             .ModelDescription = "Internet Search (" & If(Not String.IsNullOrWhiteSpace(INI_ISearch_Name), INI_ISearch_Name, "Search") & ")" & InternalToolSuffix,
@@ -1822,6 +1873,7 @@ Partial Public Class ThisAddIn
     Public Function GetInternalWebTool() As ModelConfig
         Return New ModelConfig() With {
             .ToolName = InternalWebToolName,
+            .CapabilityTags = "source_retrieval",
             .ToolInstructionsPrompt = InternalWebToolInstructionsPrompt,
             .ToolDefinition = InternalWebToolDefinition,
             .ModelDescription = "Web Content Retriever" & InternalToolSuffix,
@@ -2108,8 +2160,17 @@ Partial Public Class ThisAddIn
             Return response
         End If
 
-        Dim downloadRoot As String = ResolveSafeWebDownloadDirectory(targetDirectory)
-        Directory.CreateDirectory(downloadRoot)
+        Dim downloadRoot As System.String
+        Try
+            downloadRoot = ResolveSafeWebDownloadDirectory(targetDirectory)
+            System.IO.Directory.CreateDirectory(downloadRoot)
+        Catch ex As System.Exception
+            response.Success = False
+            response.ErrorCode = "download_directory_unavailable"
+            response.ErrorMessage = ex.Message
+            response.Response = ex.Message
+            Return response
+        End Try
 
         Dim downloaded As New JArray()
         Dim failed As New JArray()
@@ -2259,30 +2320,7 @@ Partial Public Class ThisAddIn
     End Function
 
     Private Function ResolveSafeWebDownloadDirectory(targetDirectory As String) As String
-        Dim root As String = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
-            "Red Ink Downloads")
-
-        Dim requested As String = If(targetDirectory, "").Trim()
-
-        If requested = "" Then
-            Return root
-        End If
-
-        requested = requested.Replace("/"c, Path.DirectorySeparatorChar)
-
-        If Path.IsPathRooted(requested) Then
-            requested = requested.TrimStart(Path.GetPathRoot(requested).ToCharArray())
-        End If
-
-        Dim fullPath As String = Path.GetFullPath(Path.Combine(root, requested))
-        Dim fullRoot As String = Path.GetFullPath(root)
-
-        If Not fullPath.StartsWith(fullRoot, StringComparison.OrdinalIgnoreCase) Then
-            Return root
-        End If
-
-        Return fullPath
+        Return SharedLibrary.Agents.PathPolicy.ResolveDownloadDirectory(targetDirectory)
     End Function
 
     Private Function GetDownloadFileName(url As String, response As System.Net.Http.HttpResponseMessage) As String

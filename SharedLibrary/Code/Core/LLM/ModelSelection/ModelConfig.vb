@@ -71,12 +71,19 @@ Namespace SharedLibrary
         Public Property ToolAPICall As String
         Public Property ToolPriority As Integer = 100
         Public Property ToolErrorHandling As String = "skip"
+        ' Optional tool-owned, side-effect-free argument preparation that runs before schema validation/signature generation.
+        ' Nothing preserves the original argument object unchanged; participating tools return the canonical object to validate and execute.
+        Public Property ToolCallArgumentNormalizer As System.Func(Of System.Collections.Generic.IDictionary(Of System.String, System.Object), System.Collections.Generic.Dictionary(Of System.String, System.Object))
         Public Property APICall_ToolCallPart_Template As String = ""
 
         ' Project preference: capability-driven flag (not tool-specific) marking tools that are designed to
         ' complete an entire logical task in a single call (e.g. sandboxed script execution). The tooling loop
         ' uses this to discourage repeated, expensive re-invocations for work that could have been consolidated.
         Public Property PrefersSingleInvocation As Boolean = False
+
+        ' Capability-driven flag: identical successful calls must still reach the tool implementation.
+        ' Use this when repeat execution has observable contract semantics (for example session-cache verification).
+        Public Property AllowRepeatedIdenticalCalls As Boolean = False
 
         ' Project preference: capability-driven flag (not tool-specific) marking a tool that is a general-purpose
         ' fallback strategy rather than a specialized tool. When a fallback tool fails on its first attempt and a

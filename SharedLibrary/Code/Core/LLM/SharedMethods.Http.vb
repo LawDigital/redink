@@ -52,6 +52,8 @@ Namespace SharedLibrary
             Public Property BodyBytes As Byte()
             Public Property Headers As Dictionary(Of String, String)
             Public Property StackPreference As HttpStackPreference = HttpStackPreference.PreferConfiguredDefault
+            Public Property UseAutomaticClientCertificate As System.Boolean = False
+            Public Property AllowAutoRedirect As System.Boolean = True
         End Class
 
         Public Class SharedHttpResponse
@@ -185,9 +187,13 @@ Namespace SharedLibrary
 
         Private Shared Async Function SendHttpRequestWithHttpClientAsync(request As SharedHttpRequest) As Task(Of SharedHttpResponse)
             Dim handler As New HttpClientHandler() With {
-                .AllowAutoRedirect = True,
+                .AllowAutoRedirect = request.AllowAutoRedirect,
                 .AutomaticDecompression = DecompressionMethods.GZip Or DecompressionMethods.Deflate
             }
+
+            If request.UseAutomaticClientCertificate Then
+                handler.ClientCertificateOptions = System.Net.Http.ClientCertificateOption.Automatic
+            End If
 
             Using client As New HttpClient(handler)
                 client.Timeout = TimeSpan.FromMilliseconds(request.TimeoutMs)
@@ -307,6 +313,19 @@ Namespace SharedLibrary
                         New Object() {9, 512 Or 2048})
                 Catch
                 End Try
+
+                If Not request.AllowAutoRedirect Then
+                    Try
+                        ' WinHttpRequestOption_EnableRedirects = 6
+                        requestType.InvokeMember(
+                            "Option",
+                            System.Reflection.BindingFlags.SetProperty,
+                            Nothing,
+                            comRequest,
+                            New Object() {6, False})
+                    Catch
+                    End Try
+                End If
 
                 Dim sendBody As Object = Nothing
                 If request.BodyBytes IsNot Nothing AndAlso request.BodyBytes.Length > 0 Then

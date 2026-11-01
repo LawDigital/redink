@@ -8,14 +8,14 @@
 '          escaping, column letter conversion, and encoding-smart file reading.
 '
 ' Architecture:
-'   - Entry points: TryExtractOfficeText (Word/Excel/PowerPoint), TryExtractTextLike (text/code files).
+'   - Async entry points dispatch legacy COM readers to the captured Office host STA; sandboxed readers stay on the caller.
 '   - Word/Excel: early-bound Microsoft Office Interop with explicit COM release (SafeCloseWord/SafeCloseExcel).
 '   - PowerPoint: late binding (CreateObject) to avoid PIA dependency; manual COM release.
 '   - Excel extraction: attempts bulk 2D array retrieval (Value2 and Formula) then per-cell fallback.
 '   - PowerPoint extraction: iterates slides, shapes, optional notes.
 '   - Text-like extraction: extension filter, optional RTF via Word, otherwise direct file read.
 '   - ReadAllTextSmart: UTF-8 with BOM detection, fallback Windows-1252, final generic read.
-'   - Defensive error handling: returns False on failure, truncates very large outputs (1,500,000 chars).
+'   - Defensive error handling: returns False on failure, preserves complete extracted outputs.
 ' =============================================================================
 
 Option Explicit On
@@ -34,11 +34,33 @@ Partial Public Class ThisAddIn
     End Function
 
 
+    ''' <summary>Returns success, text and label while dispatching only legacy Office COM work.</summary>
+    Private Async Function TryExtractOfficeTextAsync(filePath As System.String) As System.Threading.Tasks.Task(Of System.Tuple(Of System.Boolean, System.String, System.String))
+        Dim reader As System.Func(Of System.Tuple(Of System.Boolean, System.String, System.String)) =
+            Function()
+                ' Outputs are local to the dispatched operation; no ByRef parameter crosses threads.
+                Dim extracted As System.String = Nothing
+                Dim label As System.String = Nothing
+                Dim succeeded As System.Boolean = TryExtractOfficeText(filePath, extracted, label)
+                Return System.Tuple.Create(succeeded, extracted, label)
+            End Function
+        Dim extension As System.String = If(System.String.IsNullOrWhiteSpace(filePath), System.String.Empty,
+                                             System.IO.Path.GetExtension(filePath).ToLowerInvariant())
+        Select Case extension
+            Case ".doc", ".rtf", ".xls", ".ppt"
+                ' Keep the complete COM create/read/close/release sequence on the actual host STA.
+                Return Await SharedLibrary.SharedLibrary.SharedMethods.PostToHostUiAsync(reader).ConfigureAwait(False)
+            Case Else
+                ' Sandboxed OpenXML/mail readers and ordinary file I/O remain on the caller.
+                Return reader.Invoke()
+        End Select
+    End Function
+
     ''' <summary>
     ''' Attempts plaintext extraction for Word (.doc/.docx/.rtf), Excel (.xls/.xlsx), or PowerPoint (.ppt/.pptx),
     ''' plus email files (.msg/.eml). Prefers sandboxed (COM-free) readers for OpenXML formats;
     ''' falls back to COM Interop for legacy binary formats (.doc, .xls, .ppt, .rtf).
-    ''' Truncates output at 1,500,000 characters.
+    ''' Preserves complete output; context size is controlled by retrievable references.
     ''' </summary>
     ''' <param name="filePath">Absolute file path.</param>
     ''' <param name="extracted">Plaintext result (output).</param>
@@ -111,9 +133,6 @@ Partial Public Class ThisAddIn
         End If
 
         If System.String.IsNullOrWhiteSpace(extracted) Then Return False
-        If extracted.Length > 1_500_000 Then
-            extracted = extracted.Substring(0, 1_500_000) & System.Environment.NewLine & "[…truncated…]"
-        End If
 
         Return True
     End Function
@@ -125,6 +144,9 @@ Partial Public Class ThisAddIn
     ''' <param name="path">Absolute file path.</param>
     ''' <returns>Trimmed document text.</returns>
     Private Function ExtractWordText(ByVal path As System.String) As System.String
+        If Not SharedLibrary.SharedLibrary.SharedMethods.IsOnHostUiThread Then
+            Throw New System.InvalidOperationException("Office text extraction requires the captured host UI thread.")
+        End If
         Dim app As Microsoft.Office.Interop.Word.Application = Nothing
         Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
         Dim weOwnApp As System.Boolean = False
@@ -190,6 +212,9 @@ Partial Public Class ThisAddIn
     ''' <param name="path">Absolute workbook file path.</param>
     ''' <returns>Trimmed textual representation of workbook data.</returns>
     Private Function ExtractExcelText(ByVal path As System.String) As System.String
+        If Not SharedLibrary.SharedLibrary.SharedMethods.IsOnHostUiThread Then
+            Throw New System.InvalidOperationException("Office text extraction requires the captured host UI thread.")
+        End If
         Dim app As Microsoft.Office.Interop.Excel.Application = Nothing
         Dim wb As Microsoft.Office.Interop.Excel.Workbook = Nothing
         Dim sb As New System.Text.StringBuilder(4096)
@@ -376,6 +401,9 @@ Partial Public Class ThisAddIn
     ''' <param name="path">Absolute presentation file path.</param>
     ''' <returns>Trimmed textual content.</returns>
     Private Function ExtractPowerPointText(ByVal path As System.String) As System.String
+        If Not SharedLibrary.SharedLibrary.SharedMethods.IsOnHostUiThread Then
+            Throw New System.InvalidOperationException("Office text extraction requires the captured host UI thread.")
+        End If
         Dim app As System.Object = Nothing
         Dim pres As System.Object = Nothing
         Dim sb As New System.Text.StringBuilder(2048)
@@ -507,10 +535,27 @@ Partial Public Class ThisAddIn
         Return System.Security.SecurityElement.Escape(s)
     End Function
 
+    ''' <summary>Returns success, text and label; the existing Word-based RTF fallback runs on the host.</summary>
+    Private Async Function TryExtractTextLikeAsync(filePath As System.String) As System.Threading.Tasks.Task(Of System.Tuple(Of System.Boolean, System.String, System.String))
+        Dim reader As System.Func(Of System.Tuple(Of System.Boolean, System.String, System.String)) =
+            Function()
+                Dim extracted As System.String = Nothing
+                Dim label As System.String = Nothing
+                Dim succeeded As System.Boolean = TryExtractTextLike(filePath, extracted, label)
+                Return System.Tuple.Create(succeeded, extracted, label)
+            End Function
+        If Not System.String.IsNullOrWhiteSpace(filePath) AndAlso
+           System.String.Equals(System.IO.Path.GetExtension(filePath), ".rtf", System.StringComparison.OrdinalIgnoreCase) Then
+            ' The existing RTF fallback uses Word; its entire COM lifetime belongs to the host.
+            Return Await SharedLibrary.SharedLibrary.SharedMethods.PostToHostUiAsync(reader).ConfigureAwait(False)
+        End If
+        Return reader.Invoke()
+    End Function
+
     ''' <summary>
     ''' Attempts extraction for text/code-like files based on extension list.
     ''' Optional RTF handling via Word Interop; falls back to direct text read.
-    ''' Adds header for CSV/TSV. Truncates output at 1,500,000 characters.
+    ''' Adds header for CSV/TSV. Preserves complete output; context size is controlled by retrievable references.
     ''' </summary>
     ''' <param name="filePath">Absolute file path.</param>
     ''' <param name="extracted">Extracted text (output).</param>
@@ -554,9 +599,6 @@ Partial Public Class ThisAddIn
                     If Not System.String.IsNullOrWhiteSpace(tmp) Then
                         extracted = tmp
                         label = "Word-readable (RTF): " & System.IO.Path.GetFileName(filePath)
-                        If extracted.Length > 1_500_000 Then
-                            extracted = extracted.Substring(0, 1_500_000) & System.Environment.NewLine & "[…truncated…]"
-                        End If
                         Return True
                     End If
                 Catch
@@ -578,9 +620,6 @@ Partial Public Class ThisAddIn
                 label = "Text/code file: " & System.IO.Path.GetFileName(filePath)
             End If
 
-            If extracted.Length > 1_500_000 Then
-                extracted = extracted.Substring(0, 1_500_000) & System.Environment.NewLine & "[…truncated…]"
-            End If
 
             Return True
         Catch ex As System.Exception

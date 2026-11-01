@@ -1,5 +1,6 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
+' For license to use see https://redink.ai.
 
 ' =============================================================================
 ' File: ReviewChangesDialog.vb
@@ -9,6 +10,10 @@
 '          RichTextBox, and lets the user click each highlighted token to
 '          accept/reject it. The lower pane shows a live Markdown-rendered
 '          preview of the resulting text.
+'
+' KEY ARCHITECTURE
+'   • Surface: ReviewChangesDialog, Segment (VB implementation).
+'   • Entry points/helpers: InitializeUI, BuildDiffPanel, BuildPreviewPanel.
 ' =============================================================================
 
 Option Explicit On
@@ -107,8 +112,7 @@ Public Class ReviewChangesDialog
         Me.Location = New Point(wa.Left + (wa.Width - w) \ 2, wa.Top + (wa.Height - h) \ 2)
 
         Try
-            Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-            Me.Icon = Icon.FromHandle(bmp.GetHicon())
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(Me)
         Catch
         End Try
 

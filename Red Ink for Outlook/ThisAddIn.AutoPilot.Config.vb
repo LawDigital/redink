@@ -77,6 +77,12 @@ Partial Public Class ThisAddIn
         Public Property FooterText As String = ""
 
         ''' <summary>
+        ''' Host-generated evidence footer mode: "external" includes only positively
+        ''' classified external evidence sources; "off" suppresses the block entirely.
+        ''' </summary>
+        Public Property SourcesFooterMode As String = "external"
+
+        ''' <summary>
         ''' When True, the session was auto-started (timer expired) without explicit user interaction.
         ''' Unattended mode skips the catch-up preview dialog (auto-selects all) and auto-approves
         ''' replies for non-whitelisted senders instead of blocking with an approval dialog.
@@ -109,6 +115,8 @@ Partial Public Class ThisAddIn
         ''' are transcribed and processed as instructions. Requires binary input support.
         ''' </summary>
         Public Property EnableVoicemailProcessing As Boolean = False
+
+        Public Property EnableScanProcessing As System.Boolean = False
 
         ''' <summary>
         ''' SMTP address of the voicemail system (e.g. noreply@combox.swisscom.ch).
@@ -164,6 +172,30 @@ Partial Public Class ThisAddIn
         ''' Retention is applied only for whitelisted senders (AutoPilot session only).
         ''' </summary>
         Public Property ThreadRetentionDays As Integer = 0
+
+        ''' <summary>
+        ''' Recipient for periodic privacy-scrubbed AutoPilot engineering diagnostics reports.
+        ''' Empty disables idle log analysis and reporting completely.
+        ''' </summary>
+        Public Property LogDiagnosticsReportEmail As String = ""
+
+        ''' <summary>Retained compatibility field; normal diagnostics are now one daily digest at 20:00 local time.</summary>
+        Public Property LogDiagnosticsReportIntervalDays As System.Int32 = 1
+
+        ''' <summary>Optional input character cap per analysis call; 0 analyses the complete log.</summary>
+        Public Property LogDiagnosticsMaxInputChars As System.Int32 = 0
+
+        ''' <summary>Enables optional user-facing Inky request recommendations, independently of engineering reports.</summary>
+        Public Property PromptCoachingEnabled As System.Boolean = False
+
+        ''' <summary>True includes all accepted users by default; explicit per-user opt-out always wins.</summary>
+        Public Property PromptCoachingDefaultForAllUsers As System.Boolean = False
+
+        ''' <summary>System default schedule: True sends after analysis; False collects from 20:00 local time. Explicit per-user timing overrides this default.</summary>
+        Public Property PromptCoachingImmediateDelivery As System.Boolean = False
+
+        ''' <summary>Exact SMTP addresses included by the administrator; no wildcard or domain patterns.</summary>
+        Public Property PromptCoachingIncludedUsers As System.String = System.String.Empty
 
 
     End Class
@@ -356,48 +388,101 @@ Partial Public Class ThisAddIn
 
         ' ── Step 5: Rate limits ──
         Dim pCooldown As New InputParameter() With {
-            .Name = $"Cooldown per sender (seconds, default {AP_DefaultCooldownSeconds})",
+            .Name = "Cooldown (seconds)",
+            .ToolTipText = $"Cooldown per sender (seconds, default {AP_DefaultCooldownSeconds})",
             .Value = saved.CooldownSeconds.ToString()
         }
         Dim pMaxReplies As New InputParameter() With {
-            .Name = $"Max replies per session (default {AP_DefaultMaxRepliesPerSession}; 0 = unlimited)",
+            .Name = "Replies per session",
+            .ToolTipText = $"Max replies per session (default {AP_DefaultMaxRepliesPerSession}; 0 = unlimited)",
             .Value = saved.MaxRepliesPerSession.ToString()
         }
         Dim pMaxAttachmentMb As New InputParameter() With {
-            .Name = "Max attachment size (MB, default 10)",
+            .Name = "Attachment limit (MB)",
+            .ToolTipText = "Max attachment size (MB, default 10)",
             .Value = CInt(saved.MaxAttachmentBytes / 1024 / 1024).ToString()
         }
         Dim pReprocessLookback As New InputParameter() With {
-            .Name = "Reprocess lookback (hours, 0 = only new mails)",
+            .Name = "Reprocess window (hours)",
+            .ToolTipText = "Reprocess lookback (hours, 0 = only new mails)",
             .Value = saved.ReprocessLookbackHours.ToString()
         }
         Dim pAutoDeleteAfterHours As New InputParameter() With {
-            .Name = "Auto-delete answered mails after N hours (0 = disabled; also empties Deleted Items for tagged mails)",
+            .Name = "Delete answered mail (hours)",
+            .ToolTipText = "Retention in hours (0 = disabled). Expired AutoPilot mails are deleted daily at 01:00 local time from account mailbox folders and Deleted Items; no daytime catch-up.",
             .Value = saved.AutoDeleteAfterHours.ToString()
         }
         Dim pEnableWebGrounding As New InputParameter() With {
-            .Name = "Add web grounding (if models are configured)",
+            .Name = "Web grounding",
+            .ToolTipText = "Add web grounding (if models are configured)",
             .Value = saved.EnableWebGrounding
         }
+        Dim pEnableScan As New InputParameter() With {
+            .Name = "AutoPilot Scan Handler",
+            .ToolTipText = "Enable AutoPilot Scan Handler (manage under Expert Tools)",
+            .Value = saved.EnableScanProcessing
+        }
         Dim pEnableScheduler As New InputParameter() With {
-            .Name = "Enable task scheduler (create && run scheduled tasks)",
+            .Name = "Task scheduler",
+            .ToolTipText = "Enable task scheduler (create && run scheduled tasks)",
             .Value = saved.EnableScheduler
         }
         Dim pEnableUserMemory As New InputParameter() With {
-            .Name = "Enable per-user memory (learn user preferences)",
+            .Name = "User memory",
+            .ToolTipText = "Enable per-user memory (learn user preferences)",
             .Value = saved.EnableUserMemory
         }
         Dim pEnableUserFiles As New InputParameter() With {
-            .Name = "Enable per-user file storage (home directory)",
+            .Name = "User file storage",
+            .ToolTipText = "Enable per-user file storage (home directory)",
             .Value = saved.EnableUserFiles
         }
         Dim pEnablePrivacyProtection As New InputParameter() With {
-            .Name = "Enable privacy protection for web/search queries (restrict personal data in queries)",
+            .Name = "Privacy protection",
+            .ToolTipText = "Enable privacy protection for web/search queries (restrict personal data in queries)",
             .Value = saved.EnablePrivacyProtection
         }
+        Dim pIncludeSourcesFooter As New InputParameter() With {
+            .Name = "Sources footer",
+            .ToolTipText = "Include host-generated Sources used footer (external evidence sources only)",
+            .Value = Not String.Equals(saved.SourcesFooterMode, "off", StringComparison.OrdinalIgnoreCase)
+        }
         Dim pThreadRetentionDays As New InputParameter() With {
-            .Name = "Retain a sender's attachments for follow-up discussion for N days (0 = disabled; whitelisted senders only)",
+            .Name = "Thread retention (days)",
+            .ToolTipText = "Retain a sender's attachments for follow-up discussion for N days (0 = disabled; whitelisted senders only)",
             .Value = saved.ThreadRetentionDays.ToString()
+        }
+        Dim pLogDiagnosticsReportEmail As New InputParameter() With {
+            .Name = "Diagnostics recipient",
+            .ToolTipText = "Engineering diagnostics recipient (confirmed High/Critical only; daily digest at 20:00 local time; new security issues immediately; empty = disabled)",
+            .Value = If(saved.LogDiagnosticsReportEmail, "")
+        }
+
+        Dim pLogDiagnosticsMaxInputChars As New InputParameter() With {
+            .Name = "Diagnostics log limit",
+            .ToolTipText = "Engineering diagnostics maximum log characters per call (0 = complete log; otherwise at least 10000; positive AutoPilotLogDiagnosticsMaxInputChars in redink.ini overrides this preference)",
+            .Value = saved.LogDiagnosticsMaxInputChars.ToString(System.Globalization.CultureInfo.InvariantCulture)
+        }
+
+        Dim pPromptCoachingEnabled As New InputParameter() With {
+            .Name = "Inky recommendations",
+            .ToolTipText = "Analyse completed requests for highly significant improvements. Only specific, evidence-bound advice passing a second quality review is sent; minor style suggestions do not trigger mail (independent of engineering diagnostics)",
+            .Value = saved.PromptCoachingEnabled
+        }
+        Dim pPromptCoachingDefaultForAllUsers As New InputParameter() With {
+            .Name = "Recommendations for all users",
+            .ToolTipText = "On: all accepted users receive useful tips unless explicitly opted out. Off: only opted-in users and exact addresses on the inclusion list. Explicit opt-out always wins.",
+            .Value = saved.PromptCoachingDefaultForAllUsers
+        }
+        Dim pPromptCoachingImmediateDelivery As New InputParameter() With {
+            .Name = "Send recommendations immediately",
+            .ToolTipText = "Default schedule for users without a personal timing choice. On: after a qualifying request is analysed. Off: one digest from 20:00 local host time. DAILY/IMMEDIATE override this default; SYSTEM restores it. No tips without a high-value improvement.",
+            .Value = saved.PromptCoachingImmediateDelivery
+        }
+        Dim pPromptCoachingIncludedUsers As New InputParameter() With {
+            .Name = "Additional recommendation users",
+            .ToolTipText = "Exact e-mail addresses separated by semicolons, commas or newlines. No wildcards. Explicit user/admin opt-out overrides this list; unrelated mail recipients are never inferred.",
+            .Value = If(saved.PromptCoachingIncludedUsers, System.String.Empty)
         }
 
         Dim paramsList As New List(Of InputParameter) From {
@@ -408,10 +493,18 @@ Partial Public Class ThisAddIn
             pAutoDeleteAfterHours,
             pEnableWebGrounding,
             pEnableScheduler,
+            pEnableScan,
             pEnableUserMemory,
             pEnableUserFiles,
             pEnablePrivacyProtection,
-            pThreadRetentionDays
+            pIncludeSourcesFooter,
+            pThreadRetentionDays,
+            pLogDiagnosticsReportEmail,
+            pLogDiagnosticsMaxInputChars,
+            pPromptCoachingEnabled,
+            pPromptCoachingDefaultForAllUsers,
+            pPromptCoachingImmediateDelivery,
+            pPromptCoachingIncludedUsers
         }
 
         ' ── Voicemail processing (only if audio transcription is available) ──
@@ -421,19 +514,22 @@ Partial Public Class ThisAddIn
         Dim pVoicemailMapPath As InputParameter = Nothing
         If audioTranscriptionAvailable Then
             pVoicemail = New InputParameter() With {
-                .Name = "Process voicemails (transcribe & respond)",
+                .Name = "Process voicemails",
+                .ToolTipText = "Process voicemails (transcribe & respond)",
                 .Value = saved.EnableVoicemailProcessing
             }
             paramsList.Add(pVoicemail)
 
             pVoicemailSender = New InputParameter() With {
-                .Name = "Voicemail sender address (e.g. comboxmailer@swisscom.com)",
+                .Name = "Voicemail sender",
+                .ToolTipText = "Voicemail sender address (e.g. comboxmailer@swisscom.com)",
                 .Value = If(saved.VoicemailSenderAddress, "")
             }
             paramsList.Add(pVoicemailSender)
 
             pVoicemailMapPath = New InputParameter() With {
-                .Name = "Caller ID → Email map file (CSV path)",
+                .Name = "Caller ID map (CSV)",
+                .ToolTipText = "Caller ID → Email map file (CSV path)",
                 .Value = If(saved.VoicemailCallerIdMapPath, "")
             }
             paramsList.Add(pVoicemailMapPath)
@@ -441,8 +537,8 @@ Partial Public Class ThisAddIn
 
         Dim limitsOk = ShowCustomVariableInputForm(
             "Configure rate limits, restrictions, and optional features:",
-            $"{AN6} AutoPilot — Limits & Features",
-            paramsList.ToArray())
+            "Red Ink AutoPilot — Limits & Features",
+            paramsList.ToArray(), labelMaxWidth:=250)
 
         If Not limitsOk Then Return Nothing
 
@@ -473,14 +569,57 @@ Partial Public Class ThisAddIn
 
         config.EnableWebGrounding = CBool(If(pEnableWebGrounding.Value, False))
         config.EnableScheduler = CBool(If(pEnableScheduler.Value, False))
+        config.EnableScanProcessing = CBool(If(pEnableScan.Value, False))
+        If config.EnableScanProcessing Then
+            Try
+                CacheScanClassification(ScanInbox.Registry.Load(GetScanRegisterPath()))
+            Catch ex As System.Exception
+                ShowCustomMessageBox("Configure the AutoPilot Scan Handler under Expert Tools before enabling it: " & ex.Message, AN)
+                Return Nothing
+            End Try
+        End If
         config.EnableUserMemory = CBool(If(pEnableUserMemory.Value, False))
         config.EnableUserFiles = CBool(If(pEnableUserFiles.Value, False))
         config.EnablePrivacyProtection = CBool(If(pEnablePrivacyProtection.Value, False))
+        config.SourcesFooterMode = If(CBool(If(pIncludeSourcesFooter.Value, True)), "external", "off")
 
         Dim threadRetentionDays As Integer
         If Integer.TryParse(pThreadRetentionDays.Value?.ToString(), threadRetentionDays) AndAlso threadRetentionDays >= 0 Then
             config.ThreadRetentionDays = threadRetentionDays
         End If
+
+        config.LogDiagnosticsReportIntervalDays = 1
+
+        Dim diagnosticsMaxInputChars As System.Int32
+        If Not System.Int32.TryParse(pLogDiagnosticsMaxInputChars.Value?.ToString(), diagnosticsMaxInputChars) OrElse diagnosticsMaxInputChars < 0 OrElse (diagnosticsMaxInputChars > 0 AndAlso diagnosticsMaxInputChars < 10000) Then
+            ShowCustomMessageBox("The diagnostics input limit must be 0 (complete log) or a whole number of at least 10000 characters.", AN)
+            Return Nothing
+        End If
+        config.LogDiagnosticsMaxInputChars = diagnosticsMaxInputChars
+
+        Dim diagnosticsRecipientInput As System.String = If(pLogDiagnosticsReportEmail.Value?.ToString(), System.String.Empty).Trim()
+        If diagnosticsRecipientInput.Length > 0 Then
+            Dim normalizedDiagnosticsRecipient As System.String = NormalizeAutoPilotLogDiagnosticsRecipient(diagnosticsRecipientInput)
+            If normalizedDiagnosticsRecipient.Length = 0 Then
+                ShowCustomMessageBox(
+                    "The engineering diagnostics report recipient must be a valid e-mail address, or left empty to disable the function.",
+                    AN)
+                Return Nothing
+            End If
+            config.LogDiagnosticsReportEmail = normalizedDiagnosticsRecipient
+        Else
+            config.LogDiagnosticsReportEmail = System.String.Empty
+        End If
+
+        config.PromptCoachingEnabled = CBool(If(pPromptCoachingEnabled.Value, False))
+        config.PromptCoachingDefaultForAllUsers = CBool(If(pPromptCoachingDefaultForAllUsers.Value, False))
+        config.PromptCoachingImmediateDelivery = CBool(If(pPromptCoachingImmediateDelivery.Value, False))
+        Try
+            config.PromptCoachingIncludedUsers = System.String.Join("; ", ParseAutoPilotPromptCoachingIncludedUsers(pPromptCoachingIncludedUsers.Value?.ToString()))
+        Catch ex As System.ArgumentException
+            ShowCustomMessageBox(ex.Message, AN)
+            Return Nothing
+        End Try
 
         ' Voicemail settings
         If audioTranscriptionAvailable AndAlso pVoicemail IsNot Nothing Then
@@ -506,12 +645,11 @@ Partial Public Class ThisAddIn
         If modelSupportsTools Then
             Dim availableTools = GetAvailableToolsForAutoPilotSelection()
             If availableTools IsNot Nothing AndAlso availableTools.Count > 0 Then
-                ' Load previously persisted tool names for pre-selection
-                Dim previousToolNames As New List(Of String)()
-                If Not String.IsNullOrWhiteSpace(My.Settings.AP_SelectedExternalToolNames) Then
-                    previousToolNames = My.Settings.AP_SelectedExternalToolNames.Split({vbLf}, StringSplitOptions.RemoveEmptyEntries).
-                        Select(Function(s) s.Trim()).Where(Function(s) s.Length > 0).ToList()
-                End If
+                ' Restore the persisted selection against the catalog that existed when it was saved.
+                ' Tools that are genuinely new since that catalog snapshot are selected automatically,
+                ' while tools the user deliberately left unchecked remain unchecked.
+                Dim previousToolNames As System.Collections.Generic.List(Of System.String) =
+                    ResolveAutoPilotExternalToolSelectionNames(availableTools)
 
                 Dim toolChoice = ShowCustomYesNoBox(
                     $"There are {availableTools.Count} {Globals.ThisAddIn.ToolFriendlyName.ToLower} available (web retrieval, etc.)." & vbCrLf &
@@ -530,6 +668,8 @@ Partial Public Class ThisAddIn
                             resetChecked:=False,
                             preselectMany:=previousToolNames,
                             instruction:=$"Select the optional {Globals.ThisAddIn.ToolFriendlyName.ToLower} to enable for AutoPilot:")
+                            dlg.ConfigureGrouping(Global.SharedLibrary.SharedLibrary.SelectorGroupingStore.ForResourceRoots(
+                                _context.INI_AgentResourcesPath, _context.INI_AgentResourcesPathLocal))
                             Dim __safeDialogOwner532 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
                             If If(__safeDialogOwner532 IsNot Nothing, dlg.ShowDialog(__safeDialogOwner532), dlg.ShowDialog()) = DialogResult.OK Then
                                 config.SelectedExternalTools = dlg.SelectedModels
@@ -560,7 +700,7 @@ Partial Public Class ThisAddIn
             "  person@example.com = ONLY skill_example || Always answer through this skill." & vbCrLf & vbCrLf &
             "Combined example:" & vbCrLf &
             "  *@vischer.com = *, designs=block, design_sets=block, disclaimer=""Confidential.\nFor the intended recipient only.""" & vbCrLf & vbCrLf &
-            "The policy is re-read for each new AutoPilot mail. It does not change intake filters or the auto-send whitelist. Leave empty to disable per-sender policy restrictions.",
+            "The policy is re-read for each new AutoPilot mail. It does not change intake filters or the auto-send whitelist. AutoPilotLogTopics.txt is automatically created beside this file for diagnostics exclusions and WATCH topics. Leave empty to disable per-sender policy restrictions.",
             $"{AN6} AutoPilot — Per-Sender Rules", True, defaultPolicyPath)
         If policyInput Is Nothing Then Return Nothing
         config.SenderToolPolicyPath = If(String.IsNullOrWhiteSpace(policyInput), "", policyInput.Trim())
@@ -589,10 +729,19 @@ Partial Public Class ThisAddIn
         summaryBuilder.AppendLine($"Auto-delete: {If(config.AutoDeleteAfterHours > 0, $"enabled after {config.AutoDeleteAfterHours}h", "disabled")}")
         summaryBuilder.AppendLine($"Web grounding: {If(config.EnableWebGrounding, "enabled", "disabled")}")
         summaryBuilder.AppendLine($"Task scheduler: {If(config.EnableScheduler, "enabled", "disabled")}")
+        summaryBuilder.AppendLine($"Sources used footer: {If(String.Equals(config.SourcesFooterMode, "off", StringComparison.OrdinalIgnoreCase), "disabled", "external evidence only")}")
         summaryBuilder.AppendLine($"User memory: {If(config.EnableUserMemory, "enabled", "disabled")}")
         summaryBuilder.AppendLine($"User file storage: {If(config.EnableUserFiles, "enabled", "disabled")}")
         summaryBuilder.AppendLine($"Privacy protection: {If(config.EnablePrivacyProtection, "enabled (queries sanitized)", "disabled (unrestricted)")}")
         summaryBuilder.AppendLine($"Sender tool policy: {If(String.IsNullOrWhiteSpace(config.SenderToolPolicyPath), "disabled", config.SenderToolPolicyPath)}")
+        summaryBuilder.AppendLine($"Engineering diagnostics: {If(String.IsNullOrWhiteSpace(config.LogDiagnosticsReportEmail), "disabled", "enabled → " & config.LogDiagnosticsReportEmail)}")
+        summaryBuilder.AppendLine("Engineering diagnostics: one collected High/Critical report at 20:00 local time; no empty report; confirmed new security findings immediately. Topics: AutoPilotLogTopics.txt beside the per-sender rules (otherwise %APPDATA%\RedInk).")
+        summaryBuilder.AppendLine("Engineering diagnostics input: " & If(config.LogDiagnosticsMaxInputChars = 0, "complete log in one call", config.LogDiagnosticsMaxInputChars.ToString(System.Globalization.CultureInfo.InvariantCulture) & " characters per part") & "; at most two failed analyses per run.")
+        summaryBuilder.AppendLine("Inky recommendations: " & If(config.PromptCoachingEnabled, "enabled", "disabled") & "; " &
+                                  If(config.PromptCoachingDefaultForAllUsers, "all accepted users by default", "opted-in users and inclusion list only") & "; " &
+                                  If(config.PromptCoachingImmediateDelivery, "default: after completed-request analysis", "default: daily digest from 20:00 local time") & "; personal timing overrides this default")
+        summaryBuilder.AppendLine("Recommendation inclusion list: " & ParseAutoPilotPromptCoachingIncludedUsers(config.PromptCoachingIncludedUsers).Count.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                  " exact address(es); explicit opt-out always wins. User control: INKY_TIPS ON / OFF / STATUS / DEFAULT. Admin control: User Dashboard.")
         If config.EnableVoicemailProcessing Then
             summaryBuilder.AppendLine($"Voicemail processing: enabled (from {config.VoicemailSenderAddress})")
         End If
@@ -657,7 +806,98 @@ Partial Public Class ThisAddIn
         Return rules
     End Function
 
-    ''' <summary>Persists the AutoPilot config to My.Settings.</summary>
+    ''' <summary>
+    ''' One-time bridge from the legacy selected-names-only format to catalog snapshots.
+    ''' After the first save with AP_AvailableExternalToolNames populated, all future
+    ''' additions are detected generically by catalog difference.
+    ''' </summary>
+    Private Shared ReadOnly AutoPilotLegacyCatalogMigrationDefaultToolNames As System.String() = {
+        SharedLibrary.Agents.LogCountTool.ToolName
+    }
+
+    Private Shared Function ParseAutoPilotToolNameSetting(value As System.String) As System.Collections.Generic.List(Of System.String)
+        If System.String.IsNullOrWhiteSpace(value) Then
+            Return New System.Collections.Generic.List(Of System.String)()
+        End If
+
+        Return value.Split({vbLf}, System.StringSplitOptions.RemoveEmptyEntries).
+            Select(Function(item As System.String) item.Trim()).
+            Where(Function(item As System.String) item.Length > 0).
+            Distinct(System.StringComparer.OrdinalIgnoreCase).
+            ToList()
+    End Function
+
+    Private Shared Function GetAutoPilotToolCanonicalName(tool As ModelConfig) As System.String
+        If tool Is Nothing Then Return System.String.Empty
+        If Not System.String.IsNullOrWhiteSpace(tool.ToolName) Then Return tool.ToolName.Trim()
+        If Not System.String.IsNullOrWhiteSpace(tool.ModelDescription) Then Return tool.ModelDescription.Trim()
+        If Not System.String.IsNullOrWhiteSpace(tool.Model) Then Return tool.Model.Trim()
+        Return System.String.Empty
+    End Function
+
+    Private Shared Function GetAutoPilotCatalogToolNames(availableTools As System.Collections.Generic.IEnumerable(Of ModelConfig)) As System.Collections.Generic.List(Of System.String)
+        If availableTools Is Nothing Then
+            Return New System.Collections.Generic.List(Of System.String)()
+        End If
+
+        Return availableTools.
+            Select(Function(tool As ModelConfig) GetAutoPilotToolCanonicalName(tool)).
+            Where(Function(name As System.String) Not System.String.IsNullOrWhiteSpace(name)).
+            Distinct(System.StringComparer.OrdinalIgnoreCase).
+            OrderBy(Function(name As System.String) name, System.StringComparer.OrdinalIgnoreCase).
+            ToList()
+    End Function
+
+    ''' <summary>
+    ''' Resolves the persisted AutoPilot selection without changing previous user choices.
+    ''' Existing tools keep their selected/deselected state. Tools absent from the catalog
+    ''' snapshot are new and therefore become selected automatically.
+    ''' </summary>
+    Private Function ResolveAutoPilotExternalToolSelectionNames(availableTools As System.Collections.Generic.List(Of ModelConfig)) As System.Collections.Generic.List(Of System.String)
+        Dim currentCatalogNames As System.Collections.Generic.List(Of System.String) = GetAutoPilotCatalogToolNames(availableTools)
+        Dim currentCatalogSet As New System.Collections.Generic.HashSet(Of System.String)(currentCatalogNames, System.StringComparer.OrdinalIgnoreCase)
+        Dim savedSelectedNames As System.Collections.Generic.List(Of System.String) = ParseAutoPilotToolNameSetting(My.Settings.AP_SelectedExternalToolNames)
+        Dim savedCatalogNames As System.Collections.Generic.List(Of System.String) = ParseAutoPilotToolNameSetting(My.Settings.AP_AvailableExternalToolNames)
+        Dim resolved As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+
+        For Each name As System.String In savedSelectedNames
+            If currentCatalogSet.Contains(name) Then resolved.Add(name)
+        Next
+
+        If savedCatalogNames.Count > 0 Then
+            Dim savedCatalogSet As New System.Collections.Generic.HashSet(Of System.String)(savedCatalogNames, System.StringComparer.OrdinalIgnoreCase)
+            For Each name As System.String In currentCatalogNames
+                If Not savedCatalogSet.Contains(name) Then resolved.Add(name)
+            Next
+        ElseIf savedSelectedNames.Count > 0 OrElse HasSavedAutoPilotConfig() Then
+            ' Legacy installations did not persist the catalog, so a historical deselection
+            ' cannot be distinguished from a tool introduced by this upgrade. Only the tools
+            ' introduced together with catalog snapshots are bridged once here. Thereafter
+            ' every new tool is detected generically by the saved-catalog difference above.
+            For Each migrationName As System.String In AutoPilotLegacyCatalogMigrationDefaultToolNames
+                If currentCatalogSet.Contains(migrationName) Then resolved.Add(migrationName)
+            Next
+        End If
+
+        Return currentCatalogNames.Where(Function(name As System.String) resolved.Contains(name)).ToList()
+    End Function
+
+    Private Shared Function MatchAutoPilotToolsByNames(availableTools As System.Collections.Generic.List(Of ModelConfig),
+                                                       selectedNames As System.Collections.Generic.IEnumerable(Of System.String)) As System.Collections.Generic.List(Of ModelConfig)
+        Dim result As New System.Collections.Generic.List(Of ModelConfig)()
+        If availableTools Is Nothing OrElse selectedNames Is Nothing Then Return result
+
+        Dim selectedSet As New System.Collections.Generic.HashSet(Of System.String)(selectedNames, System.StringComparer.OrdinalIgnoreCase)
+        For Each tool As ModelConfig In availableTools
+            Dim canonicalName As System.String = GetAutoPilotToolCanonicalName(tool)
+            If canonicalName.Length > 0 AndAlso selectedSet.Contains(canonicalName) Then
+                result.Add(tool)
+            End If
+        Next
+
+        Return result
+    End Function
+
     ''' <summary>Persists the AutoPilot config to My.Settings.</summary>
     Private Sub SaveAutoPilotConfigToSettings(config As AutoPilotConfig)
         My.Settings.AP_FilterRules = String.Join(vbLf, config.FilterRules.Select(
@@ -675,6 +915,7 @@ Partial Public Class ThisAddIn
         My.Settings.AP_ReprocessLookbackHours = config.ReprocessLookbackHours
         My.Settings.AP_EnableWebGrounding = config.EnableWebGrounding
         My.Settings.AP_EnableVoicemailProcessing = config.EnableVoicemailProcessing
+        My.Settings.AP_EnableScanProcessing = config.EnableScanProcessing
         My.Settings.AP_VoicemailSenderAddress = If(config.VoicemailSenderAddress, "")
         My.Settings.AP_VoicemailCallerIdMapPath = If(config.VoicemailCallerIdMapPath, "")
         My.Settings.AP_EnableScheduler = config.EnableScheduler
@@ -684,24 +925,41 @@ Partial Public Class ThisAddIn
         My.Settings.AP_AutoDeleteAfterHours = config.AutoDeleteAfterHours
         My.Settings.AP_SenderToolPolicyPath = If(config.SenderToolPolicyPath, "")
         My.Settings.AP_ThreadRetentionDays = config.ThreadRetentionDays
+        My.Settings.AP_LogDiagnosticsMaxInputChars = config.LogDiagnosticsMaxInputChars
+        My.Settings.AP_LogDiagnosticsReportIntervalDays = 1
+        My.Settings.AP_LogDiagnosticsReportEmail = If(config.LogDiagnosticsReportEmail, "")
+        My.Settings.AP_PromptCoachingEnabled = config.PromptCoachingEnabled
+        My.Settings.AP_PromptCoachingDefaultForAllUsers = config.PromptCoachingDefaultForAllUsers
+        My.Settings.AP_PromptCoachingImmediateDelivery = config.PromptCoachingImmediateDelivery
+        My.Settings.AP_PromptCoachingIncludedUsers = If(config.PromptCoachingIncludedUsers, System.String.Empty)
 
-        ' Persist external tool selection by ToolName/ModelDescription
+        ' Persist the explicit user selection exactly as before. In addition, persist the
+        ' catalog against which that selection was made so newly introduced tools can be
+        ' auto-selected later without re-enabling previously deselected tools.
         If config.SelectedExternalTools IsNot Nothing AndAlso config.SelectedExternalTools.Count > 0 Then
-            Dim toolNames = config.SelectedExternalTools.Select(
-                Function(t) If(Not String.IsNullOrEmpty(t.ToolName), t.ToolName,
-                            If(Not String.IsNullOrEmpty(t.ModelDescription), t.ModelDescription, t.Model))).
-                Where(Function(n) Not String.IsNullOrEmpty(n))
-            My.Settings.AP_SelectedExternalToolNames = String.Join(vbLf, toolNames)
+            Dim toolNames As System.Collections.Generic.List(Of System.String) =
+                GetAutoPilotCatalogToolNames(config.SelectedExternalTools)
+            My.Settings.AP_SelectedExternalToolNames = System.String.Join(vbLf, toolNames)
         Else
-            My.Settings.AP_SelectedExternalToolNames = ""
+            My.Settings.AP_SelectedExternalToolNames = System.String.Empty
         End If
 
+        Try
+            Dim availableTools As System.Collections.Generic.List(Of ModelConfig) = GetAvailableToolsForAutoPilotSelection()
+            My.Settings.AP_AvailableExternalToolNames =
+                System.String.Join(vbLf, GetAutoPilotCatalogToolNames(availableTools))
+        Catch ex As System.Exception
+            Debug.WriteLine($"[AutoPilot] Failed to persist external tool catalog snapshot: {ex.Message}")
+        End Try
+
         SaveAutoPilotSettingsWithRegistryBackup()
+        SaveAutoPilotSourcesFooterMode(config.SourcesFooterMode)
     End Sub
 
     ''' <summary>Loads previously saved config as defaults for the dialog.</summary>
     Private Function LoadAutoPilotConfigDefaults() As AutoPilotConfig
         Dim config As New AutoPilotConfig()
+        config.SourcesFooterMode = LoadAutoPilotSourcesFooterMode()
         config.SubjectTriggerWord = If(String.IsNullOrWhiteSpace(My.Settings.AP_SubjectTriggerWord), Nothing, My.Settings.AP_SubjectTriggerWord)
         config.CooldownSeconds = If(My.Settings.AP_CooldownSeconds > 0, CInt(My.Settings.AP_CooldownSeconds), AP_DefaultCooldownSeconds)
         config.MaxRepliesPerSession = If(My.Settings.AP_MaxRepliesPerSession >= 0, My.Settings.AP_MaxRepliesPerSession, AP_DefaultMaxRepliesPerSession)
@@ -714,6 +972,7 @@ Partial Public Class ThisAddIn
         config.ReprocessLookbackHours = If(My.Settings.AP_ReprocessLookbackHours >= 0, My.Settings.AP_ReprocessLookbackHours, 0)
         config.EnableWebGrounding = My.Settings.AP_EnableWebGrounding
         config.EnableVoicemailProcessing = My.Settings.AP_EnableVoicemailProcessing
+        config.EnableScanProcessing = My.Settings.AP_EnableScanProcessing
         config.VoicemailSenderAddress = If(My.Settings.AP_VoicemailSenderAddress, "")
         config.VoicemailCallerIdMapPath = If(My.Settings.AP_VoicemailCallerIdMapPath, "")
         config.EnableScheduler = My.Settings.AP_EnableScheduler
@@ -723,6 +982,19 @@ Partial Public Class ThisAddIn
         config.AutoDeleteAfterHours = If(My.Settings.AP_AutoDeleteAfterHours >= 0, My.Settings.AP_AutoDeleteAfterHours, 0)
         config.SenderToolPolicyPath = If(My.Settings.AP_SenderToolPolicyPath, "")
         config.ThreadRetentionDays = If(My.Settings.AP_ThreadRetentionDays >= 0, My.Settings.AP_ThreadRetentionDays, 0)
+        config.LogDiagnosticsReportEmail = If(My.Settings.AP_LogDiagnosticsReportEmail, "")
+        config.LogDiagnosticsMaxInputChars = If(My.Settings.AP_LogDiagnosticsMaxInputChars >= 10000, My.Settings.AP_LogDiagnosticsMaxInputChars, 0)
+        config.LogDiagnosticsReportIntervalDays = 1
+        config.PromptCoachingEnabled = My.Settings.AP_PromptCoachingEnabled
+        config.PromptCoachingDefaultForAllUsers = My.Settings.AP_PromptCoachingDefaultForAllUsers
+        config.PromptCoachingImmediateDelivery = My.Settings.AP_PromptCoachingImmediateDelivery
+        config.PromptCoachingIncludedUsers = If(My.Settings.AP_PromptCoachingIncludedUsers, System.String.Empty)
+        Try
+            config.PromptCoachingIncludedUsers = System.String.Join("; ", ParseAutoPilotPromptCoachingIncludedUsers(config.PromptCoachingIncludedUsers))
+        Catch ex As System.ArgumentException
+            config.PromptCoachingEnabled = False
+            System.Diagnostics.Debug.WriteLine("Inky recommendations disabled because the saved inclusion list is invalid: " & ex.Message)
+        End Try
 
         ' Restore filter rules using the shared parser
         If Not String.IsNullOrWhiteSpace(My.Settings.AP_FilterRules) Then
@@ -735,26 +1007,20 @@ Partial Public Class ThisAddIn
                 Select(Function(s) s.Trim()).Where(Function(s) s.Length > 0).ToList()
         End If
 
-        ' Restore external tools by matching persisted names against currently available tools
-        If Not String.IsNullOrWhiteSpace(My.Settings.AP_SelectedExternalToolNames) Then
-            Dim savedToolNames = My.Settings.AP_SelectedExternalToolNames.Split({vbLf}, StringSplitOptions.RemoveEmptyEntries).
-                Select(Function(s) s.Trim()).Where(Function(s) s.Length > 0).ToList()
-            If savedToolNames.Count > 0 Then
-                Try
-                    Dim availableTools = GetAvailableTools()
-                    If availableTools IsNot Nothing AndAlso availableTools.Count > 0 Then
-                        Dim matched = availableTools.Where(
-                            Function(t) savedToolNames.Any(Function(n)
-                                                               Return String.Equals(n, t.ToolName, StringComparison.OrdinalIgnoreCase) OrElse
-                                                                      String.Equals(n, t.ModelDescription, StringComparison.OrdinalIgnoreCase) OrElse
-                                                                      String.Equals(n, t.Model, StringComparison.OrdinalIgnoreCase)
-                                                           End Function)).ToList()
-                        If matched.Count > 0 Then config.SelectedExternalTools = matched
-                    End If
-                Catch
-                End Try
+        ' Restore the external-tool selection against the current AutoPilot-selectable
+        ' catalog. New tools are selected automatically; prior explicit deselections remain.
+        Try
+            Dim availableTools As System.Collections.Generic.List(Of ModelConfig) = GetAvailableToolsForAutoPilotSelection()
+            If availableTools IsNot Nothing AndAlso availableTools.Count > 0 Then
+                Dim selectedNames As System.Collections.Generic.List(Of System.String) =
+                    ResolveAutoPilotExternalToolSelectionNames(availableTools)
+                Dim matched As System.Collections.Generic.List(Of ModelConfig) =
+                    MatchAutoPilotToolsByNames(availableTools, selectedNames)
+                If matched.Count > 0 Then config.SelectedExternalTools = matched
             End If
-        End If
+        Catch ex As System.Exception
+            Debug.WriteLine($"[AutoPilot] Failed to restore external tool selection: {ex.Message}")
+        End Try
 
         Return config
     End Function

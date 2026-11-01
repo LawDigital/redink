@@ -313,7 +313,12 @@ Partial Public Class ThisAddIn
 
                 Try
                     splash = New SharedLibrary.SharedLibrary.SplashScreenCountDown("Waiting for the AI to respond...", 0, 0, 0)
-                    splash.Show()
+                    Try
+                        Await splash.ShowAsync()
+                    Catch ex As System.OperationCanceledException
+                        ' Startup cancellation only; preserve SSE transport timeout handling.
+                        Return
+                    End Try
 
                     llmresult = Await SharedMethods.ExecuteMCPSSEToolCall(
                         _context,
@@ -322,12 +327,17 @@ Partial Public Class ThisAddIn
                         INI_HeaderA_2,
                         resolvedHeaderB,
                         CInt(Math.Min(INI_Timeout_2, Integer.MaxValue)))
-                Catch ex As Exception
+                    splash.ThrowIfFailed()
+                Catch ex As Global.SharedLibrary.SharedLibrary.SplashScreenCountDown.SplashDisplayException
+                    ' Technical details are already in the shared diagnostic log.
+                    ShowCustomMessageBox(ex.Message)
+                    Return
+                Catch ex As System.Exception
                     ShowCustomMessageBox($"SSE tool call failed: {ex.Message}")
                     Return
                 Finally
                     If splash IsNot Nothing Then
-                        splash.Close()
+                        splash.Dispose()
                     End If
                 End Try
 

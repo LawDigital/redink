@@ -118,11 +118,29 @@ Partial Public Class ThisAddIn
                 Return response
             End If
 
+            ' Validate the effective transport binding, not only the advertised JSON schema.
+            ' In particular, additionalProperties=True must not cause supplied filters to be ignored.
+            Dim boundArguments As System.Collections.Generic.Dictionary(Of System.String, System.Object) = Nothing
+            Dim bindingValidationError As System.String = System.String.Empty
+
+            If Not SharedLibrary.Agents.ToolCallSequencing.TryPrepareExternalToolApiArguments(
+                apiCallTemplate,
+                toolCall.Arguments,
+                boundArguments,
+                bindingValidationError) Then
+
+                ToolingFileLogger.LogWarn(
+                    "External tool request blocked before dispatch because argument binding failed.",
+                    details:="ToolName='" & toolCall.ToolName & "'; Reason='" & bindingValidationError & "'")
+
+                Return BuildInvalidToolArgumentsResponse(toolCall, bindingValidationError)
+            End If
+
             Dim apiCall = apiCallTemplate
             Dim parameterSchemas = GetToolParameterSchemas(toolConfig)
             Dim requiredParameters = GetToolRequiredParameters(toolConfig)
 
-            For Each kvp In toolCall.Arguments
+            For Each kvp In boundArguments
                 Dim placeholder = "{" & kvp.Key & "}"
                 Dim schemaToken As JToken = Nothing
                 parameterSchemas.TryGetValue(kvp.Key, schemaToken)
@@ -263,6 +281,7 @@ Partial Public Class ThisAddIn
                             If TryExtractToolServiceErrorMessage(rawResult, toolErrorMessage) Then
                                 response.Success = False
                                 response.ErrorMessage = toolErrorMessage
+                                ApplyStructuredAgentResult(response, context)
                                 ToolingFileLogger.LogWarn(
                                     "SSE tool service returned a logical error.",
                                     details:=$"ToolName='{toolCall.ToolName}'; Error='{toolErrorMessage}'")
@@ -351,6 +370,7 @@ Partial Public Class ThisAddIn
                             If TryExtractToolServiceErrorMessage(rawResult, toolErrorMessage) Then
                                 response.Success = False
                                 response.ErrorMessage = toolErrorMessage
+                                ApplyStructuredAgentResult(response, context)
                                 ToolingFileLogger.LogWarn(
                                     "MCP Streamable HTTP tool service returned a logical error.",
                                     details:=$"ToolName='{toolCall.ToolName}'; Error='{toolErrorMessage}'")
@@ -449,6 +469,7 @@ Partial Public Class ThisAddIn
                     If TryExtractToolServiceErrorMessage(result, toolErrorMessage) Then
                         response.Success = False
                         response.ErrorMessage = toolErrorMessage
+                        ApplyStructuredAgentResult(response, context)
                         ToolingFileLogger.LogWarn(
                             "Tool service returned a logical error.",
                             details:=$"ToolName='{toolCall.ToolName}'; Error='{toolErrorMessage}'")
@@ -481,67 +502,60 @@ Partial Public Class ThisAddIn
 
 
 
-    Private Function TryExtractToolServiceErrorMessage(rawResponse As String, ByRef errorMessage As String) As Boolean
-        errorMessage = ""
+    Private Function TryExtractToolServiceErrorMessage(rawResponse As System.String, ByRef errorMessage As System.String) As System.Boolean
+        Dim details As SharedLibrary.Agents.ToolServiceErrorInfo = Nothing
+        Dim recognized As System.Boolean = SharedLibrary.Agents.ToolResultDiagnostics.TryReadServiceError(rawResponse, details)
+        errorMessage = If(details Is Nothing, System.String.Empty, details.Message)
+        Return recognized
+    End Function
 
-        If String.IsNullOrWhiteSpace(rawResponse) Then
-            Return False
-        End If
+    ''' <summary>
+    ''' Confirms a native tool-call turn in two stages: the provider/model detection regex must
+    ''' match AND the configured extraction map must yield at least one concrete tool call.
+    ''' This prevents arbitrary JSON/text from becoming a tooling false positive merely because
+    ''' a broad regex matched it. Keep this logic symmetric with the Word tooling loop.
+    ''' </summary>
+    Private Function ContainsConfirmedToolCalls(
+        response As String,
+        detectionPattern As String,
+        extractionMap As String) As Boolean
 
+        If Not ContainsToolCalls(response, detectionPattern) Then Return False
+        If String.IsNullOrWhiteSpace(response) OrElse String.IsNullOrWhiteSpace(extractionMap) Then Return False
+
+        ' IMPORTANT: this is deliberately a side-effect-free confirmation probe. Do not call
+        ' ExtractToolCalls() here: a broad detection regex may legitimately match ordinary
+        ' final-response JSON. ExtractToolCalls() logs parse/extraction failures, which would
+        ' turn an expected false positive into misleading tooling errors/warnings.
         Try
-            Dim root As JObject = JObject.Parse(rawResponse)
+            Dim responseToken As Newtonsoft.Json.Linq.JToken = Newtonsoft.Json.Linq.JToken.Parse(response)
+            Dim mapObject As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(extractionMap)
 
-            Dim errorToken As JToken = root("error")
-            If errorToken IsNot Nothing Then
-                Dim message As String = If(errorToken("message"), "").ToString().Trim()
-                Dim code As String = If(errorToken("code"), "").ToString().Trim()
+            Dim arrayPath As String = If(mapObject("array_path")?.ToString(), "")
+            Dim namePath As String = If(mapObject("name_path")?.ToString(), "name")
+            If String.IsNullOrWhiteSpace(namePath) Then Return False
 
-                If message = "" Then
-                    message = errorToken.ToString(Formatting.None)
-                End If
-
-                errorMessage = If(code <> "", $"{code}: {message}", message)
-                Return True
-            End If
-
-            Dim isErrorToken As JToken = root.SelectToken("result.isError")
-            Dim isError As Boolean = False
-
-            If isErrorToken IsNot Nothing Then
-                If isErrorToken.Type = JTokenType.Boolean Then
-                    isError = isErrorToken.Value(Of Boolean)()
-                Else
-                    Boolean.TryParse(isErrorToken.ToString(), isError)
-                End If
-            End If
-
-            If Not isError Then
-                Return False
-            End If
-
-            Dim messages As New List(Of String)()
-            Dim contentArray As JArray = TryCast(root.SelectToken("result.content"), JArray)
-
-            If contentArray IsNot Nothing Then
-                For Each item As JToken In contentArray
-                    Dim text As String = If(item("text"), "").ToString().Trim()
-                    If text <> "" Then
-                        messages.Add(text)
-                    End If
-                Next
-            End If
-
-            If messages.Count > 0 Then
-                errorMessage = String.Join(" ", messages)
+            Dim candidateTokens As IEnumerable(Of Newtonsoft.Json.Linq.JToken)
+            If String.IsNullOrWhiteSpace(arrayPath) Then
+                candidateTokens = {responseToken}
             Else
-                Dim resultToken As JToken = root("result")
-                errorMessage = If(resultToken Is Nothing, "Tool service returned an error.", resultToken.ToString(Formatting.None))
+                candidateTokens = responseToken.SelectTokens(arrayPath).ToList()
             End If
 
-            Return True
-        Catch
+            For Each candidate As Newtonsoft.Json.Linq.JToken In candidateTokens
+                Dim toolNameToken As Newtonsoft.Json.Linq.JToken = candidate.SelectToken(namePath)
+                If toolNameToken IsNot Nothing AndAlso
+                   Not String.IsNullOrWhiteSpace(toolNameToken.ToString()) Then
+                    Return True
+                End If
+            Next
+        Catch ex As System.Exception
+            ' Not a response that can be extracted as a native provider tool call. This is
+            ' an expected outcome for user-facing prose, TASK_STATUS, and Word command JSON.
             Return False
         End Try
+
+        Return False
     End Function
 
     ''' <summary>

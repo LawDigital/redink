@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'none'; connect-src 'none'; font-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Red Ink Prompt Picker</title>
+  <link rel="stylesheet" href="picker.css">
+  <script src="picker.js" defer></script>
+</head>
+<body>
+  <main class="shell">
+    <section class="searchArea" aria-label="Prompts filtern">
+      <div class="searchWrap">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.7"/><path d="m16 16 5 5"/></svg>
+        <input id="search" type="search" placeholder="Prompts durchsuchen" autocomplete="off" aria-label="Prompts durchsuchen">
+      </div>
+      <select id="category" aria-label="Kategorie"><option value="*">Alle Kategorien</option></select>
+      <button type="button" id="close" class="iconButton" title="Schliessen (Esc)" aria-label="Schliessen">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 5 14 14M19 5 5 19"/></svg>
+      </button>
+    </section>
+    <section class="workspace">
+      <div class="listPane">
+        <div class="paneHeading"><span>Prompts</span><span class="count" id="count">0</span></div>
+        <div class="results" id="results" role="listbox" aria-label="Verfügbare Prompts"></div>
+        <div class="empty" id="empty" hidden>Keine passenden Prompts.</div>
+      </div>
+      <div id="splitter" class="splitter" role="separator" aria-label="Breite der Vorschau anpassen" aria-controls="results previewText" aria-orientation="vertical" aria-valuenow="55" aria-valuemin="32" aria-valuemax="68" tabindex="0" title="Ziehen, um die Breite der Vorschau anzupassen"></div>
+      <div class="previewPane">
+        <div class="paneHeading"><span>Vorschau</span><span class="previewSource" id="previewSource"></span></div>
+        <div class="previewBody">
+          <div class="previewHead"><h2 id="previewTitle">Prompt auswählen</h2><span class="categoryTag" id="previewCategory" hidden></span></div>
+          <pre id="previewText">Links einen Prompt auswählen.</pre>
+        </div>
+      </div>
+    </section>
+    <footer class="footer">
+      <div class="selectionArea">
+        <button type="button" id="saveSelection" class="iconButton saveButton" disabled aria-label="Markierung als Prompt speichern" title="Markierten Text als lokalen Prompt speichern">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+        <span class="selectionStatus" id="saveHint" role="status" aria-live="polite"></span>
+      </div>
+      <div class="actions">
+        <button type="button" id="cancel" class="iconButton" title="Abbrechen (Esc)" aria-label="Abbrechen">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5 19 19M19 5 5 19"/></svg>
+        </button>
+        <button type="button" id="insert" class="primary" disabled title="Prompt einfügen (Enter)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5 18 12 11 19M18 12H4"/></svg>
+          <span>Einfügen</span>
+        </button>
+      </div>
+    </footer>
+  </main>
+</body>
+</html>

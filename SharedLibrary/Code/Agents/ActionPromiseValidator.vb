@@ -12,6 +12,10 @@
 '  - Bilingual EN/DE/FR matching "I will/I'll/let me/ich werde/je vais <verb>"
 '  - Captures fallback promises and alternative action announcements
 '  - Used by ToolingOrchestrator to enforce guard prompts (Q10)
+'
+' KEY ARCHITECTURE
+'   • Surface: ActionPromiseValidator (VB implementation).
+'   • Entry points/helpers: ContainsActionPromise, BuildPromiseRecoveryGuardPrompt.
 ' =============================================================================
 
 Option Explicit On

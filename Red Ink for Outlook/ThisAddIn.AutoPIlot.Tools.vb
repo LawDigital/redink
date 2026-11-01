@@ -71,7 +71,7 @@ Partial Public Class ThisAddIn
     Private Const AP_Tool_CreatePowerPoint As String = "create_powerpoint"
     Private Const AP_Tool_CreateCodeFile As String = "create_code_file"
     Private Const AP_Tool_CommentPdf As String = "comment_pdf_document"
-    Private Const AP_Tool_ExtractDataFromAttachments As String = "extract_data_from_attachments"
+    Private Const AP_Tool_ExtractDataFromDocs As String = "extract_data_from_docs"
     Private Const AP_Tool_RedactPdf As String = "redact_pdf"
     Private Const AP_Tool_OverlayPdf As String = "overlay_pdf"
     Private Const AP_Tool_CreateAudioFile As String = "create_audio_file"
@@ -161,6 +161,9 @@ Partial Public Class ThisAddIn
     ''' </returns>
     Friend Function GetAutoPilotInternalTools() As List(Of ModelConfig)
         Dim tools As New List(Of ModelConfig)()
+        tools.Add(BuildScanSettingsTool())
+        ' The own-preference command remains discoverable while recommendation delivery is off.
+        tools.Add(BuildManagePromptCoachingTool())
 
         ' Deterministic helper for exact text/data computation inside AutoPilot.
         Dim jsRunTool As ModelConfig = SharedLibrary.Agents.JsRunTool.Build(_context)
@@ -186,7 +189,7 @@ Partial Public Class ThisAddIn
 
         ' Shared helper tools used by the tooling runtime.
         tools.Add(SharedLibrary.Agents.ToolDescribeTool.Build())
-        tools.Add(SharedLibrary.Agents.ContextExpandTool.Build())
+        tools.Add(SharedLibrary.Agents.ContextExpandTool.Build(_context))
         tools.Add(SharedLibrary.Agents.ContextCompactTool.Build())
 
         Dim translationDictionarySegmentCatalog As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.GetTranslationDictionarySegmentCatalog(_context)
@@ -198,12 +201,16 @@ Partial Public Class ThisAddIn
         ' ── process_word_document ──
         tools.Add(New ModelConfig() With {
         .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ProcessWordDoc,
+        .CapabilityTags = "artifact_generation",
         .ModelDescription = "Process Word/PowerPoint/Excel Document (built-in)",
         .ToolInstructionsPrompt =
-            AP_Tool_ProcessWordDoc & ": PREFERRED for transforming an EXISTING Word (.docx), PowerPoint (.pptx), or Excel (.xlsx) attachment while preserving the source document's native structure, styles, layout/master, and formatting. " &
+            AP_Tool_ProcessWordDoc & ": PREFERRED for translating, correcting, shortening or applying one text prompt across ALL slides of an EXISTING .pptx; also DOCX/XLSX. Preserve the source document's native structure, styles, layout/master, and formatting. " &
             "Use this for translation, correction, proofreading, anonymization, replacements, data updates, formula changes, or any other transformation of an existing Office file. Converting an existing artifact into a generic/template/boilerplate version by replacing substantive content with placeholders or generic wording while keeping its format is also a transformation. " &
+            "For a whole-document or whole-deck text operation (translate every slide, proofread, correct, shorten, paraphrase, harmonize wording, or consistently apply one prompt to all text), use process_word_document on the original .docx/.pptx/.xlsx, not create_powerpoint or per-slide PowerPoint editing tools. The processor modifies the existing Office package, including PowerPoint slide text, without rebuilding slides. " &
+            "Use native slide-level PowerPoint tools only for explicit visual/structural operations (such as adding, removing, rearranging or designing individual slides/shapes), or for a user-requested targeted edit that the document processor does not support. Do not decompose a deck-wide text-only instruction into slide-by-slide tool calls. " &
             "If the user asks for a translated/corrected/revised/new-language/generic-template VERSION of an existing Office document, use this tool rather than a create_* tool when the existing file is the requested format carrier. " &
-            "For Word documents, returns both a clean version and a compare document showing changes. " &
+            "PDF-CONVERSION CONTINUITY: after pdf_to_word has successfully produced a usable DOCX from a PDF, that converted DOCX is the authoritative baseline for source-preserving semantic revisions. For broad or judgment-based revisions such as improving contract clauses, revising wording, proofreading, anonymizing, or applying negotiated changes while preserving the converted contract, prefer process_word_document on that converted DOCX. Do not replace the successful converted baseline with create_word_document merely because PDF OCR/extracted text is easier to reason about. OCR may be used as read-only analysis context, but it is not a replacement authoring source while the converted DOCX remains usable. " &
+            "For Word documents, returns both a clean version and a compare document showing changes. The compare document is the preferred tracked-changes deliverable for broad semantic revisions of a converted PDF baseline. " &
             "For PowerPoint and Excel files, returns the processed version (no compare document). " &
             "For Excel files, you can optionally restrict processing to specific sheet names using the sheet_names parameter. " &
             "CHUNKING / GLOBAL CONSISTENCY (IMPORTANT): The processor model does NOT receive the whole document at once. " &
@@ -228,7 +235,7 @@ Partial Public Class ThisAddIn
         .ToolDefinition =
             "{""name"":""" & AP_Tool_ProcessWordDoc & """," &
             """description"":""Preferred for transforming an EXISTING Word (.docx), PowerPoint (.pptx), or Excel (.xlsx) attachment while preserving its native structure, styles, layout/master, and formatting. Applies exactly ONE processing instruction per call. " &
-            "Use for translation, correction, proofreading, anonymization, replacements, data updates, formula modifications, generic/template/boilerplate conversion, and other transformations of an existing Office file when that file is the requested format carrier. " &
+            "Use for translation, correction, proofreading, shortening, consistent application of a prompt to all existing slide/document text, anonymization, replacements, data updates, formula modifications, generic/template/boilerplate conversion, and other transformations of an existing Office file when that file is the requested format carrier. Prefer this tool over per-slide PowerPoint tools for a full-deck textual operation. Use native PowerPoint tools for slide design/layout/structure edits instead. After pdf_to_word successfully creates a usable DOCX, use this tool for broad semantic revisions of that converted baseline rather than rebuilding from OCR/text; the compare output is the tracked-changes deliverable. " &
             "For Word documents, produces clean output plus a compare document with tracked changes. " &
             "For PowerPoint and Excel, produces the processed file only. " &
             "The processor works chunk-by-chunk and does not see the full document in one model call or retain hidden memory between chunks. The calling model is responsible for document-wide consistency: " &
@@ -263,8 +270,11 @@ Partial Public Class ThisAddIn
         tools.Add(New ModelConfig() With {
         .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ExtractPdfText,
         .ModelDescription = "Extract PDF Text (built-in)",
+        .ToolCallArgumentNormalizer = AddressOf NormalizePdfTextArguments,
         .ToolInstructionsPrompt =
             AP_Tool_ExtractPdfText & ": Extracts content from one or more PDF attachments. " &
+            "Use attachment_names with exact session filenames for a selected subset; a single string is normalized to a one-item list. attachment_name and filename are compatibility aliases for one exact filename; do not combine conflicting selectors. " &
+            "Omit all selectors or pass attachment_names=[] only when all eligible PDFs are intended. Invalid, missing, ambiguous or non-PDF explicit targets fail before any extraction; they never select all files. " &
             "By default it returns plain text. If the user wants Markdown, pass output_format='markdown'. " &
             "For text-based PDFs, Markdown uses the direct PDF-to-Markdown extractor without OCR. " &
             "If OCR is needed and available, the OCR path is retained and should return Markdown when Markdown was requested.",
@@ -273,7 +283,9 @@ Partial Public Class ThisAddIn
             """description"":""Extracts content from PDF file attachments. " &
             "Optional output_format='markdown' returns Markdown instead of plain text when possible.""," &
             """parameters"":{""type"":""object"",""properties"":{" &
-            """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of the PDF attachments to extract text from. If empty, processes all PDFs.""}," &
+            """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Exact PDF session filenames to read. Omit or use [] only to process all eligible PDFs. Explicit targets must all exist and be available; invalid targets never expand to all files.""}," &
+            """attachment_name"":{""type"":""string"",""description"":""Compatibility alias for one exact PDF session filename. Prefer attachment_names.""}," &
+            """filename"":{""type"":""string"",""description"":""Compatibility alias for one exact PDF session filename. Prefer attachment_names.""}," &
             """output_format"":{""type"":""string"",""enum"":[""text"",""markdown""],""description"":""Optional output format. Default is 'text'. Use 'markdown' to request Markdown output.""}" &
             "},""required"":[]}}"
     })
@@ -688,33 +700,23 @@ Partial Public Class ThisAddIn
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_PdfToWord,
             .CapabilityTags = "explicit_operation",
-            .ModelDescription = "Convert PDF to Word (built-in)",
+            .ModelDescription = "Convert PDF to Word through the configured Microsoft Word environment",
             .ToolInstructionsPrompt =
-                AP_Tool_PdfToWord & ": Converts a PDF attachment to a Word document (.docx) using Word's built-in PDF import. " &
-                "The resulting .docx can then be used with process_word_document, compare_word_documents, or other Word tools. " &
-                "When the user asks to create a Word document/template that preserves, copies, or closely follows the PDF's formatting/layout, treat the PDF as a format carrier: use pdf_to_word FIRST, then transform the converted DOCX instead of extracting text and rebuilding with create_word_document. " &
-                "This is the PREFERRED method for PDF-to-Word conversion — use it FIRST. It works well for most PDFs " &
-                "that contain real (selectable/searchable) text and preserves layout, tables, and formatting. " &
-                "If the conversion result indicates the PDF is scanned/image-only (no extractable text), THEN " &
-                "fall back to extract_pdf_text (which supports OCR) to obtain the text, and use create_word_document " &
-                "to produce a .docx from that text. " &
-                "ALTERNATIVE APPROACH — USER-REQUESTED OCR PIPELINE: If the user explicitly asks to OCR the PDF first, " &
-                "or asks to 'rasterize and OCR' the PDF before converting to Word, use this pipeline instead: " &
-                "(1) Call extract_pdf_text on the PDF — this will rasterize each page and run OCR via the LLM to extract text. " &
-                "(2) Call create_word_document with the OCR-extracted text to produce a .docx. " &
-                "This OCR pipeline is useful for scanned documents, image-heavy PDFs, or when Word's built-in conversion " &
-                "produces poor results. However, it does NOT preserve the original layout/formatting — it produces a " &
-                "clean text-based document. The standard Word-based conversion (this tool) remains the default. For a request where source formatting is binding, do not silently claim exact preservation after falling back to OCR/text reconstruction.",
+                AP_Tool_PdfToWord & ": Converts a PDF attachment to a Word document (.docx) by creating a Microsoft Word automation instance and calling Word.Documents.Open followed by Document.SaveAs2. " &
+                "CONVERTER POLICY: respect the user's configured Word environment. Do not disconnect, disable, inspect, reject, rank, or bypass connected COM/VSTO add-ins or Word PDF FileConverters. If Word's configured PDF-open pipeline uses an installed converter, allow that converter to run; removing an unwanted converter is the user's responsibility. The tool itself does not launch a PDF application through Windows file associations, Shell/Open-With, or a Red Ink layout/OCR adapter. It must not start Word in Office Safe Mode. If the Word conversion path fails, return a structured failure so the workflow may use the explicit OCR/text reconstruction fallback. " &
+                "A successful usable conversion establishes the resulting DOCX as the authoritative baseline for any source-preserving follow-up work. For broad semantic revisions that should be shown as tracked changes (for example contract improvements, negotiated wording changes, proofreading, or anonymization), prefer process_word_document on that converted DOCX; its compare output shows the changes against the converted baseline. Use word_markup only for discrete exact edits whose find anchors were read from the CURRENT converted DOCX. Never derive word_markup find anchors from OCR/PDF text when they are not present in the DOCX. " &
+                "When the user asks to create a Word document/template that preserves, copies, or closely follows the PDF's formatting/layout, treat the PDF as a format carrier: use pdf_to_word FIRST, then transform the converted DOCX instead of extracting text and rebuilding with create_word_document. Once pdf_to_word succeeds with a usable DOCX, do not silently abandon that baseline for OCR + create_word_document. OCR may still be used for read-only analysis/comparison. Reconstruction is allowed only when the Word conversion failed or produced a genuinely unusable/non-editable source and the workflow explicitly accepts reconstruction. " &
+                "This is the preferred conversion path when Word can produce a usable DOCX. It works best for PDFs that contain real selectable/searchable text. " &
+                "If Word's configured conversion environment produces an image-only/non-editable result and OCR is required, use the explicit extract_pdf_text/text_export_to_text + create_word_document reconstruction workflow only when appropriate; that workflow is separate from pdf_to_word and must not be described as preserving the original PDF layout exactly. " &
+                "conversion_mode is retained for compatibility: the legacy value native does not assert or verify converter provenance. layout_required fails if the resulting DOCX is effectively image-only. Legacy layout_ocr requests are rejected rather than invoking a Red Ink OCR/layout adapter.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_PdfToWord & """," &
-                """description"":""Converts a PDF attachment to a Word document (.docx) using Word's built-in PDF reflow. " &
-                "Use this as the PRIMARY method for PDF-to-Word conversion and whenever a PDF is the requested formatting/layout carrier for a Word deliverable; then transform the resulting DOCX instead of rebuilding it. Works well for text-based PDFs with layout preservation. " &
-                "If the result indicates the PDF is scanned/image-only, OCR + create_word_document is only a reconstruction fallback and cannot be treated as exact source-format preservation. " &
-                "ALTERNATIVE: If the user explicitly requests OCR-based conversion, use extract_pdf_text (rasterize+OCR) followed by create_word_document instead.""," &
+                """description"":""Converts a PDF attachment to a Word document (.docx) by calling Word.Documents.Open and Document.SaveAs2 in a Microsoft Word automation instance. The user's configured Word environment is authoritative: connected COM/VSTO add-ins and PDF FileConverters are neither disabled nor bypassed, and an installed converter selected by Word is allowed to run. A successful usable DOCX is the authoritative source-preserving baseline; broad tracked semantic revisions should continue from that DOCX with process_word_document rather than rebuild from OCR/text. If Word conversion fails or produces an unusable/non-editable result, the workflow may use a controlled OCR/text reconstruction fallback.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """attachment_name"":{""type"":""string"",""description"":""Filename of the PDF attachment to convert""}," &
-                """output_filename"":{""type"":""string"",""description"":""Filename for the output .docx (default: derived from PDF name)""}" &
-                "},""required"":[""attachment_name""]}}"
+                """output_filename"":{""type"":""string"",""description"":""Filename for the output .docx (default: derived from PDF name)""}," &
+                """conversion_mode"":{""type"":""string"",""enum"": [""auto"",""native"",""layout_preferred"",""layout_required""],""description"":""Compatibility/quality mode. The legacy value native does not imply that Word used a built-in rather than installed converter. layout_required fails if the resulting DOCX is effectively image-only.""}" &
+                "},""required"": [""attachment_name""]}}"
         })
 
         ' ── create_word_document ──
@@ -724,7 +726,9 @@ Partial Public Class ThisAddIn
             .ModelDescription = "Create Executive Word Document (built-in)",
             .ToolInstructionsPrompt =
                 AP_Tool_CreateWordDoc & ": Creates a NEW polished Word document (.docx) from Markdown. " &
-                "Do NOT use this tool merely to translate, correct, proofread, genericize, turn into a template/boilerplate, replace text in, or otherwise transform an existing Word attachment when the user wants that source's structure/formatting retained; use process_word_document for that case. If a PDF is explicitly the formatting/layout model for the requested Word output, use pdf_to_word first and then transform the converted DOCX. " &
+                "Supply exactly one content source: markdown_content for inline content OR markdown_path for a complete existing UTF-8/BOM-Unicode Markdown file. File inputs use the SAME native renderer, design contracts and validations as inline content; never read/retype a large OCR export just to call this tool. Pass expected_source_sha256 from the export item snapshot_sha256 or text_read.snapshot_sha256 to pin the source bytes. The source must fit the existing PathPolicy text-file limit. This is content reconstruction, not proof of OCR accuracy, full rendered-content preservation or source-layout fidelity. " &
+                "When the user requests multiple final files and the host workflow uses an explicit expected_artifacts contract, this creator can bind its single DOCX directly to one exact opaque output slot via artifact_id/logical_deliverable_id/output_slot_id plus the COMPLETE expected_artifacts list. Do this for a requested basis/original file before creating a separate redline copy; do not leave a declared slot unresolved and do not shrink the declared slot set merely to permit finalization. Legacy calls may omit all artifact fields. " &
+                "Do NOT use this tool merely to translate, correct, proofread, genericize, turn into a template/boilerplate, replace text in, or otherwise transform an existing Word attachment when the user wants that source's structure/formatting retained; use process_word_document for that case. If a PDF is explicitly the formatting/layout model for the requested Word output, use pdf_to_word first and then transform the converted DOCX. If pdf_to_word already succeeded with a usable DOCX, create_word_document MUST NOT silently replace that converted baseline merely because OCR/text extraction is more convenient or an exact word_markup anchor was not found. Use process_word_document for broad semantic revision of that baseline, or re-read the DOCX for exact anchors when word_markup is appropriate. Reconstruction with create_word_document is only a fallback after failed/unusable conversion or explicit user acceptance of reconstruction. " &
                 "Use create_word_document when the requested deliverable is genuinely a newly authored document assembled from Markdown/content rather than a transformed/reused source-format carrier. When a user-supplied artifact is the intended format authority but a creator is nevertheless necessary, set use_repository_default_design=false unless the user explicitly requested a repository design. " &
                 "Default to style_preset='consulting' and professional_layout=true unless the user explicitly requests a plain document. " &
                 "Write lean, decision-oriented content with strong section hierarchy, short paragraphs, informative headings, concise bullets, and tables where comparison is useful. " &
@@ -734,12 +738,14 @@ Partial Public Class ThisAddIn
                 "Use page_orientation='landscape' for wide tables. Use the DESIGN REPOSITORY routing metadata for Word format selection: explicit requested design first, then organization/document type/language, then an applicable default. If no design_name is supplied, repository defaults are enabled, and the catalog has a global Word default, the host applies it deterministically. If that design lists Word slots, markdown_content is the substantive body and template_fields must contain the listed keys exactly. The DESIGN REPOSITORY summary includes each slot's declared purpose; use that purpose rather than guessing from a placeholder id. Visible placeholders such as [[RI:Text]] or [[RI:Body]] are labels only and may be renamed without changing their meaning. Shared style_policy_file mappings and design-local body-style mappings are authoritative: use only the declared Markdown heading and list levels, and let the host apply exact native Word styles. Structured DOCX is the recommended carrier for new Word designs; slot-bound DOCX designs and generic Word creation are OOXML-first and normally do not start Word. The sole automatic exception is one final hidden Word field-refresh pass when native [[ref:...]] cross-references are present. Only an explicitly selected legacy non-slot Word carrier may otherwise use the Word/COM compatibility renderer. Their native structure, fields, styles, headers and footers remain authoritative. Do not put front-matter fields into markdown_content when the design exposes dedicated template_fields. Explicit tool arguments override repository defaults. Use accent_color only when supplied by the user or a concrete authorized design source. Never claim a named organization's design unless such a source is available; otherwise use a neutral professional preset and state that the specific corporate design was not available. " &
                 "For true Word footnotes, use the footnotes array and put exactly one inline [[footnote:ID]] marker at the intended reference position in markdown_content for each footnote. The host replaces these markers deterministically with native Word footnote references after document creation. Place the marker AFTER sentence/clause punctuation when the footnote supports the whole preceding sentence or clause (for example: '... Aussage.[[footnote:fn1]]'). Place it immediately after a specific word or phrase, before following punctuation, only when the footnote refers specifically to that word or phrase rather than to the whole sentence or clause. Do not manually number footnotes and do not simulate them with superscript text or a notes section. " &
                 "NEVER simulate diagrams, process maps, timelines, or charts with ASCII/Unicode box characters, Mermaid source, fenced code blocks, monospace/Courier pseudo-graphics, or manual spacing. " &
-                "Whenever the user requests, names, or the document itself labels something as a chart, diagram, organigram/organization chart, graphical representation, visualization, timeline, process map, or other graphic, the native 'visuals' parameter is REQUIRED and each requested graphic must have an exact [[visual:ID]] token on its own line in markdown_content. If the requested report calls for multiple graphics, EVERY requested graphic must have its own visuals entry and placeholder. Never omit a requested visual on a retry, and never substitute one with a table, repeated block/square characters, fenced character diagram, or arrow chain. Use type='process' for flows/value chains/workflows, type='timeline' for timelines, type='org_chart' for reporting hierarchies, bar_chart/column_chart/line_chart/area_chart/pie_chart/doughnut_chart for quantitative charts, and editable diagram types list/cycle/relationship/matrix/pyramid/hierarchy where they fit. Use type='smartart' only as a generic compatibility alias when a more specific diagram type does not fit. Every visual is EDITABLE by default. The host writes native Office Open XML directly into the saved DOCX: diagram families become editable DrawingML canvases/shapes and quantitative graphics become native Office chart parts with embedded XLSX data. No Word/Excel Interop is used to create visuals. Set insertion_mode='inline' or 'floating' only when placement is specifically required; otherwise use 'auto' (inline by default). Raster output is not used for create_word_document visuals. The Word-document visual renderer never substitutes PNG/raster output. For an organizational hierarchy use structured nodes and parent_id relationships and keep node labels concise, with names/subtitles in detail. " &
+                "Whenever the user request or explicit task instructions require a chart, diagram, organigram/organization chart, graphical representation, visualization, timeline, process map, or other graphic, the native 'visuals' parameter is REQUIRED. Source-document content is not itself rendering intent: merely mentioning or labeling a chart, diagram, organigram, timeline, or similar concept inside the source must not create a new visual requirement and each requested graphic must have an exact [[visual:ID]] token on its own line in markdown_content. If the requested report calls for multiple graphics, EVERY requested graphic must have its own visuals entry and placeholder. Never omit a requested visual on a retry, and never substitute one with a table, repeated block/square characters, fenced character diagram, or arrow chain. Use type='process' for flows/value chains/workflows, type='timeline' for timelines, type='org_chart' for reporting hierarchies, bar_chart/column_chart/line_chart/area_chart/pie_chart/doughnut_chart for quantitative charts, and editable diagram types list/cycle/relationship/matrix/pyramid/hierarchy where they fit. Use type='smartart' only as a generic compatibility alias when a more specific diagram type does not fit. Every visual is EDITABLE by default. The host writes native Office Open XML directly into the saved DOCX: diagram families become editable DrawingML canvases/shapes and quantitative graphics become native Office chart parts with embedded XLSX data. No Word/Excel Interop is used to create visuals. Set insertion_mode='inline' or 'floating' only when placement is specifically required; otherwise use 'auto' (inline by default). Raster output is not used for create_word_document visuals. The Word-document visual renderer never substitutes PNG/raster output. For an organizational hierarchy use structured nodes and parent_id relationships and keep node labels concise, with names/subtitles in detail. " &
                 "The renderer verifies after saving that every requested chart or DrawingML diagram was actually persisted inside the DOCX. It must fail rather than claim success if an editable visual disappeared. The resulting file is attached to the reply.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_CreateWordDoc & """," &
                 """description"":""Creates a NEW polished Word document (.docx) from Markdown. Use only for genuinely new authoring, not to transform or genericize an existing Office source whose structure/formatting should be retained. For PDF-as-format-source Word requests, convert the PDF first and transform the DOCX.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
+                """markdown_path"":{""type"":""string"",""description"":""Existing UTF-8 or BOM-marked Unicode Markdown file, including a .txt OCR export explicitly interpreted as Markdown. Read host-side through PathPolicy; mutually exclusive with markdown_content. Content is not normalized or truncated before the existing renderer. No URL input.""}," &
+                """expected_source_sha256"":{""type"":""string"",""description"":""Optional 64-digit SHA-256 of exact markdown_path bytes (including BOM), obtained from an export or text_read result. Rejects a changed source. Requires markdown_path.""}," &
                 """markdown_content"":{""type"":""string"",""description"":""Full document content in Markdown. Use headings, concise bullets, emphasis, and Markdown tables where useful. For native cross-references, put [[anchor:ID]] alone on the line immediately before the target heading/paragraph and use inline [[ref:ID:number]], [[ref:ID:text]], or [[ref:ID:full]] markers; do not manually type the target's native number. When the selected Word design exposes a native body-style contract, use only the heading and list levels declared by that contract; unsupported levels are rejected.""}," &
                 """file_name"":{""type"":""string"",""description"":""Desired output filename without .docx. Defaults to Document.""}," &
                 """design_name"":{""type"":""string"",""description"":""Exact design id/name from the configured AgentResources design repository. Use this when the user explicitly named a particular design. Otherwise prefer document_type plus document_language so the host can enforce document-type-first routing.""}," &
@@ -778,8 +784,19 @@ Partial Public Class ThisAddIn
                 """series"":{ ""type"":""array"",""description"":""For charts: [{name, values:[numbers]}]."",""items"":{ ""type"":""object"",""properties"":{ ""name"":{ ""type"":""string""},""values"":{ ""type"":""array"",""items"":{ ""type"":""number""}}},""required"":[""values""]}}," &
                 """width_inches"":{ ""type"":""number"",""description"":""Optional display width. The native renderer constrains it to the printable page area and uses visual-specific defaults.""}," &
                 """height_inches"":{ ""type"":""number"",""description"":""Optional display height. The native renderer constrains it to the printable page area and uses visual-specific defaults.""}},""required"":[""id"",""type""]}}," &
-                """table_style_name"":{""type"":""string"",""description"":""Optional Word table style name. Renderer still applies professional header/banding treatment.""}" &
-                "},""required"":[""markdown_content""]}}"
+                """table_style_name"":{""type"":""string"",""description"":""Optional Word table style name. Native template styles are preserved unless an explicit table override is requested.""}," &
+                """table_borders"":{""type"":""string"",""description"":""Explicit border override for all body tables: preserve keeps native/default formatting; none removes borders; grid applies a thin grid."",""enum"":[""preserve"",""none"",""grid""]}," &
+                """table_header_shading"":{""type"":""string"",""description"":""Optional first-row shading for all body tables: six-digit RGB hex color or none. Omitted preserves native/default shading.""}," &
+                """table_body_shading"":{""type"":""string"",""description"":""Optional remaining-row shading for all body tables: six-digit RGB hex color or none. Omitted preserves native/default shading.""}," &
+                """artifact_id"":{""type"":""string"",""description"":""Optional opaque artifact id for this single created DOCX. Use together with the other explicit artifact fields when this file must satisfy a host output slot.""}," &
+                """logical_deliverable_id"":{""type"":""string"",""description"":""Optional opaque logical deliverable id supplied by the orchestration contract.""}," &
+                """output_slot_id"":{""type"":""string"",""description"":""Optional opaque output slot id supplied by the orchestration contract.""}," &
+                """supersedes_artifact_id"":{""type"":""string"",""description"":""Optional exact artifact id superseded by this output.""}," &
+                """artifact_state"":{""type"":""string"",""enum"":[""working"",""intermediate"",""final""]}," &
+                """artifact_delivery_intent"":{""type"":""string"",""enum"":[""none"",""deliver_to_user"",""persist_only"",""deliver_and_persist""]}," &
+                """storage_kind"":{""type"":""string"",""enum"":[""session_staging"",""connected_workspace"",""host_managed"",""unknown""]}," &
+                """expected_artifacts"":{""type"":""array"",""description"":""Optional complete explicit final-output slot contract. When this created DOCX is one of multiple requested final files, bind this call to its own exact slot so the remaining files can satisfy the other slots."",""items"":{""type"":""object"",""properties"":{""logical_deliverable_id"":{""type"":""string""},""output_slot_id"":{""type"":""string""}},""required"":[""logical_deliverable_id"",""output_slot_id""]}}" &
+                "}}}"
         })
 
         tools.Add(New ModelConfig() With {
@@ -877,7 +894,7 @@ Partial Public Class ThisAddIn
             .CapabilityTags = "explicit_operation",
             .ModelDescription = "Create Executive PowerPoint (built-in)",
             .ToolInstructionsPrompt =
-                AP_Tool_CreatePowerPoint & ": Creates a polished executive PowerPoint deck. Use it for genuinely new slide authoring. If an existing PowerPoint deck is supplied as the formatting/layout/master model for a revised, generic, template, or boilerplate version, preserve that deck through process_word_document or native PowerPoint mutation rather than rebuilding it with an implicit repository design. If an explicit .pptx/.potx template carrier is supplied, that carrier takes precedence over implicit repository defaults. When a creator is otherwise necessary while a user-supplied artifact is the format authority, set use_repository_default_design=false unless the user explicitly requested a repository design. Keep one clear message per slide, use concise action-oriented titles, and keep narrative content short enough for presentation-sized typography. " &
+                AP_Tool_CreatePowerPoint & ": Creates a polished executive PowerPoint deck. Use it for genuinely new slide authoring, not for translating, proofreading, correcting, shortening, or applying a textual prompt across the slides of an existing .pptx. Such whole-deck text transformations MUST use process_word_document when it is available; do not rebuild the presentation or iterate slide-by-slide. For genuinely new slide design and structural edits, use presentation creation/native PowerPoint tools as appropriate. If an existing PowerPoint deck is supplied as the formatting/layout/master model for a revised, generic, template, or boilerplate version, preserve that deck through process_word_document or native PowerPoint mutation rather than rebuilding it with an implicit repository design. If an explicit .pptx/.potx template carrier is supplied, that carrier takes precedence over implicit repository defaults. When a creator is otherwise necessary while a user-supplied artifact is the format authority, set use_repository_default_design=false unless the user explicitly requested a repository design. Keep one clear message per slide, use concise action-oriented titles, and keep narrative content short enough for presentation-sized typography. " &
                 "Supported layouts: title, section, bullets, two_column, kpi, table, chart, cards, process, structure, timeline, comparison, matrix, quote, closing. " &
                 "PRIMARY AUTHORING CONTRACT: use slide.visual for every intended rich graphic and slide.bullet_items for structured or nested bullets. The visual object is typed and editable-first; the host derives the semantic layout from visual.type and renders native PowerPoint shapes/text whenever possible. data_json and flat bullet_points remain compatibility inputs only and should not be the primary format for new calls. " &
                 "For bullet_items, never embed bullet glyphs or manual numbering such as '1.'/'2.' in text. Use level=0 for a main point and level=1 (or deeper) for supporting detail; the host creates the actual PowerPoint bullet and indentation. " &
@@ -978,13 +995,22 @@ Partial Public Class ThisAddIn
         })
 
 
-        ' ── extract_data_from_attachments ──
+        ' ── extract_data_from_docs ──
         tools.Add(New ModelConfig() With {
-            .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ExtractDataFromAttachments,
-            .ModelDescription = "Extract structured data from attachments into a table (built-in)",
+            .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ExtractDataFromDocs,
+            .ModelDescription = "Extract structured data from documents and attachments into a table (built-in)",
             .ToolInstructionsPrompt =
-                AP_Tool_ExtractDataFromAttachments & ": Extracts structured/tabular data from one or more attachments " &
-                "(PDF, Word, Excel, text files, or files from a .zip archive) using AI-driven fact extraction. " &
+                AP_Tool_ExtractDataFromDocs & ": Extracts structured/tabular data from readable documents and attachments " &
+                "(PDF, Word, Excel, text files, or attachment files unpacked from a .zip archive) using the existing document readers and AI-driven fact extraction. " &
+                "Pass file_paths for normal files accessible to the agent, attachment_names for attachments, or both. " &
+                "If neither list is provided, all processable attachments are used. An explicit list never adds other attachments implicitly. " &
+                "Inspect file_results, input_errors, failed_files, outcome and complete. " &
+                "A corrupt, unreadable or empty document is a diagnosed file outcome, not a reason to repeat the whole batch. " &
+                "processing_complete=true means all files have been handled, NOT that all content was extracted. " &
+                "For completed_with_file_errors, present the extracted rows and explicitly list unavailable files and their errors. " &
+                "Even if rows is empty, report the file outcomes; never invent missing facts. Do not retry unchanged unavailable_content files or rerun successful files. " &
+                "Only technical_failure requires recovery; retain the existing rows and address affected files only. " &
+                "complete=false means the content result has gaps: disclose them and do not claim every document was successfully analysed. " &
                 "You MUST provide an 'instruction' describing WHAT to extract (e.g. 'Extract invoice number, date, vendor name, and total amount'). " &
                 "You SHOULD provide a 'schema' defining the output columns using the format 'ColumnName:type;ColumnName:type' " &
                 "where type is one of: text, date, datetime, number, other. Example: 'Invoice Number:text;Date:date;Vendor:text;Amount:number'. " &
@@ -997,8 +1023,8 @@ Partial Public Class ThisAddIn
                 "- Or any other appropriate presentation. " &
                 "This tool ONLY extracts and returns the structured data — it does NOT create any files.",
                 .ToolDefinition =
-                "{""name"":""" & AP_Tool_ExtractDataFromAttachments & """," &
-                """description"":""Extracts structured/tabular data from one or more attachments using AI-driven fact extraction. " &
+                "{""name"":""" & AP_Tool_ExtractDataFromDocs & """," &
+                """description"":""Reads/converts accessible documents and attachments and extracts structured/tabular data using AI-driven fact extraction. " &
                 "Returns a JSON object with 'schema' (column definitions) and 'rows' (extracted data). " &
                 "Supports PDF, Word, Excel, text files, and files unpacked from .zip archives. " &
                 "You MUST then decide how to present the result (create_excel_spreadsheet, create_word_document, or inline table).""," &
@@ -1010,7 +1036,8 @@ Partial Public Class ThisAddIn
                 "Example: 'Invoice No:text;Date:date*;Vendor:text;Amount:number;Notes:text'. " &
                 "If omitted, the AI infers the schema automatically.""}," &
                 """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of attachments to extract data from. " &
-                "If empty or omitted, processes all readable attachments (PDF, DOCX, XLSX, TXT, CSV, etc.).""}," &
+                "Used together with file_paths when supplied. If neither list is supplied, processes all readable attachments.""}," &
+                """file_paths"":{""type"":""array"",""items"":{""type"":""string""},""description"":""List of normal document paths the agent is allowed to read. Relative paths resolve in the agent workspace. Each accessible file is processed once; unsupported, missing or denied inputs are reported explicitly. Does not grant access to protected web links or document systems.""}," &
                 """output_language"":{""type"":""string"",""description"":""Language for extracted column names and textual values (e.g. 'English', 'German', 'French'). " &
                 "Use the language the user expects the output in. If omitted, uses the language of the user's email.""}," &
                 """sort_column"":{""type"":""integer"",""description"":""Optional: 1-based column index to sort by. Use 0 or omit for no sorting.""}," &
@@ -1517,6 +1544,8 @@ Partial Public Class ThisAddIn
 
         Try
             Select Case toolCall.ToolName
+                Case AP_Tool_ScanSettings
+                    response = ExecuteScanSettingsTool(toolCall)
                 Case AP_Tool_ProcessWordDoc
                     response = Await ExecuteProcessWordDocTool(toolCall, context, cancellationToken)
                 Case AP_Tool_ExtractPdfText
@@ -1540,7 +1569,7 @@ Partial Public Class ThisAddIn
                 Case AP_Tool_CreatePdfFromText
                     response = ExecuteCreatePdfFromTextTool(toolCall, context)
                 Case AP_Tool_ExtractExcelData
-                    response = ExecuteExtractExcelDataTool(toolCall, context)
+                    response = Await ExecuteExtractExcelDataTool(toolCall, context)
                 Case AP_Tool_ExcelListLiveWorksheets
                     response = Await ExecuteExcelListLiveWorksheetsTool(toolCall, context, cancellationToken)
                 Case AP_Tool_ExcelReadLiveRange
@@ -1567,8 +1596,8 @@ Partial Public Class ThisAddIn
                     response = Await ExecuteCreatePowerPointTool(toolCall, context, cancellationToken)
                 Case AP_Tool_CreateCodeFile
                     response = Await ExecuteCreateCodeFileTool(toolCall, context, cancellationToken)
-                Case AP_Tool_ExtractDataFromAttachments
-                    response = Await ExecuteExtractDataFromAttachmentsTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ExtractDataFromDocs
+                    response = Await ExecuteExtractDataFromDocsTool(toolCall, context, cancellationToken)
                 Case AP_Tool_RedactPdf
                     response = Await ExecuteRedactPdfTool(toolCall, context, cancellationToken)
                 Case AP_Tool_OverlayPdf
@@ -1581,6 +1610,8 @@ Partial Public Class ThisAddIn
                     response = Await ExecuteWebGroundingTool(toolCall, context, cancellationToken)
                 Case AP_Tool_ManageScheduledTasks
                     response = Await ExecuteManageScheduledTasksTool(toolCall, context, cancellationToken)
+                Case AP_Tool_ManagePromptCoaching
+                    response = ExecuteManagePromptCoachingTool(toolCall, cancellationToken)
                 Case AP_Tool_ManageUserMemory
                     response = Await ExecuteManageUserMemoryTool(toolCall, context, cancellationToken)
                 Case AP_Tool_ManageUserFiles
@@ -2112,7 +2143,10 @@ Partial Public Class ThisAddIn
         If Not extracted AndAlso (Not useMarkdown) AndAlso (ext <> ".doc" OrElse (ext = ".doc" AndAlso INI_AllowLegacyDocFiles)) Then
             Try
                 Dim label As String = Nothing
-                extracted = TryExtractOfficeText(att.TempFilePath, text, label)
+                Dim officeRead = Await TryExtractOfficeTextAsync(att.TempFilePath).ConfigureAwait(False)
+                extracted = officeRead.Item1
+                text = officeRead.Item2
+                label = officeRead.Item3
             Catch
             End Try
         End If
@@ -2121,7 +2155,10 @@ Partial Public Class ThisAddIn
         If Not extracted AndAlso (Not useMarkdown) Then
             Try
                 Dim label As String = Nothing
-                extracted = TryExtractTextLike(att.TempFilePath, text, label)
+                Dim textRead = Await TryExtractTextLikeAsync(att.TempFilePath).ConfigureAwait(False)
+                extracted = textRead.Item1
+                text = textRead.Item2
+                label = textRead.Item3
             Catch
             End Try
         End If
@@ -2164,7 +2201,10 @@ Partial Public Class ThisAddIn
         Dim extracted As Boolean = False
 
         Try
-            extracted = TryExtractOfficeText(att.TempFilePath, text, label)
+            Dim officeRead = Await TryExtractOfficeTextAsync(att.TempFilePath).ConfigureAwait(False)
+            extracted = officeRead.Item1
+            text = officeRead.Item2
+            label = officeRead.Item3
         Catch
         End Try
 
@@ -2173,10 +2213,10 @@ Partial Public Class ThisAddIn
             Try
                 Select Case ext
                     Case ".xlsx", ".xls"
-                        text = ExtractExcelText(att.TempFilePath)
+                        text = Await SharedMethods.PostToHostUiAsync(Of String)(Function() ExtractExcelText(att.TempFilePath)).ConfigureAwait(False)
                         extracted = Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error")
                     Case ".pptx"
-                        text = ExtractPowerPointText(att.TempFilePath)
+                        text = Await SharedMethods.PostToHostUiAsync(Of String)(Function() ExtractPowerPointText(att.TempFilePath)).ConfigureAwait(False)
                         extracted = Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error")
                 End Select
             Catch
@@ -2185,7 +2225,10 @@ Partial Public Class ThisAddIn
 
         If Not extracted Then
             Try
-                extracted = TryExtractTextLike(att.TempFilePath, text, label)
+                Dim textRead = Await TryExtractTextLikeAsync(att.TempFilePath).ConfigureAwait(False)
+                extracted = textRead.Item1
+                text = textRead.Item2
+                label = textRead.Item3
             Catch
             End Try
         End If
@@ -2269,7 +2312,7 @@ Partial Public Class ThisAddIn
 
     Friend Function IsAutoPilotInternalTool(toolName As String) As Boolean
         Select Case toolName
-            Case AP_Tool_ProcessWordDoc,
+            Case AP_Tool_ScanSettings, AP_Tool_ProcessWordDoc,
      AP_Tool_CommentWordDoc,
      AP_Tool_ExtractPdfText,
      AP_Tool_MergePdfs,
@@ -2294,13 +2337,14 @@ Partial Public Class ThisAddIn
      AP_Tool_CreatePowerPoint,
      AP_Tool_CreateCodeFile,
      AP_Tool_CommentPdf,
-     AP_Tool_ExtractDataFromAttachments,
+     AP_Tool_ExtractDataFromDocs,
      AP_Tool_RedactPdf,
      AP_Tool_OverlayPdf,
      AP_Tool_CreateAudioFile,
      AP_Tool_GenerateImage,
      AP_Tool_WebGrounding,
      AP_Tool_ManageScheduledTasks,
+     AP_Tool_ManagePromptCoaching,
      AP_Tool_ManageUserMemory,
      AP_Tool_ManageUserFiles,
      AP_Tool_ListCollectionUseCases,

@@ -150,6 +150,13 @@ Partial Public Class ThisAddIn
             End Try
 
             If firstDiscoveryError IsNot Nothing Then
+                Dim httpError As SLib.MCPHttpRequestException = TryCast(firstDiscoveryError, SLib.MCPHttpRequestException)
+                If httpError IsNot Nothing AndAlso
+                   httpError.ResponseStatusCode <> System.Net.HttpStatusCode.Unauthorized AndAlso
+                   httpError.ResponseStatusCode <> System.Net.HttpStatusCode.Forbidden Then
+                    ShowCustomMessageBox("Failed to query the MCP server:" & vbCrLf & vbCrLf & firstDiscoveryError.Message, $"{AN} MCP Import")
+                    Return
+                End If
                 Dim discoveredOAuth As SLib.MCPProtectedResourceOAuthResult = Nothing
                 Dim oauthBootstrapError As Exception = Nothing
 
@@ -416,6 +423,7 @@ Partial Public Class ThisAddIn
     ' ─────────────────────────────────────────────────────────────────────────
 
     Private Class MCPAuthInfo
+        Public Property StreamableSession As New SLib.MCPStreamableSessionState()
         Public Property APIKeyPlaceholder As String = ""
         Public Property LiveAPIKey As String = ""
         Public Property APIKeyEncrypted As Boolean = False
@@ -662,7 +670,7 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Initialises via Streamable HTTP: POST the initialize JSON-RPC to the URL.
     ''' </summary>
-    Private Async Function MCPInitializeStreamableHTTP(mcpUrl As String, auth As MCPAuthInfo) As Task(Of MCPInitResult)
+    Private Async Function MCPInitializeStreamableHTTP(mcpUrl As String, auth As MCPAuthInfo) As System.Threading.Tasks.Task(Of MCPInitResult)
         Dim payload As New JObject From {
             {"jsonrpc", "2.0"}, {"id", 1}, {"method", "initialize"},
             {"params", New JObject From {
@@ -672,6 +680,7 @@ Partial Public Class ThisAddIn
             }}
         }
 
+        auth.StreamableSession = New SLib.MCPStreamableSessionState()
         Dim responseJson = Await SendStreamableHTTPRequest(mcpUrl, payload, auth)
 
         Dim result As New MCPInitResult() With {.ResolvedUrl = mcpUrl}
@@ -683,17 +692,14 @@ Partial Public Class ThisAddIn
 
         ' Send initialized notification
         Dim notif As New JObject From {{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}}
-        Try
-            Await SendStreamableHTTPRequest(mcpUrl, notif, auth, expectResponse:=False)
-        Catch
-        End Try
+        Await SendStreamableHTTPRequest(mcpUrl, notif, auth, expectResponse:=False)
         Return result
     End Function
 
     ''' <summary>
     ''' Sends a JSON-RPC POST for Streamable HTTP transport.
     ''' </summary>
-    Private Async Function SendStreamableHTTPRequest(mcpUrl As String, payload As JObject, auth As MCPAuthInfo, Optional expectResponse As Boolean = True) As Task(Of JObject)
+    Private Async Function SendStreamableHTTPRequest(mcpUrl As String, payload As JObject, auth As MCPAuthInfo, Optional expectResponse As Boolean = True) As System.Threading.Tasks.Task(Of JObject)
         EnsureTls12()
 
         Using handler As New HttpClientHandler()
@@ -702,27 +708,27 @@ Partial Public Class ThisAddIn
                 client.Timeout = TimeSpan.FromMilliseconds(MCP_DEFAULT_TIMEOUT)
                 SetAcceptHeaders(client)
                 SetAuthHeaders(client, auth)
+                auth.StreamableSession.ApplyHeaders(client, mcpUrl)
 
                 Dim content As New StringContent(payload.ToString(Formatting.None), Encoding.UTF8, "application/json")
                 Dim response = Await client.PostAsync(mcpUrl, content).ConfigureAwait(False)
 
-                If Not expectResponse Then
-                    Try : Await response.Content.ReadAsStringAsync().ConfigureAwait(False) : Catch : End Try
-                    Return New JObject()
-                End If
-
                 Dim responseText = Await response.Content.ReadAsStringAsync().ConfigureAwait(False)
 
                 If Not response.IsSuccessStatusCode Then
-                    Throw New Exception($"HTTP {CInt(response.StatusCode)} ({response.ReasonPhrase}): {If(responseText.Length > 500, responseText.Substring(0, 500) & "...", responseText)}")
+                    Throw New SLib.MCPHttpRequestException(response.StatusCode, $"HTTP {CInt(response.StatusCode)} ({response.ReasonPhrase}): {If(responseText.Length > 500, responseText.Substring(0, 500) & "...", responseText)}")
                 End If
 
+                If Not expectResponse Then Return New JObject()
                 responseText = ExtractJsonFromSSE(responseText, response.Content.Headers.ContentType?.MediaType)
 
-                If String.IsNullOrWhiteSpace(responseText) Then Return New JObject()
+                If String.IsNullOrWhiteSpace(responseText) Then Throw New System.IO.InvalidDataException("MCP returned an empty response.")
 
                 Dim result = JObject.Parse(responseText)
                 CheckJsonRpcError(result)
+                If System.String.Equals(payload.Value(Of System.String)("method"), "initialize", System.StringComparison.Ordinal) Then
+                    auth.StreamableSession.CaptureInitialization(mcpUrl, response, result)
+                End If
                 Return result
             End Using
         End Using

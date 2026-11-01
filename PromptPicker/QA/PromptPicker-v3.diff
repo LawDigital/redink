@@ -1,0 +1,1033 @@
+--- a/PromptPicker/Native.vb
++++ b/PromptPicker/Native.vb
+@@ -14,6 +14,27 @@
+     Public Const INPUT_KEYBOARD As UInteger = 1UI
+     Public Const KEYEVENTF_KEYUP As UInteger = &H2UI
+     Public Const VK_V As UShort = &H56US
++
++    <System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)>
++    Public Structure NativeRectangle
++        Public Left As Integer
++        Public Top As Integer
++        Public Right As Integer
++        Public Bottom As Integer
++    End Structure
++
++    <System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)>
++    Public Structure GuiThreadInfo
++        Public Size As UInteger
++        Public Flags As UInteger
++        Public Active As System.IntPtr
++        Public Focus As System.IntPtr
++        Public Capture As System.IntPtr
++        Public MenuOwner As System.IntPtr
++        Public MoveSize As System.IntPtr
++        Public Caret As System.IntPtr
++        Public CaretRectangle As NativeRectangle
++    End Structure
+ 
+     ' SendInput is process-independent, unlike SendKeys (which can dispatch to
+     ' a changed active control after the WebView2 dialog closes).
+@@ -68,6 +89,21 @@
+     <System.Runtime.InteropServices.DllImport("user32.dll")>
+     Public Function GetWindowThreadProcessId(hwnd As System.IntPtr, ByRef processId As UInteger) As UInteger
+     End Function
++    <System.Runtime.InteropServices.DllImport("user32.dll", SetLastError:=True)>
++    Public Function GetGUIThreadInfo(threadId As UInteger, ByRef info As GuiThreadInfo) As Boolean
++    End Function
++    <System.Runtime.InteropServices.DllImport("user32.dll")>
++    Public Function IsChild(parent As System.IntPtr, child As System.IntPtr) As Boolean
++    End Function
++    <System.Runtime.InteropServices.DllImport("user32.dll", SetLastError:=True)>
++    Public Function AttachThreadInput(first As UInteger, second As UInteger, attach As Boolean) As Boolean
++    End Function
++    <System.Runtime.InteropServices.DllImport("user32.dll", SetLastError:=True)>
++    Public Function SetFocus(hwnd As System.IntPtr) As System.IntPtr
++    End Function
++    <System.Runtime.InteropServices.DllImport("kernel32.dll")>
++    Public Function GetCurrentThreadId() As UInteger
++    End Function
+     <System.Runtime.InteropServices.DllImport("user32.dll")>
+     Public Function GetClipboardSequenceNumber() As UInteger
+     End Function
+--- a/PromptPicker/PickerContext.vb
++++ b/PromptPicker/PickerContext.vb
+@@ -25,7 +25,7 @@
+         menu.Items.Add("Beenden", Nothing, Sub(sender As Object, e As System.EventArgs) ExitThread())
+         DirectCast(menu.Items(0), System.Windows.Forms.ToolStripMenuItem).ShortcutKeyDisplayString = ShortcutService.Describe(currentSettings.HotkeyModifiers, currentSettings.HotkeyKey)
+         tray = New System.Windows.Forms.NotifyIcon With {
+-            .Text = "Prompt Picker · Red Ink", .ContextMenuStrip = menu,
++            .Text = "Red Ink Prompt Picker", .ContextMenuStrip = menu,
+             .Icon = System.Drawing.Icon.ExtractAssociatedIcon(System.Windows.Forms.Application.ExecutablePath), .Visible = True
+         }
+         AddHandler tray.DoubleClick, Sub(sender As Object, e As System.EventArgs) BeginPicker(False)
+@@ -47,7 +47,7 @@
+     End Sub
+ 
+     Private Sub WarnHotkeyUnavailable()
+-        tray.ShowBalloonTip(5500, "Prompt Picker", "Der Hotkey ist bereits belegt. Du kannst den Picker über das Tray öffnen oder eine andere Tastenkombination wählen.", System.Windows.Forms.ToolTipIcon.Warning)
++        tray.ShowBalloonTip(5500, "Red Ink Prompt Picker", "Der Hotkey ist bereits belegt. Du kannst den Picker über das Tray öffnen oder eine andere Tastenkombination wählen.", System.Windows.Forms.ToolTipIcon.Warning)
+     End Sub
+ 
+     Private Sub RememberExternalForeground(sender As Object, e As System.EventArgs)
+@@ -98,9 +98,12 @@
+         Dim target As System.IntPtr = If(calledByHotkey, Native.GetForegroundWindow(), lastExternalWindow)
+         If Not IsExternal(target) Then target = lastExternalWindow
+         If Not IsExternal(target) Then
+-            System.Windows.Forms.MessageBox.Show("Keine zuvor aktive Zielanwendung erkannt. Bitte zuerst die gewünschte Anwendung aktivieren.", "Prompt Picker", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Information)
+-            Return
+-        End If
++            System.Windows.Forms.MessageBox.Show("Keine zuvor aktive Zielanwendung erkannt. Bitte zuerst die gewünschte Anwendung aktivieren.", "Red Ink Prompt Picker", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Information)
++            Return
++        End If
++        ' Preserve the actual editing control before our picker steals focus.
++        ' This is target-agnostic: Win32 may host the editor in a child HWND.
++        Dim originalFocus As System.IntPtr = If(Native.GetForegroundWindow() = target, SelectionClipboardService.CaptureFocusedControl(target), System.IntPtr.Zero)
+         running = True
+         Try
+             Dim selection As String = ""
+@@ -114,18 +117,28 @@
+             If exiting Then Return
+             Dim prompts As System.Collections.Generic.List(Of PromptEntry) = PromptLibraryStore.Load(config)
+             AppLog.Write("picker.open; local-configured=" & config.HasLocal.ToString() & "; entries=" & prompts.Count.ToString(System.Globalization.CultureInfo.InvariantCulture))
+-            Using picker As New PickerForm(config, selection, prompts)
++            Using picker As New PickerForm(config, selection, prompts, currentSettings)
+                 activePicker = picker
+-                If picker.ShowDialog() = System.Windows.Forms.DialogResult.OK Then
+-                    Dim inserted As Boolean = Await SelectionClipboardService.InsertAsync(target, picker.ChosenPrompt)
++                Dim dialogOutcome As System.Windows.Forms.DialogResult = picker.ShowDialog()
++                picker.CaptureWindowSettings()
++                Try
++                    SettingsStore.Save(currentSettings)
++                Catch ex As System.Exception
++                    AppLog.Write("picker.geometry.save.failed", ex)
++                End Try
++                If dialogOutcome = System.Windows.Forms.DialogResult.OK Then
++                    ' Do not keep the modal WebView2 alive while restoring input
++                    ' to the external target. The selected text is immutable here.
++                    picker.Hide()
++                    Dim inserted As Boolean = Await SelectionClipboardService.InsertAsync(target, originalFocus, picker.ChosenPrompt)
+                     If Not inserted Then
+-                        System.Windows.Forms.MessageBox.Show("Die Zielanwendung konnte nicht sicher aktiviert werden oder das Einfügen war nicht möglich. Der Prompt wurde nicht absichtlich in ein anderes Fenster eingefügt.", "Prompt Picker", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Warning)
++                        System.Windows.Forms.MessageBox.Show("Die Zielanwendung konnte nicht sicher aktiviert werden oder das Einfügen war nicht möglich. Der Prompt wurde nicht absichtlich in ein anderes Fenster eingefügt.", "Red Ink Prompt Picker", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Warning)
+                     End If
+                 End If
+             End Using
+         Catch ex As System.Exception
+             AppLog.Write("picker.open.failed", ex)
+-            System.Windows.Forms.MessageBox.Show("Prompt Picker konnte nicht geöffnet werden: " & ex.Message & System.Environment.NewLine & System.Environment.NewLine & "Konfigurationsquelle: " & WordConfigReader.ResolveSource(), "Prompt Picker", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Error)
++            System.Windows.Forms.MessageBox.Show("Prompt Picker konnte nicht geöffnet werden: " & ex.Message & System.Environment.NewLine & System.Environment.NewLine & "Konfigurationsquelle: " & WordConfigReader.ResolveSource(), "Red Ink Prompt Picker", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Error)
+         Finally
+             activePicker = Nothing
+             running = False
+@@ -137,8 +150,14 @@
+         Using settings As New ShortcutSettingsForm(currentSettings)
+             If settings.ShowDialog() <> System.Windows.Forms.DialogResult.OK Then Return
+             Dim desired As PickerSettings = settings.Shortcut
++            ' Hotkey edits must not erase the persisted picker geometry.
++            desired.PickerX = currentSettings.PickerX
++            desired.PickerY = currentSettings.PickerY
++            desired.PickerClientWidth = currentSettings.PickerClientWidth
++            desired.PickerClientHeight = currentSettings.PickerClientHeight
++            desired.PreviewPercent = currentSettings.PreviewPercent
+             If Not keys.Apply(desired) Then
+-                System.Windows.Forms.MessageBox.Show("Diese Tastenkombination ist belegt oder ungültig. Der bisherige Hotkey bleibt erhalten.", "Prompt Picker", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Warning)
++                System.Windows.Forms.MessageBox.Show("Diese Tastenkombination ist belegt oder ungültig. Der bisherige Hotkey bleibt erhalten.", "Red Ink Prompt Picker", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Warning)
+                 Return
+             End If
+             Try
+@@ -148,7 +167,7 @@
+             Catch ex As System.Exception
+                 AppLog.Write("hotkey.settings.save.failed", ex)
+                 keys.Apply(currentSettings)
+-                System.Windows.Forms.MessageBox.Show("Hotkey konnte nicht gespeichert werden: " & ex.Message, "Prompt Picker", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Error)
++                System.Windows.Forms.MessageBox.Show("Hotkey konnte nicht gespeichert werden: " & ex.Message, "Red Ink Prompt Picker", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Error)
+             End Try
+         End Using
+     End Sub
+--- a/PromptPicker/PickerForm.vb
++++ b/PromptPicker/PickerForm.vb
+@@ -6,6 +6,11 @@
+     Private Const Origin As String = "https://prompt-picker.invalid/"
+     Private ReadOnly config As LibraryConfiguration
+     Private ReadOnly selectedText As String
++    Private ReadOnly windowSettings As PickerSettings
++    Private previewPercent As Integer
++    Private nativeSplitter As System.Windows.Forms.SplitContainer
++    Private commitPending As Boolean
++
+     Private ReadOnly view As New Microsoft.Web.WebView2.WinForms.WebView2 With {.Dock = System.Windows.Forms.DockStyle.Fill}
+     Private ReadOnly streams As New System.Collections.Generic.List(Of System.IO.Stream)()
+     Private entries As System.Collections.Generic.List(Of PromptEntry)
+@@ -24,13 +29,15 @@
+         End Get
+     End Property
+ 
+-    Public Sub New(settings As LibraryConfiguration, selection As String, prompts As System.Collections.Generic.List(Of PromptEntry))
++    Public Sub New(settings As LibraryConfiguration, selection As String, prompts As System.Collections.Generic.List(Of PromptEntry), pickerSettings As PickerSettings)
+         config = settings
+         selectedText = If(selection, "")
+         entries = prompts
+-        Text = "Prompt Picker"
+-        ClientSize = New System.Drawing.Size(690, 415)
+-        MinimumSize = New System.Drawing.Size(525, 320)
++        windowSettings = pickerSettings
++        previewPercent = System.Math.Clamp(pickerSettings.PreviewPercent, 32, 68)
++        Text = "Red Ink Prompt Picker"
++        ClientSize = New System.Drawing.Size(System.Math.Clamp(pickerSettings.PickerClientWidth, 600, 2400), System.Math.Clamp(pickerSettings.PickerClientHeight, 390, 1600))
++        MinimumSize = New System.Drawing.Size(600, 390)
+         StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen
+         AutoScaleMode = System.Windows.Forms.AutoScaleMode.Dpi
+         TopMost = True
+@@ -40,6 +47,73 @@
+         Icon = System.Drawing.Icon.ExtractAssociatedIcon(System.Windows.Forms.Application.ExecutablePath)
+         Controls.Add(view)
+         AddHandler KeyDown, AddressOf HandleGlobalKeys
++    End Sub
++
++    Protected Overrides Sub OnLoad(e As System.EventArgs)
++        MyBase.OnLoad(e)
++        ' Apply stored physical client pixels *after* WinForms DPI autoscaling.
++        ' Applying saved pixels in the constructor can scale them again on each
++        ' start at 125/150/200 percent and make the window grow repeatedly.
++        ClientSize = New System.Drawing.Size(System.Math.Clamp(windowSettings.PickerClientWidth, 600, 2400), System.Math.Clamp(windowSettings.PickerClientHeight, 390, 1600))
++        RestoreWindowPosition()
++    End Sub
++
++    Private Sub RestoreWindowPosition()
++        If Not windowSettings.PickerX.HasValue OrElse Not windowSettings.PickerY.HasValue Then Return
++        Dim desired As New System.Drawing.Rectangle(windowSettings.PickerX.Value, windowSettings.PickerY.Value, Width, Height)
++        Dim visibleScreen As System.Windows.Forms.Screen = Nothing
++        Dim largest As Long = 0
++        For Each display As System.Windows.Forms.Screen In System.Windows.Forms.Screen.AllScreens
++            Dim intersection As System.Drawing.Rectangle = System.Drawing.Rectangle.Intersect(desired, display.WorkingArea)
++            Dim area As Long = CLng(intersection.Width) * CLng(intersection.Height)
++            If area > largest Then
++                largest = area
++                visibleScreen = display
++            End If
++        Next
++        If visibleScreen Is Nothing OrElse largest < 80L * 80L Then Return
++        Dim limits As System.Drawing.Rectangle = visibleScreen.WorkingArea
++        ' Bring an oversized old window back inside the visible work area.
++        Dim bounds As New System.Drawing.Rectangle(desired.Location, New System.Drawing.Size(System.Math.Min(desired.Width, limits.Width), System.Math.Min(desired.Height, limits.Height)))
++        bounds.X = System.Math.Clamp(bounds.X, limits.Left, limits.Right - bounds.Width)
++        bounds.Y = System.Math.Clamp(bounds.Y, limits.Top, limits.Bottom - bounds.Height)
++        StartPosition = System.Windows.Forms.FormStartPosition.Manual
++        Bounds = bounds
++    End Sub
++
++    Public Sub CaptureWindowSettings()
++        If WindowState = System.Windows.Forms.FormWindowState.Normal Then
++            windowSettings.PickerX = Left
++            windowSettings.PickerY = Top
++            windowSettings.PickerClientWidth = ClientSize.Width
++            windowSettings.PickerClientHeight = ClientSize.Height
++        Else
++            ' RestoreBounds uses outer dimensions; keep normal client size stable.
++            windowSettings.PickerX = RestoreBounds.X
++            windowSettings.PickerY = RestoreBounds.Y
++        End If
++        windowSettings.PreviewPercent = previewPercent
++    End Sub
++
++    Private Async Sub FocusFilter()
++        Try
++            If IsDisposed OrElse Not Visible Then Return
++            If nativeMode Then
++                If fallbackSearch IsNot Nothing AndAlso fallbackSearch.CanFocus Then fallbackSearch.Focus()
++            ElseIf pageReady AndAlso view.CoreWebView2 IsNot Nothing Then
++                view.Focus()
++                ' A WebView2 HWND can be active without the HTML search input
++                ' owning focus; put keyboard input there on each activation.
++                Await view.CoreWebView2.ExecuteScriptAsync("document.getElementById('search')?.focus({preventScroll:true})")
++            End If
++        Catch ex As System.Exception
++            AppLog.Write("picker.search.focus.failed", ex)
++        End Try
++    End Sub
++
++    Protected Overrides Sub OnActivated(e As System.EventArgs)
++        MyBase.OnActivated(e)
++        If pageReady OrElse nativeMode Then BeginInvoke(New System.Action(AddressOf FocusFilter))
+     End Sub
+ 
+     Protected Overrides Async Sub OnShown(e As System.EventArgs)
+@@ -130,6 +204,7 @@
+         End If
+         pageReady = True
+         SendModel()
++        FocusFilter()
+     End Sub
+ 
+     Private Sub SendModel()
+@@ -141,7 +216,8 @@
+                 .hasSelection = selectedText.Length > 0,
+                 .canSave = selectedText.Length > 0 AndAlso PromptLibraryStore.CanSaveLocal(config),
+                 .hasLocal = config.HasLocal,
+-                .selectionLength = selectedText.Length
++                .selectionLength = selectedText.Length,
++                .previewPercent = previewPercent
+             }))
+         Catch ex As System.Exception
+             AppLog.Write("webview.model.failed", ex)
+@@ -164,7 +240,22 @@
+                         Dim idField As System.Text.Json.JsonElement
+                         If payload.TryGetProperty("id", idField) AndAlso idField.ValueKind = System.Text.Json.JsonValueKind.Number Then
+                             Dim id As Integer
+-                            If idField.TryGetInt32(id) Then CommitSelection(id)
++                            If idField.TryGetInt32(id) Then
++                                ' Avoid disposing the WebView2 during its own input/message
++                                ' dispatch (notably the second click of a double-click).
++                                If Not commitPending Then
++                                    commitPending = True
++                                    BeginInvoke(New System.Action(Sub() CommitSelection(id)))
++                                End If
++                            End If
++                        End If
++                    Case "split"
++                        Dim percentField As System.Text.Json.JsonElement
++                        Dim value As Integer
++                        If payload.TryGetProperty("previewPercent", percentField) AndAlso
++                           percentField.ValueKind = System.Text.Json.JsonValueKind.Number AndAlso
++                           percentField.TryGetInt32(value) AndAlso value >= 32 AndAlso value <= 68 Then
++                            previewPercent = value
+                         End If
+                     Case "save"
+                         Dim categoryField As System.Text.Json.JsonElement
+@@ -188,7 +279,11 @@
+     End Sub
+ 
+     Private Sub CommitSelection(id As Integer)
+-        If id < 0 OrElse id >= entries.Count Then Return
++        If id < 0 OrElse id >= entries.Count Then
++            commitPending = False
++            Return
++        End If
++        AppLog.Write("picker.selection.commit id=" & id.ToString(System.Globalization.CultureInfo.InvariantCulture))
+         result = entries(id).Prompt.Replace("\n", vbCrLf)
+         DialogResult = System.Windows.Forms.DialogResult.OK
+         Close()
+@@ -206,10 +301,10 @@
+                 PromptLibraryStore.SaveLocal(config, saveForm.PromptTitle, saveForm.PromptBody, saveForm.PromptCategory)
+                 entries = PromptLibraryStore.Load(config)
+                 If nativeMode Then RefreshFallback() Else SendModel()
+-                System.Windows.Forms.MessageBox.Show(Me, "Der Prompt wurde in der lokalen Bibliothek gespeichert.", "Prompt Picker", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Information)
++                System.Windows.Forms.MessageBox.Show(Me, "Der Prompt wurde in der lokalen Bibliothek gespeichert.", "Red Ink Prompt Picker", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Information)
+             Catch ex As System.Exception
+                 AppLog.Write("library.local.save.failed", ex)
+-                System.Windows.Forms.MessageBox.Show(Me, "Lokale Prompt Library konnte nicht geschrieben werden: " & ex.Message, "Prompt Picker", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Error)
++                System.Windows.Forms.MessageBox.Show(Me, "Lokale Prompt Library konnte nicht geschrieben werden: " & ex.Message, "Red Ink Prompt Picker", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Error)
+             End Try
+         End Using
+     End Sub
+@@ -239,8 +334,30 @@
+         root.Controls.Add(fallbackCategory, 1, 0)
+         fallbackList = New System.Windows.Forms.ListBox With {.Dock = System.Windows.Forms.DockStyle.Fill, .DisplayMember = "Title", .IntegralHeight = False}
+         fallbackPreview = New System.Windows.Forms.TextBox With {.Dock = System.Windows.Forms.DockStyle.Fill, .Multiline = True, .ReadOnly = True, .ScrollBars = System.Windows.Forms.ScrollBars.Vertical}
+-        root.Controls.Add(fallbackList, 0, 1)
+-        root.Controls.Add(fallbackPreview, 1, 1)
++        nativeSplitter = New System.Windows.Forms.SplitContainer With {
++            .Dock = System.Windows.Forms.DockStyle.Fill,
++            .Orientation = System.Windows.Forms.Orientation.Vertical,
++            .Size = New System.Drawing.Size(650, 350),
++            .SplitterWidth = 6,
++            .Panel1MinSize = 170,
++            .Panel2MinSize = 180,
++            .Margin = New System.Windows.Forms.Padding(0)
++        }
++        nativeSplitter.Panel1.Controls.Add(fallbackList)
++        nativeSplitter.Panel2.Controls.Add(fallbackPreview)
++        root.Controls.Add(nativeSplitter, 0, 1)
++        root.SetColumnSpan(nativeSplitter, 2)
++        AddHandler nativeSplitter.SplitterMoved, Sub(sender As Object, e As System.Windows.Forms.SplitterEventArgs)
++                                                     If nativeSplitter.ClientSize.Width > nativeSplitter.SplitterWidth Then
++                                                         previewPercent = System.Math.Clamp(CInt(System.Math.Round(100.0R * (nativeSplitter.ClientSize.Width - nativeSplitter.SplitterWidth - nativeSplitter.SplitterDistance) / (nativeSplitter.ClientSize.Width - nativeSplitter.SplitterWidth))), 32, 68)
++                                                     End If
++                                                 End Sub
++        AddHandler nativeSplitter.SizeChanged, Sub(sender As Object, e As System.EventArgs)
++                                                    If nativeSplitter.ClientSize.Width > nativeSplitter.Panel1MinSize + nativeSplitter.Panel2MinSize + nativeSplitter.SplitterWidth Then
++                                                        Dim available As Integer = nativeSplitter.ClientSize.Width - nativeSplitter.SplitterWidth
++                                                        nativeSplitter.SplitterDistance = System.Math.Clamp(CInt(System.Math.Round(available * (100 - previewPercent) / 100.0R)), nativeSplitter.Panel1MinSize, available - nativeSplitter.Panel2MinSize)
++                                                    End If
++                                                End Sub
+         Dim sourceText As String = If(config.HasLocal, "Lokal + Zentral", "Nur zentrale Library") & "  ·  " & entries.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) & " Prompts"
+         root.Controls.Add(New System.Windows.Forms.Label With {.Text = sourceText, .Dock = System.Windows.Forms.DockStyle.Fill, .TextAlign = System.Drawing.ContentAlignment.MiddleLeft}, 0, 2)
+ 
+@@ -256,6 +373,18 @@
+         root.SetColumnSpan(bar, 2)
+         Controls.Add(root)
+         root.BringToFront()
++        AddHandler fallbackSearch.KeyDown, Sub(sender As Object, e As System.Windows.Forms.KeyEventArgs)
++                                               If fallbackList.Items.Count = 0 Then Return
++                                               If e.KeyCode = System.Windows.Forms.Keys.Down OrElse e.KeyCode = System.Windows.Forms.Keys.Up Then
++                                                   fallbackList.SelectedIndex = System.Math.Clamp(fallbackList.SelectedIndex + If(e.KeyCode = System.Windows.Forms.Keys.Down, 1, -1), 0, fallbackList.Items.Count - 1)
++                                                   e.Handled = True
++                                                   e.SuppressKeyPress = True
++                                               ElseIf e.KeyCode = System.Windows.Forms.Keys.Enter Then
++                                                   ChooseFromFallback()
++                                                   e.Handled = True
++                                                   e.SuppressKeyPress = True
++                                               End If
++                                           End Sub
+         AddHandler fallbackSearch.TextChanged, Sub(sender As Object, e As System.EventArgs) RefreshFallbackList()
+         AddHandler fallbackCategory.SelectedIndexChanged, Sub(sender As Object, e As System.EventArgs) RefreshFallbackList()
+         AddHandler fallbackList.SelectedIndexChanged, Sub(sender As Object, e As System.EventArgs)
+@@ -282,7 +411,13 @@
+                                 End Sub
+         AddHandler fallbackSave.Click, Sub(sender As Object, e As System.EventArgs) SaveSelection()
+         RefreshFallback()
+-        fallbackSearch.Focus()
++        BeginInvoke(New System.Action(Sub()
++            If nativeSplitter IsNot Nothing AndAlso nativeSplitter.ClientSize.Width > nativeSplitter.Panel1MinSize + nativeSplitter.Panel2MinSize + nativeSplitter.SplitterWidth Then
++                Dim available As Integer = nativeSplitter.ClientSize.Width - nativeSplitter.SplitterWidth
++                nativeSplitter.SplitterDistance = System.Math.Clamp(CInt(System.Math.Round(available * (100 - previewPercent) / 100.0R)), nativeSplitter.Panel1MinSize, available - nativeSplitter.Panel2MinSize)
++            End If
++            FocusFilter()
++        End Sub))
+     End Sub
+ 
+     Private Sub ChooseFromFallback()
+--- a/PromptPicker/PickerSettings.vb
++++ b/PromptPicker/PickerSettings.vb
+@@ -1,6 +1,13 @@
+ Friend NotInheritable Class PickerSettings
+     Public Property HotkeyModifiers As UInteger = Native.MOD_CONTROL Or Native.MOD_ALT
+     Public Property HotkeyKey As Integer = CInt(System.Windows.Forms.Keys.P)
++    ' UI-only settings; never change redink.ini. Nullable coordinates keep older
++    ' settings.json files backward compatible and retain CenterScreen on first use.
++    Public Property PickerX As Integer? = Nothing
++    Public Property PickerY As Integer? = Nothing
++    Public Property PickerClientWidth As Integer = 760
++    Public Property PickerClientHeight As Integer = 540
++    Public Property PreviewPercent As Integer = 55
+ End Class
+ 
+ Friend NotInheritable Class SettingsStore
+--- a/PromptPicker/Program.vb
++++ b/PromptPicker/Program.vb
+@@ -5,7 +5,7 @@
+         Dim created As Boolean
+         Using instance As New System.Threading.Mutex(True, "Local\LawDigital.RedInk.PromptPicker", created)
+             If Not created Then
+-                System.Windows.Forms.MessageBox.Show("Prompt Picker läuft bereits.", "Prompt Picker", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Information)
++                System.Windows.Forms.MessageBox.Show("Red Ink Prompt Picker läuft bereits.", "Red Ink Prompt Picker", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Information)
+                 Return
+             End If
+             AddHandler System.AppDomain.CurrentDomain.UnhandledException,
+--- a/PromptPicker/README.md
++++ b/PromptPicker/README.md
+@@ -1,13 +1,13 @@
+ # Prompt Picker – Standalone Tray-App für Red Ink
+ 
+-Eigenständiges **VB.NET / WinForms / .NET 8 (Windows)**-Projekt im Design von Ask Inky. Verwendet denselben WebView2-NuGet-Stand und dasselbe Red-Ink-Icon wie Ask Inky. Es gibt **keine Projekt- oder Laufzeitabhängigkeit von Ask Inky, Office oder der grossen SharedLibrary**. Das Projekt ist in der mit der Erstlieferung gelieferten angepassten `Red Ink.sln` bereits eingetragen; in einer anderen Solution kann `PromptPicker.vbproj` über **Vorhandenes Projekt hinzufügen** eingefügt werden. **Folgeupdate UI:** Das Änderungs-ZIP enthält ausschliesslich neue/geänderte Dateien, die über den bisherigen `PromptPicker`-Projektordner kopiert werden. Die Solution und die Red-Ink-/Ask-Inky-Projekte bleiben unverändert.
++Eigenständiges **VB.NET / WinForms / .NET 8 (Windows)**-Projekt im Design von Ask Inky. Verwendet denselben WebView2-NuGet-Stand und dasselbe Red-Ink-Icon wie Ask Inky. Es gibt **keine Projekt- oder Laufzeitabhängigkeit von Ask Inky, Office oder der grossen SharedLibrary**. Das Projekt ist in der mit der Erstlieferung gelieferten angepassten `Red Ink.sln` bereits eingetragen; in einer anderen Solution kann `PromptPicker.vbproj` über **Vorhandenes Projekt hinzufügen** eingefügt werden. **Folgeupdate (Fenster und Einfügen):** Das Änderungs-ZIP enthält ausschliesslich neue/geänderte Dateien, die über den bisherigen `PromptPicker`-Projektordner kopiert werden. Die übrige Gen2-/Ask-Inky-Codebasis bleibt unverändert. Die Solution und die Red-Ink-/Ask-Inky-Projekte bleiben unverändert.
+ 
+ ## Start
+ 
+ 1. Bei Erstinstallation den Ordner `PromptPicker` neben `AskInky` ablegen und bei Bedarf die Solution aus der Erstlieferung verwenden. Bei diesem UI-Update die Dateien aus dem Änderungs-ZIP mit gleicher Verzeichnisstruktur im bestehenden Projekt überschreiben.
+ 2. In **Visual Studio 2022**, mit .NET-8-Windows-Desktop-Workload, `PromptPicker` als Startprojekt setzen und erstellen. NuGet stellt `Microsoft.Web.WebView2` 1.0.2903.40 wieder her.
+ 3. `PromptPicker.exe` starten; die App läuft ausschliesslich im Tray. Standardmässig öffnet **Ctrl+Alt+P** den Picker, separat von den Ask-Inky-Hotkeys Ctrl+Alt+K und Ctrl+Alt+O.
+-4. Per Rechtsklick auf das Tray-Icon: Picker öffnen, globalen Hotkey anpassen oder beenden. Die Hotkey-Einstellung liegt unter `%AppData%\Red Ink\PromptPicker\settings.json`, nicht in `redink.ini`.
++4. Per Rechtsklick auf das Tray-Icon: Picker öffnen, globalen Hotkey anpassen oder beenden. Hotkey, Picker-Fensterposition, Fenstergrösse und Breitenverhältnis der Vorschau liegen gemeinsam unter `%AppData%\Red Ink\PromptPicker\settings.json`, nicht in `redink.ini`. Bestehende `settings.json`-Dateien mit nur der Hotkey-Einstellung bleiben kompatibel. Die Fensterkoordinaten werden beim Wiederöffnen anhand der aktuell angeschlossenen Bildschirme geprüft; ein entferntes Monitorlayout führt zur zentrierten Darstellung.
+ 
+ `dotnet publish PromptPicker.vbproj -c Release -r win-x64` erstellt gemäss `.vbproj` eine Self-contained Single-file-Veröffentlichung. Eine Authenticode-Signatur und Windows-/VSTO-Kompilierung sind **nicht** Bestandteil dieser Lieferung.
+ 
+@@ -30,11 +30,11 @@
+ 
+ **Verbindliche Einschränkung:** Ist `PromptLibLocal` in `redink.ini` **nicht definiert oder leer**, ist die Speicherfunktion deaktiviert. Es wird weder ein Pfad abgefragt, eine lokale Datei angelegt, ein Verzeichnis eingerichtet noch `redink.ini` verändert. Nur wenn ein gültiger lokaler Zielpfad explizit konfiguriert ist, darf die dort bezeichnete Library bei einem vom Benutzer bestätigten Speichervorgang angelegt bzw. ergänzt werden. Niemals wird stattdessen in `PromptLib` gespeichert.
+ 
+-**Einfügen:** Der Zielprozess wird vor dem Öffnen festgehalten. **Doppelklick auf einen Prompt oder Enter** löst die Auswahl aus. Nach dem Loslassen von Tasten/Maustasten und dem Schliessen des Dialogs wird genau dieses Fenster aktiviert, sein Vordergrundstatus geprüft und der Text per Unicode-Clipboard und Win32-`SendInput` (Ctrl+V) eingefügt. Die vorherige Zwischenablage wird, soweit Windows sie bereitstellt, zurückgesetzt; falls ein anderes Programm sie zwischenzeitlich geändert hat, wird diese Änderung nicht überschrieben. Der Vorgang kann in erhöhten Anwendungen, geschützten Eingabefeldern, Remote-Desktops oder Anwendungen, die Ctrl+C/Ctrl+V abfangen, eingeschränkt sein. Das Fehlen einer nachweisbaren Selektion deaktiviert lediglich **Speichern**, nicht die Prompt-Auswahl. Beim Tray-Menü-Aufruf ist die Markierungserkennung möglicherweise nicht möglich, wenn Windows den Fokus auf die Taskleiste verschoben hat; der globale Hotkey ist dafür vorgesehen.
++**Einfügen:** Der Zielprozess und – soweit Win32 dies zugänglich macht – das fokussierte Kindfenster werden vor dem Öffnen festgehalten. **Doppelklick auf einen Prompt oder Enter** löst die Auswahl aus. Im Browser werden sowohl Doppelklick- als auch Pointer-up-Ereignisse auf denselben einmaligen Commit geleitet; die WinForms-Seite schliesst den WebView-Dialog nicht synchron innerhalb der Nachrichtenzustellung. Nach dem Loslassen von Tasten/Maustasten und dem Schliessen des Dialogs wird ausschliesslich die ursprüngliche Anwendung aktiviert, deren Fokus nach Möglichkeit wiederhergestellt und der Text per Unicode-Clipboard und Win32-`SendInput` (Ctrl+V) eingefügt. Zwischen Tasteneingabe und Zwischenablage-Wiederherstellung liegt ein Sicherheitsintervall für asynchron einfügende Editoren. Die vorherige Zwischenablage wird, soweit Windows sie bereitstellt, zurückgesetzt; falls ein anderes Programm sie zwischenzeitlich geändert hat, wird diese Änderung nicht überschrieben. Der Vorgang kann in erhöhten Anwendungen, geschützten Eingabefeldern, Remote-Desktops oder Anwendungen, die Ctrl+C/Ctrl+V abfangen, eingeschränkt sein. Das Fehlen einer nachweisbaren Selektion deaktiviert lediglich **Speichern**, nicht die Prompt-Auswahl. Beim Tray-Menü-Aufruf ist die Markierungserkennung möglicherweise nicht möglich, wenn Windows den Fokus auf die Taskleiste verschoben hat; der globale Hotkey ist dafür vorgesehen.
+ 
+ ## Oberfläche und Fallback
+ 
+-WebView2 stellt eine kompakte, kopfzeilenfreie Ansicht dar: gleich zu Beginn „Prompts durchsuchen“, daneben Kategorien, darunter eine breite Prompt-Liste und eine schmale Vorschau. Die Oberfläche verwendet 32px-SVG-Symbol-Buttons, Doppelklick/Enter und einen Speicherknopf. Der Picker und die beiden Nebenfenster sind TopMost; der native Speichern- und Hotkey-Dialog benutzt skalierungsfreundliche Zeilenlayouts und native Vektorsymbole. Die HTML-/CSS-/JS-Dateien sind eingebettete Ressourcen; es werden keine Webseiten oder Bibliotheksinhalte ans Internet übermittelt. Nachrichten aus der Webansicht werden im WinForms-Host validiert. Fehlt WebView2 oder ist es defekt, öffnet der Picker eine native WinForms-Liste mit denselben Kernfunktionen. Die Auflösung wird bei jedem Aufruf neu gelesen; nach dem Speichern wird die Liste erneut geladen.
++WebView2 stellt eine kompakte, kopfzeilenfreie Ansicht dar: gleich zu Beginn „Prompts durchsuchen“, daneben Kategorien, darunter links die Prompt-Liste und rechts die standardmässig breitere Vorschau (55 %). Ein verschiebbarer Trenner – mit Maus oder Links/Rechts bei fokussiertem Trenner – passt das Verhältnis an. Die Fensterhöhe wurde von 415 auf 540 Clientpixel (+30 %) erhöht, die Breite von 690 auf 760 Clientpixel. Beim Öffnen hat die Suche den Tastaturfokus; Auf/Ab bewegen die Auswahl und Enter fügt den markierten Prompt ein. Fensterposition, Fenstergrösse und Vorschauverhältnis werden gespeichert. Die Oberfläche verwendet 32px-SVG-Symbol-Buttons, Doppelklick/Enter und einen Speicherknopf. Der Picker und die beiden Nebenfenster sind TopMost; auch im nativen Fallback gibt es einen verschiebbaren SplitContainer. Der Hotkey-Dialog ist für längere Texte und DPI-Skalierung breiter und höher ausgelegt; der native Speichern- und Hotkey-Dialog benutzt skalierungsfreundliche Zeilenlayouts und native Vektorsymbole. Die HTML-/CSS-/JS-Dateien sind eingebettete Ressourcen; es werden keine Webseiten oder Bibliotheksinhalte ans Internet übermittelt. Nachrichten aus der Webansicht werden im WinForms-Host validiert. Fehlt WebView2 oder ist es defekt, öffnet der Picker eine native WinForms-Liste mit denselben Kernfunktionen. Die Auflösung wird bei jedem Aufruf neu gelesen; nach dem Speichern wird die Liste erneut geladen.
+ 
+ ## Architektur / QA
+ 
+@@ -46,3 +46,11 @@
+ - `QA/`: Prüfprotokoll, statische Regressionstests und Chromium-UI-Test; **kein** Windows-Build und kein echter Notepad-/Office-Einfügetest wurden hier durchgeführt
+ 
+ Quellcodebasis von Red Ink und Ask Inky wurde **nicht verändert**; nur die Solution-Datei wurde um das neue Projekt ergänzt. Es sind keine Änderungen an `SharedMethods.DialogOwner.vb` erforderlich: Es gibt keinen Cross-Process-Dialog-Owner; die WinForms-Dialoge verwenden nur eigene Same-Process-Formulare.
++
++## Regressionstests für Windows
++
++Diese Lieferung wurde statisch geprüft und die eingebettete HTML-Oberfläche in Chromium getestet. **Die WinForms-WebView2-Integration, tatsächliche .NET-Windows-Kompilierung und Notepad-Einfügung wurden in dieser Linux-Umgebung nicht ausgeführt.** Für eine lokale Gegenprobe: Notepad öffnen, Cursor in die Texteingabe setzen, Picker per Hotkey öffnen. Einmal per Doppelklick einfügen; danach erneut mit Klick auf einen Eintrag und Enter; zuletzt mit Suchfokus Auf/Ab und Enter. Anschliessend Grösse, Position und Trenner ändern, schliessen, erneut öffnen und die Wiederherstellung prüfen. In der Hotkey-Konfiguration auch eine 150–200-%-DPI-Skalierung testen.
++
++Bei nicht erfolgreicher Einfügung bitte die relevante Zeitspanne aus `%AppData%\Red Ink\PromptPicker\promptpicker.log` prüfen bzw. bereitstellen. `picker.selection.commit` belegt den Empfang der Auswahl im Host; `insertion.activate.attempt`, `insertion.dispatch` und `insertion.keys.dispatched` unterscheiden Aktivierungs-, Fokus- und Eingabeschritte. Letztere Meldung bestätigt die an Windows übergebenen Tastenereignisse **nicht** die tatsächliche Übernahme des Textes durch die Zielanwendung.
++
++Die Ordner und Regeln `PromptLib` und `PromptLibLocal` sind unverändert: `redink.ini` wird nie geschrieben; ohne konfigurierten lokalen Pfad wird nichts angelegt oder gespeichert.
+--- a/PromptPicker/SelectionClipboardService.vb
++++ b/PromptPicker/SelectionClipboardService.vb
+@@ -65,6 +65,41 @@
+         End Try
+     End Function
+ 
++    Public Shared Function CaptureFocusedControl(window As System.IntPtr) As System.IntPtr
++        If window = System.IntPtr.Zero OrElse Native.GetForegroundWindow() <> window Then Return System.IntPtr.Zero
++        Dim processId As UInteger
++        Dim threadId As UInteger = Native.GetWindowThreadProcessId(window, processId)
++        If threadId = 0UI Then Return System.IntPtr.Zero
++        Dim info As New Native.GuiThreadInfo With {.Size = CUInt(System.Runtime.InteropServices.Marshal.SizeOf(Of Native.GuiThreadInfo)())}
++        If Not Native.GetGUIThreadInfo(threadId, info) Then Return System.IntPtr.Zero
++        If info.Focus = window OrElse (info.Focus <> System.IntPtr.Zero AndAlso Native.IsChild(window, info.Focus)) Then Return info.Focus
++        Return System.IntPtr.Zero
++    End Function
++
++    Private Shared Sub RestoreFocusedControl(window As System.IntPtr, originalFocus As System.IntPtr)
++        If originalFocus = System.IntPtr.Zero OrElse Not Native.IsWindow(originalFocus) OrElse
++           Not (originalFocus = window OrElse Native.IsChild(window, originalFocus)) OrElse
++           Native.GetForegroundWindow() <> window Then Return
++        If CaptureFocusedControl(window) = originalFocus Then Return
++        Dim focusProcess As UInteger
++        Dim focusThread As UInteger = Native.GetWindowThreadProcessId(originalFocus, focusProcess)
++        Dim ownThread As UInteger = Native.GetCurrentThreadId()
++        If focusThread = 0UI OrElse focusThread = ownThread Then Return
++        Dim attached As Boolean = False
++        Try
++            attached = Native.AttachThreadInput(ownThread, focusThread, True)
++            If Not attached Then
++                AppLog.Write("insertion.focus.attach.failed " & System.Runtime.InteropServices.Marshal.GetLastWin32Error().ToString(System.Globalization.CultureInfo.InvariantCulture))
++                Return
++            End If
++            If Native.GetForegroundWindow() = window Then Native.SetFocus(originalFocus)
++        Catch ex As System.Exception
++            AppLog.Write("insertion.focus.restore.failed", ex)
++        Finally
++            If attached Then Native.AttachThreadInput(ownThread, focusThread, False)
++        End Try
++    End Sub
++
+     Private Shared Function KeyboardEvent(virtualKey As UShort, flags As UInteger) As Native.InputRecord
+         Return New Native.InputRecord With {
+             .InputType = Native.INPUT_KEYBOARD,
+@@ -88,7 +123,7 @@
+         Return False
+     End Function
+ 
+-    Public Shared Async Function InsertAsync(window As System.IntPtr, content As String) As System.Threading.Tasks.Task(Of Boolean)
++    Public Shared Async Function InsertAsync(window As System.IntPtr, originalFocus As System.IntPtr, content As String) As System.Threading.Tasks.Task(Of Boolean)
+         If window = System.IntPtr.Zero OrElse Not Native.IsWindow(window) OrElse System.String.IsNullOrEmpty(content) Then Return False
+         ' A WebView2 double-click can complete selection while the mouse button is
+         ' still held. Do not close the picker and paste under a pending mouse-up:
+@@ -97,12 +132,16 @@
+             AppLog.Write("insertion.aborted.input-not-released")
+             Return False
+         End If
+-        ' The picker is already closed. Do not send input unless the original target
+-        ' actually has foreground focus. No arbitrary "last window" fallback.
+-        Native.SetForegroundWindow(window)
+-        For i As Integer = 0 To 8
++        ' Let the host process the WebView2 mouse-up and modal teardown before
++        ' restoring foreground. Otherwise a queued click can steal it again.
++        Await System.Threading.Tasks.Task.Delay(120)
++        ' Only the originally recorded external target is eligible for insertion.
++        ' A foreground request can be refused by Windows; retry and verify.
++        For i As Integer = 0 To 10
+             If Native.GetForegroundWindow() = window Then Exit For
+-            Await System.Threading.Tasks.Task.Delay(65)
++            Dim activated As Boolean = Native.SetForegroundWindow(window)
++            AppLog.Write("insertion.activate.attempt=" & i.ToString(System.Globalization.CultureInfo.InvariantCulture) & ";accepted=" & activated.ToString())
++            Await System.Threading.Tasks.Task.Delay(95)
+         Next
+         If Native.GetForegroundWindow() <> window Then
+             AppLog.Write("insertion.aborted.foreground-not-restored")
+@@ -111,7 +150,8 @@
+ 
+         ' A short settling interval covers Windows focus activation after closing a
+         ' mouse-driven WebView2 dialog. Recheck the exact target before injecting.
+-        Await System.Threading.Tasks.Task.Delay(85)
++        RestoreFocusedControl(window, originalFocus)
++        Await System.Threading.Tasks.Task.Delay(180)
+         If Native.GetForegroundWindow() <> window Then
+             AppLog.Write("insertion.aborted.foreground-lost-after-settle")
+             Return False
+@@ -130,11 +170,17 @@
+             ' independent of which control previously owned the WinForms focus,
+             ' unlike SendKeys.Send, which can silently target the closed picker.
+             ' If Windows/UIPI refuses the injection, return False (not success).
++            Dim foregroundFocus As System.IntPtr = CaptureFocusedControl(window)
++            AppLog.Write("insertion.dispatch; original-focus-captured=" & (originalFocus <> System.IntPtr.Zero).ToString() & ";focus-restored=" & (originalFocus <> System.IntPtr.Zero AndAlso foregroundFocus = originalFocus).ToString() & ";target-foreground=" & (Native.GetForegroundWindow() = window).ToString())
+             If Not SendPaste() Then
+                 AppLog.Write("insertion.sendinput.failed " & System.Runtime.InteropServices.Marshal.GetLastWin32Error().ToString(System.Globalization.CultureInfo.InvariantCulture))
+                 Return False
+             End If
+-            Await System.Threading.Tasks.Task.Delay(750)
++            ' WinUI/Chromium editors may read clipboard text asynchronously after
++            ' Ctrl+V has been injected. Do not restore the previous clipboard
++            ' immediately after SendInput reports that the events were queued.
++            Await System.Threading.Tasks.Task.Delay(1600)
++            AppLog.Write("insertion.keys.dispatched")
+             Return True
+         Catch ex As System.Exception
+             AppLog.Write("insertion.failed", ex)
+--- a/PromptPicker/ShortcutSettingsForm.vb
++++ b/PromptPicker/ShortcutSettingsForm.vb
+@@ -32,8 +32,9 @@
+ 
+     Public Sub New(current As PickerSettings)
+         Text = "Tastenkombination ändern"
+-        ClientSize = New System.Drawing.Size(445, 188)
++        ClientSize = New System.Drawing.Size(515, 218)
+         AutoScaleMode = System.Windows.Forms.AutoScaleMode.Dpi
++        MinimumSize = New System.Drawing.Size(515, 230)
+         FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedDialog
+         StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen
+         MaximizeBox = False
+@@ -47,11 +48,12 @@
+         Dim layout As New System.Windows.Forms.TableLayoutPanel With {
+             .Dock = System.Windows.Forms.DockStyle.Fill,
+             .Padding = New System.Windows.Forms.Padding(17, 15, 17, 12),
+-            .ColumnCount = 1, .RowCount = 4
++            .ColumnCount = 1, .RowCount = 5
+         }
+         layout.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
+         layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+         layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 47.0F))
++        layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+         layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
+         layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 45.0F))
+         Controls.Add(layout)
+@@ -85,7 +87,8 @@
+         Dim hint As New System.Windows.Forms.Label With {
+             .Text = "Mindestens Ctrl oder Alt auswählen.",
+             .AutoSize = True, .ForeColor = PickerUi.Muted,
+-            .Margin = New System.Windows.Forms.Padding(0, 7, 0, 0)
++            .Margin = New System.Windows.Forms.Padding(0, 8, 0, 0),
++            .MaximumSize = New System.Drawing.Size(465, 0)
+         }
+         layout.Controls.Add(hint, 0, 2)
+ 
+@@ -100,7 +103,7 @@
+         cancel.DialogResult = System.Windows.Forms.DialogResult.Cancel
+         buttonRow.Controls.Add(apply)
+         buttonRow.Controls.Add(cancel)
+-        layout.Controls.Add(buttonRow, 0, 3)
++        layout.Controls.Add(buttonRow, 0, 4)
+ 
+         For code As Integer = 65 To 90
+             keyInput.Items.Add(New KeyOption(code))
+--- a/PromptPicker/Web/picker.css
++++ b/PromptPicker/Web/picker.css
+@@ -1,6 +1,6 @@
+ /* Uses Ask Inky's restrained Office-like surface, 32 px SVG action buttons and
+    compact cards. The list is intentionally given most of the usable space. */
+-:root {color-scheme:light;--accent:#b91312;--accentHover:#9a0f0e;--accentSoft:#fff0ef;--ink:#323130;--muted:#6d6a67;--stroke:#edebe9;--surface:#fff;--bg:#f5f5f6;--radius:9px;}
++:root {color-scheme:light;--accent:#b91312;--accentHover:#9a0f0e;--accentSoft:#fff0ef;--ink:#323130;--muted:#6d6a67;--stroke:#edebe9;--surface:#fff;--bg:#f5f5f6;--radius:9px;--list-percent:45%;}
+ * {box-sizing:border-box;}
+ [hidden] {display:none !important;}
+ html,body {width:100%;height:100%;min-width:0;margin:0;overflow:hidden;}
+@@ -20,9 +20,14 @@
+ .iconButton {width:33px;height:33px;min-width:33px;display:inline-flex;align-items:center;justify-content:center;padding:7px;color:var(--muted);border:1px solid var(--stroke);background:#fff;border-radius:7px;}
+ .iconButton:hover:not(:disabled) {color:var(--accent);background:var(--accentSoft);border-color:#e8cbc8;}
+ button svg {width:18px;height:18px;flex:none;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;pointer-events:none;}
+-.workspace {min-height:0;flex:1;display:grid;grid-template-columns:minmax(220px,63%) minmax(0,37%);background:var(--surface);border:1px solid var(--stroke);border-radius:var(--radius);overflow:hidden;box-shadow:0 1px 4px #23232608;}
++.workspace {min-height:0;flex:1;display:grid;grid-template-columns:minmax(0,var(--list-percent)) 7px minmax(0,1fr);background:var(--surface);border:1px solid var(--stroke);border-radius:var(--radius);overflow:hidden;box-shadow:0 1px 4px #23232608;}
+ .listPane,.previewPane {min-width:0;min-height:0;display:flex;flex-direction:column;}
+-.listPane {border-right:1px solid var(--stroke);}
++.listPane {border-right:0;}
++.splitter {position:relative;background:var(--stroke);cursor:col-resize;touch-action:none;outline:0;}
++.splitter::after {content:"";position:absolute;left:2px;top:50%;transform:translateY(-50%);width:3px;height:36px;border-radius:3px;background:#c5c0bc;}
++.splitter:hover,.splitter:focus-visible {background:#eadbd8;}
++.splitter:focus-visible::after {background:var(--accent);}
++
+ .paneHeading {height:30px;min-height:30px;padding:0 11px;display:flex;align-items:center;justify-content:space-between;gap:7px;border-bottom:1px solid var(--stroke);font-size:11px;font-weight:600;color:var(--muted);}
+ .count {font-variant-numeric:tabular-nums;font-size:11px;color:#857f7c;}
+ .results {min-height:0;overflow-y:auto;flex:1;padding:3px;scrollbar-gutter:stable;}
+@@ -49,4 +54,4 @@
+ .primary {display:inline-flex;align-items:center;justify-content:center;gap:7px;height:33px;padding:0 13px;background:var(--accent);border:1px solid var(--accent);border-radius:7px;color:#fff;font-weight:600;}
+ .primary:hover:not(:disabled) {background:var(--accentHover);}
+ .primary svg {width:16px;height:16px;}
+-@media(max-width:560px) {.workspace{grid-template-columns:minmax(0,61%) minmax(0,39%)}.tag {display:none}.previewBody{padding:9px}.shell{padding:8px;gap:7px}select{width:128px}.selectionStatus {font-size:10px}}
++@media(max-width:560px) {.tag {display:none}.previewBody{padding:9px}.shell{padding:8px;gap:7px}select{width:128px}.selectionStatus {font-size:10px}}
+--- a/PromptPicker/Web/picker.html
++++ b/PromptPicker/Web/picker.html
+@@ -4,7 +4,7 @@
+   <meta charset="utf-8">
+   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'none'; connect-src 'none'; font-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'">
+   <meta name="viewport" content="width=device-width, initial-scale=1">
+-  <title>Prompt Picker</title>
++  <title>Red Ink Prompt Picker</title>
+   <link rel="stylesheet" href="picker.css">
+   <script src="picker.js" defer></script>
+ </head>
+@@ -26,6 +26,7 @@
+         <div class="results" id="results" role="listbox" aria-label="Verfügbare Prompts"></div>
+         <div class="empty" id="empty" hidden>Keine passenden Prompts.</div>
+       </div>
++      <div id="splitter" class="splitter" role="separator" aria-label="Breite der Vorschau anpassen" aria-controls="results previewText" aria-orientation="vertical" aria-valuenow="55" aria-valuemin="32" aria-valuemax="68" tabindex="0" title="Ziehen, um die Breite der Vorschau anzupassen"></div>
+       <div class="previewPane">
+         <div class="paneHeading"><span>Vorschau</span><span class="previewSource" id="previewSource"></span></div>
+         <div class="previewBody">
+--- a/PromptPicker/Web/picker.js
++++ b/PromptPicker/Web/picker.js
+@@ -13,6 +13,55 @@
+   const insert = el("insert");
+   const saveSelection = el("saveSelection");
+   const chosen = () => visible.find(p => p.Id === selectedId) || null;
++  const workspace = el("workspace") || document.querySelector(".workspace");
++  const splitter = el("splitter");
++  let previewPercent = 55;
++  let movingDivider = false;
++  let lastPointer = null;
++  const within = (number, lower, upper) => Math.max(lower, Math.min(upper, number));
++
++  function resizePanels(value, report = false) {
++    const available = Math.max(1, workspace.clientWidth - splitter.offsetWidth);
++    // At narrow widths keep a minimum usable region for both columns.
++    const minList = Math.min(195, available * .42);
++    const minPreview = Math.min(230, available * .45);
++    const minPreviewPercent = Math.max(32, Math.ceil(100 * minPreview / available));
++    const maxPreviewPercent = Math.min(68, Math.floor(100 * (available - minList) / available));
++    previewPercent = within(Math.round(value), minPreviewPercent, maxPreviewPercent);
++    const left = available * (100 - previewPercent) / 100;
++    workspace.style.gridTemplateColumns = `${left}px ${splitter.offsetWidth}px minmax(0, 1fr)`;
++    splitter.setAttribute("aria-valuenow", String(previewPercent));
++    splitter.setAttribute("aria-valuetext", `Vorschau ${previewPercent} Prozent`);
++    if (report) post({type:"split",previewPercent});
++  }
++  splitter.addEventListener("pointerdown", e => {
++    if (e.button !== 0) return;
++    movingDivider = true;
++    splitter.setPointerCapture(e.pointerId);
++    e.preventDefault();
++  });
++  splitter.addEventListener("pointermove", e => {
++    if (!movingDivider) return;
++    const bounds = workspace.getBoundingClientRect();
++    const leftPercent = 100 * (e.clientX - bounds.left - splitter.offsetWidth / 2) / (workspace.clientWidth - splitter.offsetWidth);
++    resizePanels(100 - leftPercent);
++  });
++  function endResize() {
++    if (!movingDivider) return;
++    movingDivider = false;
++    resizePanels(previewPercent, true);
++  }
++  splitter.addEventListener("pointerup", endResize);
++  splitter.addEventListener("pointercancel", endResize);
++  splitter.addEventListener("lostpointercapture", endResize);
++  splitter.addEventListener("keydown", e => {
++    if (!["ArrowLeft","ArrowRight","Home","End"].includes(e.key)) return;
++    e.preventDefault();
++    const value = e.key === "Home" ? 68 : e.key === "End" ? 32 : previewPercent + (e.key === "ArrowLeft" ? 2 : -2);
++    resizePanels(value, true);
++  });
++  new ResizeObserver(() => resizePanels(previewPercent)).observe(workspace);
++
+ 
+   function categories() {
+     const previous = category.value;
+@@ -89,9 +138,24 @@
+     insert.disabled = true;
+     post({type: "select", id: p.Id});
+   }
+-  // Delegation keeps activation bound to the actual clicked row, even after
+-  // filtering/re-rendering. click.detail >= 2 handles browsers that fail to
+-  // emit dblclick in an embedded host; committing prevents duplicate messages.
++  // WebView2 hosts may produce click/dblclick with different detail semantics.
++  // Pointer-up independently recognizes two presses on the same row, without
++  // assuming a native dblclick event is delivered to the page. All routes
++  // converge on a single guarded commit message.
++  results.addEventListener("pointerup", e => {
++    const row = e.target.closest(".item");
++    if (!row || !results.contains(row) || committing || e.button !== 0) return;
++    const id = Number(row.dataset.id);
++    const t = performance.now();
++    choose(id);
++    if (lastPointer && lastPointer.id === id && (t - lastPointer.time) < 550 &&
++        Math.abs(e.clientX - lastPointer.x) < 9 && Math.abs(e.clientY - lastPointer.y) < 9) {
++      lastPointer = null;
++      commit();
++    } else {
++      lastPointer = {id, time:t, x:e.clientX, y:e.clientY};
++    }
++  });
+   results.addEventListener("click", e => {
+     const row = e.target.closest(".item");
+     if (!row || !results.contains(row) || committing) return;
+@@ -109,14 +173,21 @@
+     if (!model || model.type !== "model" || !Array.isArray(model.items)) return;
+     prompts = model.items;
+     committing = false;
++    if (Number.isInteger(model.previewPercent)) resizePanels(model.previewPercent);
+     if (selectedId === null || !prompts.some(p => p.Id === selectedId)) selectedId = prompts.length ? prompts[0].Id : null;
+     saveSelection.disabled = !model.canSave;
+     saveSelection.title = !model.hasLocal ? "Lokales Speichern ist nicht eingerichtet" : !model.hasSelection ? "Zuerst Text in der Zielanwendung markieren" : model.canSave ? "Markierung als Prompt speichern" : "Lokale Bibliothek ist nicht beschreibbar";
+     el("saveHint").textContent = !model.hasLocal ? "Lokales Speichern nicht verfügbar" : !model.hasSelection ? "Text markieren, um einen Prompt zu speichern" : model.canSave ? "Markierung als Prompt speichern" : "Lokales Speichern nicht verfügbar";
+     categories();
+     paint();
+-    search.focus();
+-  });
++    focusSearch();
++  });
++  function focusSearch() {
++    if (!movingDivider) search.focus({preventScroll:true});
++  }
++  // WebView2's top-level HWND can be active while no DOM input owns the focus.
++  // Reapply input focus whenever the picker itself regains keyboard activation.
++  window.addEventListener("focus", () => requestAnimationFrame(focusSearch));
+   search.addEventListener("input", paint);
+   category.addEventListener("change", paint);
+   insert.addEventListener("click", commit);
+@@ -124,14 +195,25 @@
+   el("close").addEventListener("click", () => post({type:"close"}));
+   saveSelection.addEventListener("click", () => { if (!saveSelection.disabled) post({type:"save", category:category.value}); });
+   document.addEventListener("keydown", e => {
+-    if (e.key === "Escape") {e.preventDefault(); post({type:"close"});}
+-    if (e.ctrlKey && e.key.toLowerCase() === "k") {e.preventDefault(); search.focus(); search.select();}
+-    if (e.key === "Enter" && !e.shiftKey && document.activeElement !== category) {e.preventDefault(); commit();}
+-    if ((e.key === "ArrowDown" || e.key === "ArrowUp") && (document.activeElement === search || results.contains(document.activeElement))) {
++    if (e.key === "Escape") {e.preventDefault(); post({type:"close"}); return;}
++    if (e.ctrlKey && e.key.toLowerCase() === "k") {e.preventDefault(); search.focus(); search.select(); return;}
++    if ((e.key === "ArrowDown" || e.key === "ArrowUp") && !e.altKey && !e.ctrlKey && !e.metaKey &&
++        document.activeElement !== category && document.activeElement !== splitter) {
+       e.preventDefault();
++      if (!visible.length) return;
+       const position = visible.findIndex(p => p.Id === selectedId);
+-      const next = visible[position + (e.key === "ArrowDown" ? 1 : -1)];
+-      if (next) {choose(next.Id); results.querySelector(`[data-id="${next.Id}"]`)?.scrollIntoView({block:"nearest"});}
++      const delta = e.key === "ArrowDown" ? 1 : -1;
++      const next = visible[within(position + delta, 0, visible.length - 1)];
++      if (next) {
++        choose(next.Id);
++        results.querySelector(`[data-id="${next.Id}"]`)?.scrollIntoView({block:"nearest"});
++      }
++      return;
++    }
++    if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey &&
++        document.activeElement !== category && document.activeElement !== splitter &&
++        document.activeElement !== saveSelection && document.activeElement !== el("cancel") && document.activeElement !== el("close")) {
++      e.preventDefault(); commit();
+     }
+   });
+ })();
+--- a/PromptPicker/QA/run_static_checks.py
++++ b/PromptPicker/QA/run_static_checks.py
+@@ -62,18 +62,38 @@
+ save=(root/'SavePromptForm.vb').read_text()
+ shortcut=(root/'ShortcutSettingsForm.vb').read_text()
+ ui=(root/'PickerUi.vb').read_text()
+-verify('ClientSize = New System.Drawing.Size(690, 415)' in picker, 'Compact main picker dimensions')
++settings=(root/'PickerSettings.vb').read_text()
++verify('PickerClientWidth As Integer = 760' in settings and 'PickerClientHeight As Integer = 540' in settings, '30 percent taller default picker and wider preview')
++verify('ClientSize = New System.Drawing.Size(System.Math.Clamp(pickerSettings.PickerClientWidth' in picker, 'Picker restores saved client size')
++verify('Text = "Red Ink Prompt Picker"' in picker and '<title>Red Ink Prompt Picker</title>' in html, 'Dialog/window title')
++verify('RestoreWindowPosition()' in picker and 'Screen.AllScreens' in picker and 'visibleScreen.WorkingArea' in picker, 'Window bounds restored only on a visible monitor')
++verify('Protected Overrides Sub OnLoad' in picker and picker.index('RestoreWindowPosition()', picker.index('Protected Overrides Sub OnLoad')) > picker.index('ClientSize = New System.Drawing.Size(', picker.index('Protected Overrides Sub OnLoad')), 'DPI scaling finished before persisted size and position reapplied')
++verify('PickerX As Integer?' in settings and 'PickerY As Integer?' in settings and 'CaptureWindowSettings()' in picker, 'Backward-compatible persisted coordinates and geometry capture')
++verify('SettingsStore.Save(currentSettings)' in context and 'desired.PreviewPercent = currentSettings.PreviewPercent' in context, 'Window and splitter geometry persists across hotkey edits')
++verify('PreviewPercent As Integer = 55' in settings and 'value >= 32 AndAlso value <= 68' in picker, 'Preview default 55 percent; untrusted split messages validated')
++verify('System.Windows.Forms.SplitContainer' in picker and 'nativeSplitter.SplitterDistance' in picker, 'Native fallback has adjustable split width')
++
+ verify('TopMost = True' in picker and 'TopMost = True' in save and 'TopMost = True' in shortcut, 'All picker dialogs TopMost')
+ verify('<header' not in html and 'class="intro"' not in html and 'logo.png' not in html, 'No logo/header/intro in browser picker')
+ verify('placeholder="Prompts durchsuchen"' in html, 'Search begins picker page')
+-verify('grid-template-columns:minmax(220px,63%) minmax(0,37%)' in css, 'Prompt list receives majority of horizontal space')
+-verify('results.addEventListener("dblclick"' in js and 'e.detail >= 2' in js and 'if (!p || committing) return;' in js, 'Double click sends once and guards duplicates')
++verify('id="splitter"' in html and 'role="separator"' in html and 'gridTemplateColumns' in js, 'Browser preview separator is mouse and keyboard adjustable')
++verify('resizePanels(model.previewPercent)' in js and 'post({type:"split",previewPercent})' in js, 'Preview width round-trips to host settings')
++verify('window.addEventListener("focus"' in js and 'view.CoreWebView2.ExecuteScriptAsync' in picker, 'Search focus restored on browser or host activation')
++verify('e.key === "ArrowDown"' in js and 'document.activeElement !== category' in js and 'e.preventDefault(); commit();' in js, 'Up/down navigation from search and Enter commit')
++
++verify('results.addEventListener("pointerup"' in js and 'results.addEventListener("dblclick"' in js and 'if (!p || committing) return;' in js, 'WebView2 pointer/double-click converges on one commit')
++verify('BeginInvoke(New System.Action(Sub() CommitSelection(id)))' in picker and 'picker.selection.commit' in picker, 'Deferred host commit avoids disposing WebView2 mid-click')
++verify('CaptureFocusedControl(target)' in context and 'RestoreFocusedControl(window, originalFocus)' in services, 'External editor focus captured and restored generically')
++verify('insertion.dispatch;' in services and 'insertion.activate.attempt=' in services and 'insertion.keys.dispatched' in services, 'Insertion stages logged for Windows runtime diagnosis')
++
+ verify('WaitUntilReleasedAsync(True)' in services and 'SendPaste()' in services and 'Native.SendInput(' in services, 'Mouse-up guarded Win32 paste injection')
+ verify('Public Mouse As MouseRecord' in native and 'Public Keyboard As KeyboardRecord' in native and 'Public Function SendInput' in native, 'INPUT union correct for mouse-size x64 ABI')
+ verify('System.Windows.Forms.SendKeys.Send("^v")' not in services, 'No focus-sensitive SendKeys paste')
+ verify('System.Windows.Forms.TableLayoutPanel' in save and 'System.Windows.Forms.SizeType.AutoSize' in save, 'DPI-resilient save dialog rows')
+ verify('PromptLibLocal' not in save and 'redink.ini' not in save, 'Save dialog contains no internal settings names')
+ verify('KeyOption' in shortcut and 'TopMost = True' in shortcut, 'Hotkey dialog: readable key names and same window behavior')
++verify('ClientSize = New System.Drawing.Size(515, 218)' in shortcut and '.RowCount = 5' in shortcut and '.MaximumSize = New System.Drawing.Size(465, 0)' in shortcut, 'Hotkey dialog expanded with unconstrained hint row')
++
+ verify('PickerUi.ActionButton' in save and 'PickerUi.ActionButton' in shortcut and 'PickerUi.ActionButton' in picker, 'Consistent vector-icon action buttons')
+ verify('System.Drawing.Bitmap' in ui and 'System.Drawing.Graphics' in ui, 'Native line icons require no icon font')
+ verify('WriteAllText' not in picker and 'WriteAllText' not in save and 'WriteAllText' not in shortcut, 'UI never writes INI or library files')
+--- a/PromptPicker/QA/test_browser_ui.py
++++ b/PromptPicker/QA/test_browser_ui.py
+@@ -1,70 +1,130 @@
+ #!/usr/bin/env python3
+-"""Chromium/Playwright contract checks for the embedded picker page.
+-
+-Only tests WebView-to-host messages and responsive layout. Does not claim
+-Windows foreground activation, native forms, WebView2 or paste success.
+-"""
++"""Embedded browser UI regression tests (Chromium simulation, not Windows/WebView2)."""
++import os
+ import pathlib
+-import os
+ import shutil
+ from playwright.sync_api import sync_playwright
+ 
+ root = pathlib.Path(__file__).resolve().parents[1]
+ with sync_playwright() as pw:
+-    browser_path = shutil.which('chromium') or shutil.which('google-chrome')
+-    launch = {'headless':True, 'args':['--no-sandbox']}
+-    if browser_path:
+-        launch['executable_path'] = browser_path
++    executable = shutil.which('chromium') or shutil.which('google-chrome')
++    launch = {'headless': True, 'args': ['--no-sandbox']}
++    if executable:
++        launch['executable_path'] = executable
+     browser = pw.chromium.launch(**launch)
+-    page = browser.new_page(viewport={'width':690,'height':415}, device_scale_factor=1, bypass_csp=True)
+-    html = (root / 'Web' / 'picker.html').read_text(encoding='utf-8')
+-    page.set_content(html, wait_until='load')
+-    page.add_style_tag(content=(root / 'Web' / 'picker.css').read_text(encoding='utf-8'))
+-    page.evaluate('''
+-      window.__posted=[];
+-      window.chrome={webview:{
++    page = browser.new_page(viewport={'width': 760, 'height': 540}, bypass_csp=True)
++    page.set_content((root / 'Web/picker.html').read_text(encoding='utf-8'))
++    page.add_style_tag(content=(root / 'Web/picker.css').read_text(encoding='utf-8'))
++    page.evaluate('''() => {
++      window.__posted = [];
++      window.chrome = {webview:{
+         postMessage: value => window.__posted.push(value),
+-        addEventListener: (name,cb) => { if (name === 'message') window.__onmodel=cb; }
++        addEventListener: (name, cb) => { if (name === 'message') window.__onmodel = cb; }
+       }};
+-    ''')
+-    page.add_script_tag(content=(root / 'Web' / 'picker.js').read_text(encoding='utf-8'))
+-    assert page.locator('#search').is_visible()
++    }''')
++    page.add_script_tag(content=(root / 'Web/picker.js').read_text(encoding='utf-8'))
++    fixtures = [
++      {'Id':0,'Title':'Textkorrektur','Prompt':'Text korrigieren','Category':'Allgemein','Source':'central'},
++      {'Id':1,'Title':'Brief (local)','Prompt':'Freundlicher Brief','Category':'Korrespondenz','Source':'local'},
++      {'Id':2,'Title':'Abschluss','Prompt':'Fazit formulieren','Category':'Allgemein','Source':'central'},
++    ]
++    def model(selection=False, local=True, preview=55):
++        page.evaluate('arg => window.__onmodel({data:arg})', {
++            'type':'model','items':fixtures,'hasSelection':selection,
++            'hasLocal':local,'canSave':selection and local,'previewPercent':preview,
++        })
++    def posted():
++        return page.evaluate('window.__posted')
++    def clear():
++        page.evaluate('window.__posted = []')
++
++    model(False, False)
++    assert page.title() == 'Red Ink Prompt Picker'
++    assert page.locator('header, .intro, .brand').count() == 0
++    assert page.locator('#search').evaluate('(el) => document.activeElement === el')
+     assert page.locator('#search').get_attribute('placeholder') == 'Prompts durchsuchen'
+-    assert page.locator('header, .intro, .brand, .headerPill').count() == 0
+-    fixtures=[{'Id':0,'Title':'Textkorrektur','Prompt':'Text korrigieren','Category':'Allgemein','Source':'central'},
+-              {'Id':1,'Title':'Brief (local)','Prompt':'Freundlicher Brief','Category':'Korrespondenz','Source':'local'},
+-              {'Id':2,'Title':'Abschluss','Prompt':'Fazit formulieren','Category':'Allgemein','Source':'central'}]
+-    def model(can_save,has_local=True):
+-        page.evaluate('arg => window.__onmodel({data:arg})', {'type':'model','items':fixtures,'hasSelection':can_save,'hasLocal':has_local,'canSave':can_save})
+-    model(False,False)
+-    assert not page.locator('#saveSelection').is_enabled()
++    assert page.locator('#saveSelection').is_disabled()
+     assert page.locator('.item').count() == 3
+     assert page.locator('#saveHint').evaluate('(el) => el.getBoundingClientRect().width <= 1')
+-    page.locator('.item').nth(1).dblclick(delay=85)
+-    posted=page.evaluate('window.__posted')
+-    assert posted == [{'type':'select','id':1}], f'Double click posted wrong payload: {posted}'
+-    model(True)
++
++    # Arrow keys move the selection while typing focus stays inside the filter.
++    assert page.locator('#previewTitle').inner_text() == 'Textkorrektur'
++    page.locator('#search').press('ArrowDown')
++    assert page.locator('#search').evaluate('(el) => document.activeElement === el')
++    assert page.locator('#previewTitle').inner_text() == 'Brief (local)'
++    page.locator('#search').press('ArrowUp')
++    assert page.locator('#previewTitle').inner_text() == 'Textkorrektur'
++    page.locator('#search').press('ArrowDown')
++    page.locator('#search').press('Enter')
++    assert posted() == [{'type':'select','id':1}], posted()
++    clear()
++    model()
++
++    # Pointer double click commits once, including underlying pointerup handling.
++    page.locator('.item').nth(2).dblclick(delay=105)
++    assert posted() == [{'type':'select','id':2}], posted()
++    clear()
++    model()
++
++    # Clicking once then Enter inserts the selected row; single click never inserts.
++    page.locator('.item').nth(1).click()
++    assert posted() == []
++    assert page.locator('#previewTitle').inner_text() == 'Brief (local)'
++    page.locator('#search').focus()
++    page.locator('#search').press('Enter')
++    assert posted() == [{'type':'select','id':1}], posted()
++    clear()
++
++    model(selection=True)
+     page.locator('#search').fill('korrekt')
+     assert page.locator('.item').count() == 1
+     page.locator('#search').press('Enter')
+-    posted=page.evaluate('window.__posted')
+-    assert posted[-1] == {'type':'select','id':0}, posted
+-    assert len(posted) == 2, posted
+-    model(True)
++    assert posted() == [{'type':'select','id':0}], posted()
++    clear()
++    model(selection=True)
+     page.locator('#saveSelection').click()
+-    assert page.evaluate('window.__posted')[-1]['type'] == 'save'
+-    page.locator('#search').fill('')
+-    sizes=page.evaluate('''() => ({document:document.documentElement.scrollWidth,
+-        viewport:innerWidth, bodyHeight:document.body.scrollHeight, height:innerHeight,
+-        list:document.querySelector('.results').clientHeight})''')
+-    assert sizes['document'] <= sizes['viewport'] and sizes['bodyHeight'] <= sizes['height'], sizes
+-    assert sizes['list'] >= 270, sizes
++    assert posted()[-1]['type'] == 'save'
++    clear()
++    page.evaluate('window.dispatchEvent(new Event("focus"))')
++    page.wait_for_timeout(50)
++    assert page.locator('#search').evaluate('(el) => document.activeElement === el')
++
++    # Initial preview percentage + pointer drag + keyboard width adjustment.
++    model(preview=60)
++    assert page.locator('#splitter').get_attribute('aria-valuenow') == '60'
++    original_width = page.locator('.previewPane').bounding_box()['width']
++    splitter = page.locator('#splitter')
++    rect = splitter.bounding_box()
++    page.mouse.move(rect['x'] + rect['width'] / 2, rect['y'] + rect['height'] / 2)
++    page.mouse.down()
++    page.mouse.move(rect['x'] - 65, rect['y'] + rect['height'] / 2, steps=5)
++    page.mouse.up()
++    assert page.locator('.previewPane').bounding_box()['width'] > original_width + 45
++    signals = [x for x in posted() if x.get('type') == 'split']
++    assert len(signals) >= 1 and 32 <= signals[-1]['previewPercent'] <= 68, signals
++    clear()
++    splitter.focus()
++    before = int(splitter.get_attribute('aria-valuenow'))
++    splitter.press('ArrowRight')
++    after = int(splitter.get_attribute('aria-valuenow'))
++    assert after == max(32, before - 2) and posted()[-1] == {'type':'split','previewPercent':after}, posted()
++    clear()
++
++    # Search-focus changes must not silently alter user-selected splitter geometry.
++    model(preview=after)
++    assert int(splitter.get_attribute('aria-valuenow')) == after
++    assert page.locator('#search').evaluate('(el) => document.activeElement === el')
++    for width, height in [(600,390),(760,540),(900,700),(525,320)]:
++        page.set_viewport_size({'width':width,'height':height})
++        dims = page.evaluate('''() => ({scrollW:document.documentElement.scrollWidth,
++           width:innerWidth, scrollH:document.body.scrollHeight, height:innerHeight,
++           preview:document.querySelector('.previewPane').getBoundingClientRect().width,
++           list:document.querySelector('.results').clientHeight})''')
++        assert dims['scrollW'] <= dims['width'] and dims['scrollH'] <= dims['height'], dims
++        assert dims['preview'] >= 180 and dims['list'] >= 180, dims
+     if os.environ.get('PROMPT_PICKER_QA_SCREENSHOT'):
+-        page.screenshot(path=os.environ['PROMPT_PICKER_QA_SCREENSHOT'], full_page=True)
+-    for width, height in [(525,320),(690,415),(850,500)]:
+-        page.set_viewport_size({'width':width,'height':height})
+-        rect=page.evaluate('''() => ({document:document.documentElement.scrollWidth,
+-            width:innerWidth, height:document.body.scrollHeight, viewportHeight:innerHeight})''')
+-        assert rect['document'] <= rect['width'] and rect['height'] <= rect['viewportHeight'],rect
+-    print('PASS Chromium: dblclick once; Enter; filter; local-save gating; header-free layout; compact responsive sizing',sizes)
++        page.set_viewport_size({'width':760,'height':540})
++        model(preview=55)
++        page.screenshot(path=os.environ['PROMPT_PICKER_QA_SCREENSHOT'])
+     browser.close()
++    print('PASS Chromium: keyboard filter/arrows/Enter; doubleclick once; click + Enter; splitter drag/keyboard/persistence messages; responsive layouts; no local path write controls')

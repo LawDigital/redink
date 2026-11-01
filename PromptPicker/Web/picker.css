@@ -1,0 +1,57 @@
+/* Uses Ask Inky's restrained Office-like surface, 32 px SVG action buttons and
+   compact cards. The list is intentionally given most of the usable space. */
+:root {color-scheme:light;--accent:#b91312;--accentHover:#9a0f0e;--accentSoft:#fff0ef;--ink:#323130;--muted:#6d6a67;--stroke:#edebe9;--surface:#fff;--bg:#f5f5f6;--radius:9px;--list-percent:45%;}
+* {box-sizing:border-box;}
+[hidden] {display:none !important;}
+html,body {width:100%;height:100%;min-width:0;margin:0;overflow:hidden;}
+body {font:13px/1.4 "Segoe UI",system-ui,sans-serif;color:var(--ink);background:var(--bg);}
+button,input,select {font:inherit;}
+button {cursor:pointer;touch-action:manipulation;}
+button:disabled {opacity:.42;cursor:default;}
+.shell {height:100vh;min-width:0;display:flex;flex-direction:column;gap:8px;padding:10px;}
+.searchArea {display:flex;align-items:center;gap:8px;flex:none;min-width:0;}
+.searchWrap {position:relative;min-width:0;flex:1;}
+.searchWrap svg {position:absolute;left:11px;top:50%;transform:translateY(-50%);width:17px;height:17px;color:#817d7b;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;pointer-events:none;}
+.searchWrap input,select {height:35px;border:1px solid #d9d8d6;border-radius:7px;background:#fff;color:var(--ink);outline:0;}
+.searchWrap input {width:100%;padding:0 12px 0 35px;}
+.searchWrap input::-webkit-search-cancel-button {cursor:pointer;}
+.searchWrap input:focus,select:focus {border-color:#bc8380;box-shadow:0 0 0 2px #b9131215;}
+select {width:173px;min-width:115px;max-width:35%;padding:0 22px 0 10px;text-overflow:ellipsis;}
+.iconButton {width:33px;height:33px;min-width:33px;display:inline-flex;align-items:center;justify-content:center;padding:7px;color:var(--muted);border:1px solid var(--stroke);background:#fff;border-radius:7px;}
+.iconButton:hover:not(:disabled) {color:var(--accent);background:var(--accentSoft);border-color:#e8cbc8;}
+button svg {width:18px;height:18px;flex:none;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;pointer-events:none;}
+.workspace {min-height:0;flex:1;display:grid;grid-template-columns:minmax(0,var(--list-percent)) 7px minmax(0,1fr);background:var(--surface);border:1px solid var(--stroke);border-radius:var(--radius);overflow:hidden;box-shadow:0 1px 4px #23232608;}
+.listPane,.previewPane {min-width:0;min-height:0;display:flex;flex-direction:column;}
+.listPane {border-right:0;}
+.splitter {position:relative;background:var(--stroke);cursor:col-resize;touch-action:none;outline:0;}
+.splitter::after {content:"";position:absolute;left:2px;top:50%;transform:translateY(-50%);width:3px;height:36px;border-radius:3px;background:#c5c0bc;}
+.splitter:hover,.splitter:focus-visible {background:#eadbd8;}
+.splitter:focus-visible::after {background:var(--accent);}
+
+.paneHeading {height:30px;min-height:30px;padding:0 11px;display:flex;align-items:center;justify-content:space-between;gap:7px;border-bottom:1px solid var(--stroke);font-size:11px;font-weight:600;color:var(--muted);}
+.count {font-variant-numeric:tabular-nums;font-size:11px;color:#857f7c;}
+.results {min-height:0;overflow-y:auto;flex:1;padding:3px;scrollbar-gutter:stable;}
+.item {display:flex;align-items:center;gap:8px;width:100%;min-height:34px;padding:5px 9px;text-align:left;outline:0;color:var(--ink);background:transparent;border:1px solid transparent;border-radius:6px;}
+.item:hover {background:#f7f6f5;}
+.item.active,.item[aria-selected="true"] {background:var(--accentSoft);border-color:#f3d8d5;}
+.item:focus-visible {outline:2px solid #cd8b86;outline-offset:-2px;}
+.itemTitle {min-width:0;flex:1;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.itemMeta {max-width:46%;min-width:0;display:flex;align-items:center;gap:7px;font-size:10px;color:#827e7a;}
+.tag {overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;}
+.origin {flex:none;color:#9b9591;}
+.previewSource {font-size:10px;font-weight:400;color:#99918c;white-space:nowrap;}
+.previewBody {flex:1;min-height:0;overflow:auto;padding:12px 13px;}
+.previewHead {display:flex;flex-wrap:wrap;gap:4px 9px;align-items:center;margin-bottom:10px;}
+h2 {min-width:0;max-width:100%;font-size:14px;line-height:1.35;font-weight:600;overflow-wrap:anywhere;margin:0;}
+.categoryTag {font-size:10px;color:#807a75;background:#f4f3f2;border-radius:4px;padding:2px 5px;max-width:100%;overflow-wrap:anywhere;}
+pre {margin:0;font:12.5px/1.55 "Segoe UI",system-ui,sans-serif;white-space:pre-wrap;overflow-wrap:anywhere;color:#514f4c;}
+.empty {padding:16px;text-align:center;color:var(--muted);font-size:12px;}
+.footer {min-height:35px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex:none;}
+.selectionArea {display:flex;align-items:center;gap:7px;flex:1;min-width:0;}
+/* Still announced to assistive technology; unnecessary hint text is not visual ballast. */
+.selectionStatus {position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap;}
+.actions {display:flex;align-items:center;gap:7px;flex:none;}
+.primary {display:inline-flex;align-items:center;justify-content:center;gap:7px;height:33px;padding:0 13px;background:var(--accent);border:1px solid var(--accent);border-radius:7px;color:#fff;font-weight:600;}
+.primary:hover:not(:disabled) {background:var(--accentHover);}
+.primary svg {width:16px;height:16px;}
+@media(max-width:560px) {.tag {display:none}.previewBody{padding:9px}.shell{padding:8px;gap:7px}select{width:128px}.selectionStatus {font-size:10px}}

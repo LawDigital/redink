@@ -1,0 +1,7 @@
+# Example HTTPS reverse proxy; adapt hostname and certificate policy for your network.
+# Keep the application bound to 127.0.0.1:8765.
+# Add this hostname to server.toml trusted_hosts and set secure_cookies=true.
+# Access logging is intentionally not enabled: collector/config URLs contain tokens.
+usage.example.org {
+    reverse_proxy 127.0.0.1:8765
+}

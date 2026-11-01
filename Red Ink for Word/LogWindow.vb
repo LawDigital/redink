@@ -142,7 +142,7 @@ Public Class LogWindow
         Me.DoubleBuffered = True
 
         Try
-            Me.Icon = Icon.FromHandle((New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))).GetHicon())
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(Me)
         Catch
         End Try
 

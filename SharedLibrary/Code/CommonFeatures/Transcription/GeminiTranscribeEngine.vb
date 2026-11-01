@@ -1,10 +1,14 @@
-﻿' Part of "Red Ink for Word"
+﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
 ' File: GeminiTranscribeEngine.vb
 ' Purpose: File-based transcription using Google Gemini 3.5 Transcribe on
-'          Vertex AI / Gemini Enterprise Agent Platform.
+'          Google Enterprise Agent Platform.
+'
+' KEY ARCHITECTURE
+'   • Surface: GeminiTranscribeEngine (VB implementation).
+'   • Entry points/helpers: StartLiveAsync, PushAudioAsync, StopLiveAsync.
 ' =============================================================================
 
 Option Explicit On

@@ -12,18 +12,20 @@
 '  - Uses hidden MAPI properties to group an incoming mail with all AutoPilot
 '    replies and follow-up notices.
 '  - Starts the retention clock only after a substantive reply is sent.
-'  - Runs a periodic cleanup timer alongside the AutoPilot session.
+'  - Schedules one cleanup at 01:00 local time per day while AutoPilot is running.
 '  - Scans mailbox folders and Deleted Items to remove expired tagged items.
 '  - Keeps Outlook COM access on the UI thread via `SwitchToUi`.
 '
 ' Retention Model:
-'  - `AutoDeleteAfterHours = 0` disables cleanup.
+'  - `AutoDeleteAfterHours = 0` disables mail deletion; nightly file retention still runs.
 '  - When enabled, the original mail and all AutoPilot replies in the same group
 '    are eligible for deletion after the configured retention window.
 '  - Cleanup includes normal folders and Deleted Items.
 '
 ' Security & Reliability:
-'  - Deletion is based on hidden MAPI metadata, not EntryID or subject text.
+'  - Deletion uses cleanup metadata; bounded legacy repair requires verified ownership.
+'  - Active queue/approval groups and transmission folders are protected.
+'  - EntryID and subject text never authorize deletion.
 '  - The cleanup process is best-effort and fail-safe.
 '  - COM objects are released after use to avoid Outlook resource leaks.
 ' =============================================================================
@@ -33,6 +35,7 @@ Option Strict Off
 
 Imports System.Diagnostics
 Imports System.Globalization
+Imports System.Linq
 Imports System.Runtime.InteropServices
 Imports System.Threading
 Imports System.Threading.Tasks
@@ -49,11 +52,12 @@ Partial Public Class ThisAddIn
     Private Const AP_CleanupDeleteAfterUtcProperty As String =
         "http://schemas.microsoft.com/mapi/string/{00020386-0000-0000-C000-000000000046}/X-RedInk-AutoDeleteAfterUtc"
 
-    ' When True, an auto-delete cleanup pass runs immediately at AutoPilot startup.
-    ' Default False: cleanup runs only on the periodic timer.
-    Private Const AP_RunAutoDeleteCleanupOnStartup As Boolean = False
+    Private Const AP_AutoDeleteLocalHour As System.Int32 = 1
+    Private Const AP_AutoDeleteStartWindowMinutes As System.Int32 = 5
+    Private ReadOnly _apAutoDeleteTimerLock As New System.Object()
+    Private _apAutoDeleteTimerGeneration As System.Int32
+    Private _apAutoDeleteLastRunLocalDate As System.DateTime = System.DateTime.MinValue
 
-    Private Const AP_AutoDeleteTimerIntervalSeconds As Integer = 6 * 60 * 60
     Private Const AP_AutoDeleteUiYieldItemInterval As Integer = 100
     Private Const AP_AutoDeleteUiYieldFolderInterval As Integer = 10
     Private Const AP_AutoDeleteProgressItemInterval As Integer = 500
@@ -63,8 +67,11 @@ Partial Public Class ThisAddIn
 
     Private _apAutoDeleteTimer As System.Threading.Timer = Nothing
     Private _apAutoDeleteCheckRunning As Integer = 0
+    Private _apNightlyMaintenanceRunning As System.Int32 = 0
     Private _apAutoDeleteDiagnosticRejectLogCount As Integer = 0
     Private _apAutoDeleteDiagnosticErrorLogCount As Integer = 0
+    Private _apAutoDeleteProtectedGroups As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+    Private _apAutoDeleteSendingAddresses As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
 
     Private Structure AutoDeleteCleanupStats
         Public ScannedCount As Integer
@@ -75,37 +82,125 @@ Partial Public Class ThisAddIn
         Public LastProgressLogFolderCount As Integer
     End Structure
 
+    ' Calendar scheduling, not a 24-hour period: UTC offset changes must not shift 01:00.
+    Friend Shared Function GetNextAutoDeleteDelay(nowUtc As System.DateTime,
+                                                 zone As System.TimeZoneInfo) As System.TimeSpan
+        Dim localNow As System.DateTime = System.TimeZoneInfo.ConvertTimeFromUtc(nowUtc, zone)
+        Dim nextLocal As System.DateTime = System.DateTime.SpecifyKind(
+            localNow.Date.AddHours(AP_AutoDeleteLocalHour), System.DateTimeKind.Unspecified)
+        If nextLocal <= localNow Then nextLocal = nextLocal.AddDays(1)
+        ' A timezone with a skipped 01:00 gets no catch-up run at another local hour.
+        While zone.IsInvalidTime(nextLocal)
+            nextLocal = nextLocal.AddDays(1)
+        End While
+        Return System.TimeZoneInfo.ConvertTimeToUtc(nextLocal, zone) - nowUtc
+    End Function
+
     Friend Sub StartAutoDeleteTimer()
         StopAutoDeleteTimer()
+        If _apConfig Is Nothing Then Return
 
-        If _apConfig Is Nothing OrElse _apConfig.AutoDeleteAfterHours <= 0 Then Return
-
-        _apAutoDeleteTimer = New System.Threading.Timer(
-            AddressOf AutoDeleteTimerCallback,
-            Nothing,
-            dueTime:=TimeSpan.FromSeconds(AP_AutoDeleteTimerIntervalSeconds),
-            period:=TimeSpan.FromSeconds(AP_AutoDeleteTimerIntervalSeconds))
-
-        ApDashboardLog($"🗑 Auto-delete timer started ({_apConfig.AutoDeleteAfterHours}h retention, including Deleted Items).", "info")
+        SyncLock _apAutoDeleteTimerLock
+            _apAutoDeleteTimer = New System.Threading.Timer(
+                AddressOf AutoDeleteTimerCallback, _apAutoDeleteTimerGeneration,
+                System.Threading.Timeout.InfiniteTimeSpan, System.Threading.Timeout.InfiniteTimeSpan)
+            _apAutoDeleteTimer.Change(GetNextAutoDeleteDelay(System.DateTime.UtcNow, System.TimeZoneInfo.Local),
+                                      System.Threading.Timeout.InfiniteTimeSpan)
+        End SyncLock
+        ApDashboardLog($"🗑 AutoPilot maintenance scheduled daily at 01:00 local time: mail deletion ({_apConfig.AutoDeleteAfterHours}h; 0 = disabled), then file retention purge; no startup or daytime catch-up run.", "info")
     End Sub
 
     Friend Sub StopAutoDeleteTimer()
-        Try : _apAutoDeleteTimer?.Dispose() : Catch : End Try
-        _apAutoDeleteTimer = Nothing
+        SyncLock _apAutoDeleteTimerLock
+            _apAutoDeleteTimerGeneration += 1
+            Try : _apAutoDeleteTimer?.Dispose() : Catch : End Try
+            _apAutoDeleteTimer = Nothing
+        End SyncLock
     End Sub
 
-    Private Async Sub AutoDeleteTimerCallback(state As Object)
-        If Not _apActive Then Return
-
+    Private Async Sub AutoDeleteTimerCallback(state As System.Object)
+        Dim generation As System.Int32 = System.Convert.ToInt32(state, System.Globalization.CultureInfo.InvariantCulture)
+        Dim ct As System.Threading.CancellationToken
+        Dim ownsMaintenance As System.Boolean = False
         Try
-            Dim ct = _apCts?.Token
-            If ct Is Nothing OrElse ct.Value.IsCancellationRequested Then Return
-
-            Await RunAutoDeleteCleanupAsync(ct.Value, "timer")
-        Catch ex As OperationCanceledException
-            ' Expected during shutdown
+            SyncLock _apAutoDeleteTimerLock
+                If generation <> _apAutoDeleteTimerGeneration OrElse _apAutoDeleteTimer Is Nothing OrElse
+                   Not _apActive OrElse IsAutoPilotDrainRequested() OrElse _apCts Is Nothing OrElse _apCts.IsCancellationRequested Then Return
+                ct = _apCts.Token
+                Dim localNow As System.DateTime = System.DateTime.Now
+                Dim start As System.DateTime = localNow.Date.AddHours(AP_AutoDeleteLocalHour)
+                ' A resumed/suspended process must not perform last night's sweep during the day.
+                If localNow < start OrElse localNow >= start.AddMinutes(AP_AutoDeleteStartWindowMinutes) OrElse
+                   _apAutoDeleteLastRunLocalDate >= localNow.Date Then Return
+                If System.Threading.Interlocked.CompareExchange(_apAutoDeleteCheckRunning, 0, 0) <> 0 Then Return
+                If System.Threading.Interlocked.CompareExchange(_apNightlyMaintenanceRunning, 1, 0) <> 0 Then Return
+                ownsMaintenance = True
+                _apAutoDeleteLastRunLocalDate = localNow.Date
+            End SyncLock
+            Await RunAutoDeleteCleanupAsync(ct, "daily 01:00")
+            ct.ThrowIfCancellationRequested()
+            If _apActive AndAlso Not IsAutoPilotDrainRequested() Then RunAutoPilotNightlyFilePurge(ct)
+        Catch ex As System.OperationCanceledException
+            ' Expected during shutdown.
         Catch ex As System.Exception
             ApDashboardLog($"🗑 Auto-delete timer error: {ex.Message}", "warn")
+        Finally
+            If ownsMaintenance Then System.Threading.Interlocked.Exchange(_apNightlyMaintenanceRunning, 0)
+            SyncLock _apAutoDeleteTimerLock
+                If generation = _apAutoDeleteTimerGeneration AndAlso _apAutoDeleteTimer IsNot Nothing AndAlso _apActive Then
+                    Try
+                        _apAutoDeleteTimer.Change(GetNextAutoDeleteDelay(System.DateTime.UtcNow, System.TimeZoneInfo.Local),
+                                                  System.Threading.Timeout.InfiniteTimeSpan)
+                    Catch ex As System.Exception
+                        ApDashboardLog($"🗑 Auto-delete scheduling error: {ex.Message}", "warn")
+                    End Try
+                End If
+            End SyncLock
+        End Try
+    End Sub
+
+    ' Bulk retention is maintenance, never a startup/per-message side effect.
+    ' Do not race active mail/scheduler work, scan maintenance or diagnostic file readers.
+    Private Sub RunAutoPilotNightlyFilePurge(ct As System.Threading.CancellationToken)
+        If ct.IsCancellationRequested OrElse Not _apActive OrElse IsAutoPilotDrainRequested() Then Return
+        If Not _apProcessingSemaphore.Wait(0) Then
+            ApDashboardLog("🗂 Nightly file purge skipped: an active job owns the files; next attempt is tomorrow at 01:00.", "step")
+            Return
+        End If
+        Dim ownsScan As System.Boolean = False
+        Dim ownsDiagnostics As System.Boolean = False
+        Dim ownsCoaching As System.Boolean = False
+        Dim ownsDeletion As System.Boolean = False
+        Try
+            ownsScan = System.Threading.Interlocked.CompareExchange(_scanSweepRunning, 1, 0) = 0
+            If ownsScan Then ownsDiagnostics = System.Threading.Interlocked.CompareExchange(_apLogDiagnosticsRunning, 1, 0) = 0
+            If ownsDiagnostics Then ownsCoaching = System.Threading.Interlocked.CompareExchange(_apPromptCoachingRunning, 1, 0) = 0
+            If ownsCoaching Then ownsDeletion = System.Threading.Interlocked.CompareExchange(_apAutoDeleteCheckRunning, 1, 0) = 0
+            If Not ownsScan OrElse Not ownsDiagnostics OrElse Not ownsCoaching OrElse Not ownsDeletion Then
+                ApDashboardLog("🗂 Nightly file purge skipped: scan, diagnostics or mail deletion is active; next attempt is tomorrow at 01:00.", "step")
+                Return
+            End If
+            ct.ThrowIfCancellationRequested()
+            If IsAutoPilotDrainRequested() OrElse Not _apActive Then Return
+            ApDashboardLog("🗂 AutoPilot nightly file purge started after the mail-deletion pass.", "info")
+            PurgeExpiredThreadRetention()
+            ct.ThrowIfCancellationRequested()
+            Dim archiveDirectory As System.String = System.IO.Path.Combine(
+                System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData), "RedInk", "autopilot-logs")
+            If System.IO.Directory.Exists(archiveDirectory) Then PruneAutoPilotToolingLogArchives(archiveDirectory, AP_ToolingLogArchiveRetentionCount)
+            ct.ThrowIfCancellationRequested()
+            PurgeAutoPilotLogDiagnosticsCacheWhenDisabled()
+            CleanupAutoPilotLogDiagnosticResults()
+            CleanupAutoPilotPromptCoaching()
+            ct.ThrowIfCancellationRequested()
+            If _apConfig IsNot Nothing AndAlso _apConfig.EnableScheduler Then SchedulerPurgeOrphanDirectories()
+            ApDashboardLog("🗂 AutoPilot nightly file purge finished.", "info")
+        Finally
+            If ownsDeletion Then System.Threading.Interlocked.Exchange(_apAutoDeleteCheckRunning, 0)
+            If ownsCoaching Then System.Threading.Interlocked.Exchange(_apPromptCoachingRunning, 0)
+            If ownsDiagnostics Then System.Threading.Interlocked.Exchange(_apLogDiagnosticsRunning, 0)
+            If ownsScan Then System.Threading.Interlocked.Exchange(_scanSweepRunning, 0)
+            _apProcessingSemaphore.Release()
         End Try
     End Sub
 
@@ -123,8 +218,8 @@ Partial Public Class ThisAddIn
         Dim pass2 As AutoDeleteCleanupStats
         Dim sw = Stopwatch.StartNew()
 
-        '_apAutoDeleteDiagnosticRejectLogCount = 0
-        '_apAutoDeleteDiagnosticErrorLogCount = 0
+        _apAutoDeleteDiagnosticRejectLogCount = 0
+        _apAutoDeleteDiagnosticErrorLogCount = 0
 
         Try
             ApDashboardLog($"🗑 Auto-delete cleanup started ({trigger}).", "info")
@@ -132,6 +227,7 @@ Partial Public Class ThisAddIn
             ThrowIfAutoDeleteCancelled(ct)
             Await SwitchToUi(
                 Sub()
+                    CaptureAutoDeleteWorkProtection()
                     pass1 = DeleteExpiredAutoPilotItemsOutsideDeletedItems(ct, nowUtc)
                 End Sub)
 
@@ -156,7 +252,7 @@ Partial Public Class ThisAddIn
 
             If totalScanned = 0 Then
                 ApDashboardLog(
-                    "🗑 Auto-delete found no eligible mails with cleanup metadata. Existing mails in Inbox, Sent Items, or Deleted Items are ignored unless they were previously stamped for auto-delete.",
+                    "🗑 Auto-delete found no eligible mails with cleanup metadata. Recognized legacy AutoPilot mails are repaired when a reliable retention basis exists; unrecognized mail and active work remain protected.",
                     "step")
             End If
 
@@ -180,17 +276,15 @@ Partial Public Class ThisAddIn
     End Sub
 
     Private Sub LogAutoDeleteRejectDiagnostic(message As String)
-        'If _apAutoDeleteDiagnosticRejectLogCount >= AP_AutoDeleteDiagnosticRejectLogLimit Then Return
-
-        '_apAutoDeleteDiagnosticRejectLogCount += 1
-        'ApDashboardLog($"🗑 Auto-delete diagnostic: {message}", "step")
+        If _apAutoDeleteDiagnosticRejectLogCount >= AP_AutoDeleteDiagnosticRejectLogLimit Then Return
+        _apAutoDeleteDiagnosticRejectLogCount += 1
+        ApDashboardLog($"🗑 Auto-delete diagnostic: {message}", "step")
     End Sub
 
     Private Sub LogAutoDeleteErrorDiagnostic(message As String)
-        'If _apAutoDeleteDiagnosticErrorLogCount >= AP_AutoDeleteDiagnosticErrorLogLimit Then Return
-
-        '_apAutoDeleteDiagnosticErrorLogCount += 1
-        'ApDashboardLog($"🗑 Auto-delete error diagnostic: {message}", "warn")
+        If _apAutoDeleteDiagnosticErrorLogCount >= AP_AutoDeleteDiagnosticErrorLogLimit Then Return
+        _apAutoDeleteDiagnosticErrorLogCount += 1
+        ApDashboardLog($"🗑 Auto-delete error diagnostic: {message}", "warn")
     End Sub
 
     Private Function GetAutoDeleteMailDiagnosticLabel(mi As MailItem, folderPath As String) As String
@@ -262,46 +356,68 @@ Partial Public Class ThisAddIn
         Return DateTime.UtcNow.AddHours(_apConfig.AutoDeleteAfterHours)
     End Function
 
-    Private Function TryGetAutoDeleteTargetStoreId(session As Microsoft.Office.Interop.Outlook.NameSpace,
-                                                   ByRef storeId As String) As Boolean
-        storeId = ""
+    ' Only real account delivery stores are eligible. Never enumerate every store in
+    ' the profile: public folders, archive PSTs and stale mounted providers are unrelated.
+    Private Function TryGetAutoDeleteTargetStoreIds(session As Microsoft.Office.Interop.Outlook.NameSpace,
+                                                    ByRef storeIds As System.Collections.Generic.HashSet(Of System.String)) As System.Boolean
+        storeIds = New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+        If session Is Nothing OrElse _apConfig Is Nothing Then Return False
+        Dim monitored As System.String = If(_apConfig.MonitoredMailbox, System.String.Empty).Trim()
+        Dim accounts As Microsoft.Office.Interop.Outlook.Accounts = Nothing
+        Try
+            accounts = session.Accounts
+            For index As System.Int32 = 1 To accounts.Count
+                Dim account As Microsoft.Office.Interop.Outlook.Account = Nothing
+                Dim deliveryStore As Microsoft.Office.Interop.Outlook.Store = Nothing
+                Try
+                    account = accounts.Item(index)
+                    If account Is Nothing Then Continue For
+                    If monitored <> System.String.Empty AndAlso
+                       Not System.String.Equals(account.SmtpAddress, monitored, System.StringComparison.OrdinalIgnoreCase) Then Continue For
+                    deliveryStore = account.DeliveryStore
+                    If Not IsAutoDeleteStoreAlreadyOpen(deliveryStore, "account delivery store") Then Continue For
+                    If deliveryStore.ExchangeStoreType = Microsoft.Office.Interop.Outlook.OlExchangeStoreType.olExchangePublicFolder Then Continue For
+                    Dim storeId As System.String = deliveryStore.StoreID
+                    If Not System.String.IsNullOrWhiteSpace(storeId) Then storeIds.Add(storeId)
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("Auto-delete account scope unavailable; skipped without opening a store: " & ex.Message)
+                Finally
+                    If deliveryStore IsNot Nothing Then System.Runtime.InteropServices.Marshal.ReleaseComObject(deliveryStore)
+                    If account IsNot Nothing Then System.Runtime.InteropServices.Marshal.ReleaseComObject(account)
+                End Try
+            Next
+        Finally
+            If accounts IsNot Nothing Then System.Runtime.InteropServices.Marshal.ReleaseComObject(accounts)
+        End Try
+        Return storeIds.Count > 0
+    End Function
 
-        If session Is Nothing Then Return False
-        If _apConfig Is Nothing OrElse String.IsNullOrWhiteSpace(_apConfig.MonitoredMailbox) Then Return True
-
-        For i As Integer = 1 To session.Accounts.Count
-            Dim acct As Account = Nothing
-            Dim deliveryStore As Store = Nothing
-
-            Try
-                acct = session.Accounts(i)
-                If acct Is Nothing Then Continue For
-                If String.IsNullOrWhiteSpace(acct.SmtpAddress) Then Continue For
-                If Not acct.SmtpAddress.Equals(_apConfig.MonitoredMailbox, StringComparison.OrdinalIgnoreCase) Then Continue For
-
-                deliveryStore = acct.DeliveryStore
-                If deliveryStore Is Nothing Then Return False
-
-                storeId = If(deliveryStore.StoreID, "")
-                Return Not String.IsNullOrWhiteSpace(storeId)
-            Catch
-            Finally
-                If deliveryStore IsNot Nothing Then Try : Marshal.ReleaseComObject(deliveryStore) : Catch : End Try
-                If acct IsNot Nothing Then Try : Marshal.ReleaseComObject(acct) : Catch : End Try
-            End Try
-        Next
-
+    ' Never activate an unopened provider from unattended maintenance. Outlook can display
+    ' a native data-file dialog before a GetRootFolder/GetDefaultFolder call throws.
+    ' Do not read DisplayName/StoreID/FilePath for diagnostics before this gate.
+    Private Function IsAutoDeleteStoreAlreadyOpen(store As Microsoft.Office.Interop.Outlook.Store,
+                                                   context As System.String) As System.Boolean
+        If store Is Nothing Then Return False
+        Try
+            If store.IsOpen Then Return True
+            System.Diagnostics.Debug.WriteLine(context & ": store is not open; unattended maintenance skipped without opening it.")
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine(context & ": store open state unavailable; unattended maintenance skipped: " & ex.Message)
+        End Try
         Return False
     End Function
 
-    Private Function ShouldProcessAutoDeleteStore(store As Store,
-                                                  targetStoreId As String) As Boolean
-        If store Is Nothing Then Return False
-        If String.IsNullOrWhiteSpace(targetStoreId) Then Return True
+    Private Function ShouldProcessAutoDeleteStore(store As Microsoft.Office.Interop.Outlook.Store,
+                                                  targetStoreId As System.String,
+                                                  context As System.String) As System.Boolean
+        If Not IsAutoDeleteStoreAlreadyOpen(store, context) Then Return False
+        If System.String.IsNullOrWhiteSpace(targetStoreId) Then Return False
 
         Try
-            Return store.StoreID.Equals(targetStoreId, StringComparison.OrdinalIgnoreCase)
-        Catch
+            If store.ExchangeStoreType = Microsoft.Office.Interop.Outlook.OlExchangeStoreType.olExchangePublicFolder Then Return False
+            Return store.StoreID.Equals(targetStoreId, System.StringComparison.OrdinalIgnoreCase)
+        Catch ex As System.Exception
+            LogAutoDeleteErrorDiagnostic(context & ": store identity unavailable; maintenance deferred: " & ex.Message)
             Return False
         End Try
     End Function
@@ -309,12 +425,8 @@ Partial Public Class ThisAddIn
     Private Function GetCleanupGroupId(mi As MailItem) As String
         If mi Is Nothing Then Return Nothing
 
-        Try
-            Dim value = CStr(mi.PropertyAccessor.GetProperty(AP_CleanupGroupIdProperty))
-            If Not String.IsNullOrWhiteSpace(value) Then Return value.Trim()
-        Catch
-        End Try
-
+        Dim value As System.String = Nothing
+        If TryGetNamedStringProperty(mi, AP_CleanupGroupIdProperty, value) AndAlso Not System.String.IsNullOrWhiteSpace(value) Then Return value.Trim()
         Return Nothing
     End Function
 
@@ -346,25 +458,18 @@ Partial Public Class ThisAddIn
 
         If mi Is Nothing OrElse String.IsNullOrWhiteSpace(groupId) Then Return
 
-        Try
-            Dim pa = mi.PropertyAccessor
-            pa.SetProperty(AP_CleanupGroupIdProperty, groupId)
-            pa.SetProperty(AP_CleanupEligibleProperty, If(isEligible, "true", "false"))
-            pa.SetProperty(
-                AP_CleanupAnsweredUtcProperty,
-                If(answeredUtc.HasValue,
-                   answeredUtc.Value.ToString("o", CultureInfo.InvariantCulture),
-                   ""))
-            pa.SetProperty(
-                AP_CleanupDeleteAfterUtcProperty,
-                If(deleteAfterUtc.HasValue,
-                   deleteAfterUtc.Value.ToString("o", CultureInfo.InvariantCulture),
-                   ""))
-
-            If saveItem Then mi.Save()
-        Catch ex As System.Exception
-            Debug.WriteLine($"[AutoPilot] StampCleanupMetadata error: {ex.Message}")
-        End Try
+        ' A provider failure for one field must not suppress the remaining independent fields.
+        SetAutoDeleteProperty(mi, AP_CleanupGroupIdProperty, groupId)
+        SetAutoDeleteProperty(mi, AP_CleanupEligibleProperty, If(isEligible, "true", "false"))
+        SetAutoDeleteProperty(mi, AP_CleanupAnsweredUtcProperty, If(answeredUtc.HasValue, answeredUtc.Value.ToString("o", CultureInfo.InvariantCulture), ""))
+        SetAutoDeleteProperty(mi, AP_CleanupDeleteAfterUtcProperty, If(deleteAfterUtc.HasValue, deleteAfterUtc.Value.ToString("o", CultureInfo.InvariantCulture), ""))
+        If saveItem Then
+            Try
+                mi.Save()
+            Catch ex As System.Exception
+                LogAutoDeleteErrorDiagnostic("Cleanup metadata could not be saved: " & ex.Message)
+            End Try
+        End If
     End Sub
 
 
@@ -459,7 +564,7 @@ Partial Public Class ThisAddIn
         Return Nothing
     End Function
 
-    Friend Sub MarkMailGroupAsAnsweredAndEligible(originalMail As MailItem)
+    Friend Sub MarkMailGroupAsAnsweredAndEligible(originalMail As MailItem, Optional answeredUtcOverride As System.DateTime? = Nothing)
         If originalMail Is Nothing Then Return
 
         Dim deleteAfterUtc = GetAutoDeleteCutoffUtc()
@@ -468,7 +573,8 @@ Partial Public Class ThisAddIn
         Dim groupId = GetOrCreateCleanupGroupId(originalMail)
         If String.IsNullOrWhiteSpace(groupId) Then Return
 
-        Dim answeredUtc = DateTime.UtcNow
+        Dim answeredUtc = If(answeredUtcOverride, System.DateTime.UtcNow).ToUniversalTime()
+        If answeredUtcOverride.HasValue Then deleteAfterUtc = answeredUtc.AddHours(_apConfig.AutoDeleteAfterHours)
 
         StampCleanupMetadata(
             originalMail,
@@ -515,16 +621,16 @@ Partial Public Class ThisAddIn
         Try
             session = Application.GetNamespace("MAPI")
 
-            Dim targetStoreId As String = ""
-            If Not TryGetAutoDeleteTargetStoreId(session, targetStoreId) Then Return
+            Dim targetStoreIds As System.Collections.Generic.HashSet(Of System.String) = Nothing
+            If Not TryGetAutoDeleteTargetStoreIds(session, targetStoreIds) Then Return
 
-            For i As Integer = 1 To session.Stores.Count
+            For Each targetStoreId As System.String In targetStoreIds
                 Dim store As Store = Nothing
                 Dim rootFolder As MAPIFolder = Nothing
 
                 Try
-                    store = session.Stores(i)
-                    If Not ShouldProcessAutoDeleteStore(store, targetStoreId) Then Continue For
+                    store = session.GetStoreFromID(targetStoreId)
+                    If Not ShouldProcessAutoDeleteStore(store, targetStoreId, "account delivery store") Then Continue For
 
                     Try
                         rootFolder = store.GetRootFolder()
@@ -535,7 +641,6 @@ Partial Public Class ThisAddIn
                         rootFolder = Nothing
                     End Try
 
-                    Exit For
                 Catch
                 Finally
                     If store IsNot Nothing Then Try : Marshal.ReleaseComObject(store) : Catch : End Try
@@ -643,7 +748,7 @@ Partial Public Class ThisAddIn
         ' message that Send/Receive ignores, leaving it stuck in the Outbox until manually opened
         ' and re-sent. Excluding these folders prevents that regression and also avoids ever
         ' deleting a pending outbound item.
-        If IsTransmissionFolder(folder) Then Return False
+        If IsTransmissionFolderByType(folder) Then Return False
 
         ' A folder that defaults to mail items can still report a blank or non-"IPM.Note"
         ' DefaultMessageClass. This is common for Deleted Items and for some Sent Items /
@@ -740,20 +845,24 @@ Partial Public Class ThisAddIn
         Try
             session = Application.GetNamespace("MAPI")
 
-            Dim targetStoreId As String = ""
-            If Not TryGetAutoDeleteTargetStoreId(session, targetStoreId) Then Return stats
+            Dim targetStoreIds As System.Collections.Generic.HashSet(Of System.String) = Nothing
+            If Not TryGetAutoDeleteTargetStoreIds(session, targetStoreIds) Then
+                stats.ErrorCount += 1
+                LogAutoDeleteErrorDiagnostic("No open account delivery store matched the monitored scope; cleanup scope was not broadened.")
+                Return stats
+            End If
 
-            For i As Integer = 1 To session.Stores.Count
+            For Each targetStoreId As System.String In targetStoreIds
                 ThrowIfAutoDeleteCancelled(ct)
 
                 Dim store As Store = Nothing
                 Dim root As MAPIFolder = Nothing
                 Dim deletedItems As MAPIFolder = Nothing
-                Dim storeLabel As String = $"Store {i}"
+                Dim storeLabel As String = "account delivery store"
 
                 Try
-                    store = session.Stores(i)
-                    If Not ShouldProcessAutoDeleteStore(store, targetStoreId) Then Continue For
+                    store = session.GetStoreFromID(targetStoreId)
+                    If Not ShouldProcessAutoDeleteStore(store, targetStoreId, "account delivery store") Then Continue For
 
                     Try
                         storeLabel = If(store.DisplayName, storeLabel)
@@ -777,7 +886,9 @@ Partial Public Class ThisAddIn
                         ct)
                 Catch ex As OperationCanceledException
                     Throw
-                Catch
+                Catch ex As System.Exception
+                    stats.ErrorCount += 1
+                    LogAutoDeleteErrorDiagnostic("Store '" & storeLabel & "': " & ex.Message)
                 Finally
                     If deletedItems IsNot Nothing Then Try : Marshal.ReleaseComObject(deletedItems) : Catch : End Try
                     If root IsNot Nothing Then Try : Marshal.ReleaseComObject(root) : Catch : End Try
@@ -803,19 +914,23 @@ Partial Public Class ThisAddIn
         Try
             session = Application.GetNamespace("MAPI")
 
-            Dim targetStoreId As String = ""
-            If Not TryGetAutoDeleteTargetStoreId(session, targetStoreId) Then Return stats
+            Dim targetStoreIds As System.Collections.Generic.HashSet(Of System.String) = Nothing
+            If Not TryGetAutoDeleteTargetStoreIds(session, targetStoreIds) Then
+                stats.ErrorCount += 1
+                LogAutoDeleteErrorDiagnostic("No open account delivery store matched the monitored scope; cleanup scope was not broadened.")
+                Return stats
+            End If
 
-            For i As Integer = 1 To session.Stores.Count
+            For Each targetStoreId As System.String In targetStoreIds
                 ThrowIfAutoDeleteCancelled(ct)
 
                 Dim store As Store = Nothing
                 Dim deletedItems As MAPIFolder = Nothing
-                Dim storeLabel As String = $"Store {i}"
+                Dim storeLabel As String = "account delivery store"
 
                 Try
-                    store = session.Stores(i)
-                    If Not ShouldProcessAutoDeleteStore(store, targetStoreId) Then Continue For
+                    store = session.GetStoreFromID(targetStoreId)
+                    If Not ShouldProcessAutoDeleteStore(store, targetStoreId, "account delivery store") Then Continue For
 
                     Try
                         storeLabel = If(store.DisplayName, storeLabel)
@@ -827,7 +942,9 @@ Partial Public Class ThisAddIn
                     DeleteExpiredItemsInFolderTree(deletedItems, nowUtc, stats, ct)
                 Catch ex As OperationCanceledException
                     Throw
-                Catch
+                Catch ex As System.Exception
+                    stats.ErrorCount += 1
+                    LogAutoDeleteErrorDiagnostic("Store '" & storeLabel & "': " & ex.Message)
                 Finally
                     If deletedItems IsNot Nothing Then Try : Marshal.ReleaseComObject(deletedItems) : Catch : End Try
                     If store IsNot Nothing Then Try : Marshal.ReleaseComObject(store) : Catch : End Try
@@ -851,6 +968,7 @@ Partial Public Class ThisAddIn
                                                           ct As CancellationToken)
 
         If folder Is Nothing Then Return
+        If IsTransmissionFolderByType(folder) Then Return
 
         ThrowIfAutoDeleteCancelled(ct)
 
@@ -902,6 +1020,7 @@ Partial Public Class ThisAddIn
                                                ct As CancellationToken)
 
         If folder Is Nothing Then Return
+        If IsTransmissionFolderByType(folder) Then Return
 
         ThrowIfAutoDeleteCancelled(ct)
 
@@ -1014,63 +1133,176 @@ Partial Public Class ThisAddIn
     Private Function ShouldAutoDeleteMail(mi As MailItem,
                                           nowUtc As DateTime,
                                           folderPath As String) As Boolean
-
-        If mi Is Nothing Then Return False
-
-        Dim label = GetAutoDeleteMailDiagnosticLabel(mi, folderPath)
-
+        If mi Is Nothing OrElse _apConfig Is Nothing OrElse _apConfig.AutoDeleteAfterHours <= 0 Then Return False
         Dim groupId = GetCleanupGroupId(mi)
-        If String.IsNullOrWhiteSpace(groupId) Then Return False
-
-        Dim eligibleRaw As String = Nothing
-        If Not TryGetNamedStringProperty(mi, AP_CleanupEligibleProperty, eligibleRaw) Then
-            LogAutoDeleteRejectDiagnostic($"{label}, GroupId='{groupId}': missing eligible flag.")
-            Return False
+        If IsAutoDeleteWorkProtected(mi, groupId) Then Return False
+        Dim eligibleRaw As System.String = Nothing
+        Dim deleteAfterUtc As System.DateTime
+        If Not System.String.IsNullOrWhiteSpace(groupId) AndAlso
+           TryGetNamedStringProperty(mi, AP_CleanupEligibleProperty, eligibleRaw) AndAlso
+           "true".Equals(eligibleRaw, System.StringComparison.OrdinalIgnoreCase) AndAlso
+           TryGetNamedDateUtcProperty(mi, AP_CleanupDeleteAfterUtcProperty, deleteAfterUtc) Then
+            Dim ownOutgoing As System.Boolean = False
+            If Not HasLocalAutoDeleteMetadata(mi) AndAlso Not IsRecognizedAutoDeleteMail(mi, ownOutgoing) Then Return False
+            Return deleteAfterUtc <= nowUtc
         End If
 
-        If Not "true".Equals(eligibleRaw, StringComparison.OrdinalIgnoreCase) Then
-            LogAutoDeleteRejectDiagnostic($"{label}, GroupId='{groupId}': eligible flag is '{eligibleRaw}'.")
-            Return False
+        ' Recover legacy items only from positive host ownership evidence, never subject/body/filter matches.
+        Dim isOwnOutgoing As System.Boolean = False
+        If Not IsRecognizedAutoDeleteMail(mi, isOwnOutgoing) Then Return False
+        Dim basis As System.DateTime
+        Dim basisName As System.String = "answered metadata"
+        If Not TryGetNamedDateUtcProperty(mi, AP_CleanupAnsweredUtcProperty, basis) Then
+            Try
+                If isOwnOutgoing Then
+                    basis = mi.SentOn.ToUniversalTime()
+                    basisName = "original SentOn"
+                Else
+                    ' Conservative bound for an already-processed incoming item whose answer metadata is lost.
+                    basis = mi.LastModificationTime.ToUniversalTime()
+                    basisName = "processed item's last modification (answer time unavailable)"
+                End If
+            Catch ex As System.Exception
+                LogAutoDeleteRejectDiagnostic("Recognized mail has no reliable retention basis: " & ex.Message)
+                Return False
+            End Try
         End If
-
-        Dim deleteAfterRaw As String = Nothing
-        If Not TryGetNamedStringProperty(mi, AP_CleanupDeleteAfterUtcProperty, deleteAfterRaw) Then
-            LogAutoDeleteRejectDiagnostic($"{label}, GroupId='{groupId}': missing delete-after timestamp.")
+        If basis = System.DateTime.MinValue OrElse basis = System.DateTime.MaxValue OrElse basis.Year >= 4500 OrElse basis > nowUtc.AddMinutes(5) Then Return False
+        Try
+            deleteAfterUtc = basis.AddHours(_apConfig.AutoDeleteAfterHours)
+        Catch ex As System.ArgumentOutOfRangeException
+            LogAutoDeleteRejectDiagnostic("Invalid retention duration/date: " & ex.Message)
             Return False
-        End If
+        End Try
+        If System.String.IsNullOrWhiteSpace(groupId) Then groupId = System.Guid.NewGuid().ToString("N")
+        StampCleanupMetadata(mi, groupId, True, basis, deleteAfterUtc, True)
+        ' A repair must be verifiable before this pass may delete the item.
+        Dim savedEligible As System.String = Nothing
+        Dim savedCutoff As System.DateTime
+        If Not TryGetNamedStringProperty(mi, AP_CleanupEligibleProperty, savedEligible) OrElse
+           Not "true".Equals(savedEligible, System.StringComparison.OrdinalIgnoreCase) OrElse
+           Not TryGetNamedDateUtcProperty(mi, AP_CleanupDeleteAfterUtcProperty, savedCutoff) OrElse savedCutoff <> deleteAfterUtc Then Return False
+        LogAutoDeleteRejectDiagnostic("Recovered AutoPilot retention from " & basisName & "; expiry=" & deleteAfterUtc.ToString("o", System.Globalization.CultureInfo.InvariantCulture))
+        Return deleteAfterUtc <= nowUtc
+    End Function
 
-        If String.IsNullOrWhiteSpace(deleteAfterRaw) Then
-            LogAutoDeleteRejectDiagnostic($"{label}, GroupId='{groupId}': blank delete-after timestamp.")
+    Private Function HasLocalAutoDeleteMetadata(mi As Microsoft.Office.Interop.Outlook.MailItem) As System.Boolean
+        Try
+            For Each propertyName In New System.String() {AP_CleanupGroupIdProperty, AP_CleanupEligibleProperty, AP_CleanupDeleteAfterUtcProperty}
+                If System.String.IsNullOrWhiteSpace(System.Convert.ToString(mi.PropertyAccessor.GetProperty(propertyName), System.Globalization.CultureInfo.InvariantCulture)) Then Return False
+            Next
+            Return True
+        Catch ex As System.Exception
             Return False
-        End If
+        End Try
+    End Function
 
-        Dim deleteAfterUtc As DateTime
-        If Not TryParseCleanupUtcValue(deleteAfterRaw, deleteAfterUtc) Then
-            LogAutoDeleteRejectDiagnostic($"{label}, GroupId='{groupId}': invalid delete-after timestamp '{deleteAfterRaw}'.")
-            Return False
-        End If
+    Private Sub SetAutoDeleteProperty(mi As Microsoft.Office.Interop.Outlook.MailItem, propertyName As System.String, value As System.String)
+        Try
+            mi.PropertyAccessor.SetProperty(propertyName, value)
+        Catch ex As System.Exception
+            LogAutoDeleteErrorDiagnostic("Cannot stamp " & propertyName & ": " & ex.Message)
+        End Try
+    End Sub
 
-        If deleteAfterUtc > nowUtc Then
-            LogAutoDeleteRejectDiagnostic(
-                $"{label}, GroupId='{groupId}': delete-after {deleteAfterUtc.ToString("o", CultureInfo.InvariantCulture)} is later than now {nowUtc.ToString("o", CultureInfo.InvariantCulture)}.")
-            Return False
-        End If
+    Private Sub CaptureAutoDeleteWorkProtection()
+        _apAutoDeleteProtectedGroups.Clear()
+        _apAutoDeleteSendingAddresses.Clear()
+        Dim session As Microsoft.Office.Interop.Outlook.NameSpace = Nothing
+        Dim accounts As Microsoft.Office.Interop.Outlook.Accounts = Nothing
+        Try
+            session = Application.GetNamespace("MAPI")
+            accounts = session.Accounts
+            For index As System.Int32 = 1 To accounts.Count
+                Dim account As Microsoft.Office.Interop.Outlook.Account = Nothing
+                Try
+                    account = accounts.Item(index)
+                    If Not System.String.IsNullOrWhiteSpace(account.SmtpAddress) Then _apAutoDeleteSendingAddresses.Add(account.SmtpAddress.Trim())
+                Finally
+                    If account IsNot Nothing AndAlso System.Runtime.InteropServices.Marshal.IsComObject(account) Then System.Runtime.InteropServices.Marshal.ReleaseComObject(account)
+                End Try
+            Next
+            Dim activeIds = _apQueuedOrProcessingEntryIds.Keys.Concat(_apPendingApprovals.Keys).ToList()
+            If Not System.String.IsNullOrWhiteSpace(_apCurrentProcessingEntryId) Then activeIds.Add(_apCurrentProcessingEntryId)
+            For Each entryId In activeIds.Distinct(System.StringComparer.OrdinalIgnoreCase)
+                Dim item As System.Object = Nothing
+                Try
+                    item = session.GetItemFromID(entryId)
+                    Dim mail = TryCast(item, Microsoft.Office.Interop.Outlook.MailItem)
+                    Dim groupId = GetCleanupGroupId(mail)
+                    If Not System.String.IsNullOrWhiteSpace(groupId) Then _apAutoDeleteProtectedGroups.Add(groupId)
+                Catch ex As System.Exception
+                    ' The entry itself is still protected by its queue/pending identifier.
+                Finally
+                    If item IsNot Nothing AndAlso System.Runtime.InteropServices.Marshal.IsComObject(item) Then System.Runtime.InteropServices.Marshal.ReleaseComObject(item)
+                End Try
+            Next
+        Finally
+            If accounts IsNot Nothing AndAlso System.Runtime.InteropServices.Marshal.IsComObject(accounts) Then System.Runtime.InteropServices.Marshal.ReleaseComObject(accounts)
+            If session IsNot Nothing AndAlso System.Runtime.InteropServices.Marshal.IsComObject(session) Then System.Runtime.InteropServices.Marshal.ReleaseComObject(session)
+        End Try
+    End Sub
 
-        Return True
+    Private Function IsAutoDeleteWorkProtected(mi As Microsoft.Office.Interop.Outlook.MailItem, groupId As System.String) As System.Boolean
+        If Not System.String.IsNullOrWhiteSpace(groupId) AndAlso _apAutoDeleteProtectedGroups.Contains(groupId) Then Return True
+        Try
+            Dim id = mi.EntryID
+            Return _apQueuedOrProcessingEntryIds.ContainsKey(id) OrElse _apPendingApprovals.ContainsKey(id) OrElse
+                System.String.Equals(id, _apCurrentProcessingEntryId, System.StringComparison.OrdinalIgnoreCase)
+        Catch ex As System.Exception
+            Return True
+        End Try
+    End Function
+
+    Private Function IsRecognizedAutoDeleteMail(mi As Microsoft.Office.Interop.Outlook.MailItem, ByRef isOwnOutgoing As System.Boolean) As System.Boolean
+        isOwnOutgoing = False
+        Dim categorized As System.Boolean = False
+        Try
+            categorized = If(mi.Categories, "").Split(New System.Char() {","c, ";"c}, System.StringSplitOptions.RemoveEmptyEntries).
+                Any(Function(value) value.Trim().Equals(AP_CategoryName, System.StringComparison.OrdinalIgnoreCase))
+        Catch ex As System.Exception
+        End Try
+        If ReadAutoPilotReplyMarker(mi).Length > 0 Then
+            Dim address As System.String = ""
+            Dim sender As Microsoft.Office.Interop.Outlook.AddressEntry = Nothing
+            Dim exchangeUser As Microsoft.Office.Interop.Outlook.ExchangeUser = Nothing
+            Try
+                address = If(mi.SenderEmailAddress, "")
+                If mi.SenderEmailType = "EX" Then
+                    sender = mi.Sender
+                    If sender IsNot Nothing Then
+                        exchangeUser = sender.GetExchangeUser()
+                        If exchangeUser IsNot Nothing Then address = If(exchangeUser.PrimarySmtpAddress, "")
+                    End If
+                End If
+                isOwnOutgoing = _apAutoDeleteSendingAddresses.Contains(address.Trim())
+            Catch ex As System.Exception
+            Finally
+                If exchangeUser IsNot Nothing AndAlso System.Runtime.InteropServices.Marshal.IsComObject(exchangeUser) Then System.Runtime.InteropServices.Marshal.ReleaseComObject(exchangeUser)
+                If sender IsNot Nothing AndAlso System.Runtime.InteropServices.Marshal.IsComObject(sender) Then System.Runtime.InteropServices.Marshal.ReleaseComObject(sender)
+            End Try
+        End If
+        Return categorized OrElse isOwnOutgoing
     End Function
 
     Private Function TryGetNamedStringProperty(mi As MailItem, propertyName As String, ByRef value As String) As Boolean
         value = Nothing
         If mi Is Nothing Then Return False
-
         Try
             Dim raw = mi.PropertyAccessor.GetProperty(propertyName)
-            If raw Is Nothing Then Return False
-            value = CStr(raw)
-            Return True
-        Catch
-            Return False
+            If raw IsNot Nothing AndAlso Not System.String.IsNullOrWhiteSpace(raw.ToString()) Then
+                value = raw.ToString()
+                Return True
+            End If
+        Catch ex As System.Exception
         End Try
+        If Not propertyName.StartsWith("http://schemas.microsoft.com/mapi/string/{00020386-0000-0000-C000-000000000046}/X-RedInk-AutoDelete", System.StringComparison.Ordinal) Then Return False
+        Dim headerName = propertyName.Substring(propertyName.LastIndexOf("/"c) + 1)
+        Dim values = ReadTransportHeaderValues(ReadAutoPilotTransportHeaders(mi), headerName).
+            Select(Function(raw) raw.Trim()).Distinct(System.StringComparer.Ordinal).ToList()
+        If values.Count <> 1 OrElse values(0) = "" Then Return False
+        value = values(0)
+        Return True
     End Function
 
     Private Function TryParseCleanupUtcValue(raw As String, ByRef value As DateTime) As Boolean

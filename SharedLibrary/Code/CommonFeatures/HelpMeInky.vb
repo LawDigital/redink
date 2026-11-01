@@ -156,6 +156,7 @@ Namespace SharedLibrary
 
         ''' <summary>Serializes LLM calls to avoid concurrent model switching/use.</summary>
         Private ReadOnly _modelSemaphore As New Threading.SemaphoreSlim(1, 1)
+        Private ReadOnly _formLifetimeCts As New System.Threading.CancellationTokenSource()
         Private _dialogOwnerScope As System.IDisposable = Nothing
 
         ''' <summary>
@@ -176,7 +177,7 @@ Namespace SharedLibrary
             Me.MinimumSize = New System.Drawing.Size(720, 420)
             Me.Font = New System.Drawing.Font("Segoe UI", 9.0F)
             Try
-                Me.Icon = Icon.FromHandle(New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)).GetHicon())
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(Me)
             Catch
             End Try
 
@@ -304,7 +305,8 @@ Namespace SharedLibrary
             SharedMethods.EnsureVisibleOnScreen(Me)
 
             If Not Me.Visible Then
-                If owner IsNot Nothing Then Me.Show(owner) Else Me.Show()
+                Dim safeOwner As System.Windows.Forms.IWin32Window = SharedMethods.IfOwnerOnCurrentThread(owner)
+                If safeOwner IsNot Nothing Then Me.Show(safeOwner) Else Me.Show()
             End If
             Me.Activate()
             ApplyTopMostBehavior()
@@ -420,6 +422,11 @@ Namespace SharedLibrary
         ''' Persists transcript/HTML and window settings when the form closes.
         ''' </summary>
         Private Sub OnFormClosing(sender As Object, e As FormClosingEventArgs)
+            Try
+            If Not _formLifetimeCts.IsCancellationRequested Then _formLifetimeCts.Cancel()
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine("Form lifetime cancellation failed: " & ex.Message)
+            End Try
             Dbg("OnFormClosing")
             Try
                 PersistTranscriptLimited()
@@ -477,10 +484,19 @@ Namespace SharedLibrary
             Catch ex As Exception
                 Dbg("OnClear error: " & ex.Message)
             Finally
-                If _txtInput.InvokeRequired Then
-                    _txtInput.BeginInvoke(Sub() _txtInput.Focus())
-                Else
-                    _txtInput.Focus()
+                If Not _formLifetimeCts.IsCancellationRequested AndAlso Not Me.IsDisposed Then
+                    If _txtInput.InvokeRequired Then
+                        Try
+                            _txtInput.BeginInvoke(New System.Windows.Forms.MethodInvoker(
+                                Sub()
+                                    If Not Me.IsDisposed AndAlso Not _formLifetimeCts.IsCancellationRequested Then _txtInput.Focus()
+                                End Sub))
+                        Catch ex As System.Exception
+                            ' Host handle was already destroyed.
+                        End Try
+                    Else
+                        _txtInput.Focus()
+                    End If
                 End If
             End Try
         End Sub
@@ -507,6 +523,7 @@ Namespace SharedLibrary
         ''' Generates the welcome message, ensuring only one welcome is generated concurrently.
         ''' </summary>
         Private Async Function SafeGenerateWelcomeAsync() As Task
+            If _formLifetimeCts.IsCancellationRequested Then Return
             If Interlocked.CompareExchange(_welcomeInProgress, 1, 0) <> 0 Then
                 Dbg("SafeGenerateWelcomeAsync skipped: already running")
                 Exit Function
@@ -515,6 +532,7 @@ Namespace SharedLibrary
                 Await GenerateWelcomeAsync()
             Catch ex As Exception
                 Dbg("SafeGenerateWelcomeAsync fatal: " & ex.Message)
+                If _formLifetimeCts.IsCancellationRequested Then Return
                 RemoveAssistantThinking()
                 AppendAssistantMarkdown("*(Welcome failed: " & System.Security.SecurityElement.Escape(ex.Message) & ")*")
             Finally
@@ -532,6 +550,7 @@ Namespace SharedLibrary
                                         _hostLanguage)
             Dim partOfDay As String = GetPartOfDay()
             Dim manualText As String = Await GetManualAvailabilityTextAsync().ConfigureAwait(False)
+            If _formLifetimeCts.IsCancellationRequested Then Return
             Dim systemPrompt As String
             Dim userPrompt As String = ""
 
@@ -556,6 +575,7 @@ Namespace SharedLibrary
                 answer = "Hello! How can I help?"
             End Try
 
+            If _formLifetimeCts.IsCancellationRequested Then Return
             answer = If(answer, "").Trim()
             If IsManualLoadError(manualText) Then
                 answer = EnsureManualAccessErrorPrefix(answer, manualText)
@@ -667,6 +687,7 @@ Namespace SharedLibrary
         ''' invokes the LLM and verifies the generated response.
         ''' </summary>
         Private Async Function SendAsync(userText As String) As System.Threading.Tasks.Task
+            If _formLifetimeCts.IsCancellationRequested Then Return
             Dbg("SendAsync start")
 
             Try
@@ -777,6 +798,7 @@ Namespace SharedLibrary
                 Dim answer As String = Await CallHelpMeLlmAsync(
                     systemPrompt,
                     BuildHelpMeUserPrompt(userText, sourceText, conversation)).ConfigureAwait(False)
+                If _formLifetimeCts.IsCancellationRequested Then Return
                 answer = If(answer, "").Trim()
 
                 If IsManualLoadError(sourceText) Then
@@ -949,85 +971,76 @@ Namespace SharedLibrary
                 Dim sb As New StringBuilder()
                 sb.AppendLine("<Configuration Files>")
 
-                ' Get main config file
-                Dim mainPath As String = Nothing
+                Dim mainSource As String = ""
+                Dim mainReadPath As String = ""
                 Try
-                    mainPath = GetActiveConfigFilePath(_context)
-                Catch
+                    mainSource = GetActiveConfigSource(_context)
+                    mainReadPath = ConfigurationResourceLoader.ResolveForRead(mainSource, "redink.ini")
+                Catch ex As System.Exception
+                    sb.AppendLine("<Main Configuration>")
+                    sb.AppendLine("Source: " & ConfigurationResourceLoader.GetSafeSourceIdentifier(mainSource))
+                    sb.AppendLine("Error reading configuration: " & ex.Message)
+                    sb.AppendLine("</Main Configuration>")
                 End Try
 
-                If Not String.IsNullOrWhiteSpace(mainPath) AndAlso File.Exists(mainPath) Then
+                If Not String.IsNullOrWhiteSpace(mainReadPath) AndAlso File.Exists(mainReadPath) Then
                     sb.AppendLine($"<Main Configuration ({AN2}.ini)>")
-                    sb.AppendLine($"Path: {mainPath}")
+                    sb.AppendLine("Source: " & ConfigurationResourceLoader.GetSafeSourceIdentifier(mainSource))
                     Try
-                        Dim content = File.ReadAllText(mainPath)
-                        sb.AppendLine(SanitizeConfigContent(content))
-                    Catch ex As Exception
+                        sb.AppendLine(SanitizeConfigContent(File.ReadAllText(mainReadPath)))
+                    Catch ex As System.Exception
                         sb.AppendLine($"Error reading file: {ex.Message}")
                     End Try
-                    sb.AppendLine($"</Main Configuration>")
+                    sb.AppendLine("</Main Configuration>")
                 End If
 
-                ' Get default INI paths if available (assuming DefaultINIPaths exists in SharedMethods)
                 Try
                     Dim defaultPaths = SharedMethods.DefaultINIPaths
                     For Each kvp In defaultPaths
                         Dim p = ExpandEnvironmentVariables(kvp.Value)
-                        If File.Exists(p) AndAlso Not String.Equals(p, mainPath, StringComparison.OrdinalIgnoreCase) Then
+                        If File.Exists(p) AndAlso Not String.Equals(p, mainReadPath, StringComparison.OrdinalIgnoreCase) Then
                             sb.AppendLine($"<{kvp.Key} Configuration>")
-                            sb.AppendLine($"Path: {p}")
+                            sb.AppendLine($"Source: {p}")
                             Try
-                                Dim content = File.ReadAllText(p)
-                                sb.AppendLine(SanitizeConfigContent(content))
-                            Catch ex As Exception
+                                sb.AppendLine(SanitizeConfigContent(File.ReadAllText(p)))
+                            Catch ex As System.Exception
                                 sb.AppendLine($"Error reading file: {ex.Message}")
                             End Try
                             sb.AppendLine($"</{kvp.Key} Configuration>")
                         End If
                     Next
                 Catch
-                    ' DefaultINIPaths might not be accessible
                 End Try
 
-                ' Alternate model path
-                If Not String.IsNullOrWhiteSpace(_context.INI_AlternateModelPath) Then
-                    Dim alt = ExpandEnvironmentVariables(_context.INI_AlternateModelPath)
-                    If File.Exists(alt) AndAlso Not String.Equals(alt, mainPath, StringComparison.OrdinalIgnoreCase) Then
-                        sb.AppendLine("<Alternate Model Configuration>")
-                        sb.AppendLine($"Path: {alt}")
-                        Try
-                            Dim content = File.ReadAllText(alt)
-                            sb.AppendLine(SanitizeConfigContent(content))
-                        Catch ex As Exception
-                            sb.AppendLine($"Error reading file: {ex.Message}")
-                        End Try
-                        sb.AppendLine("</Alternate Model Configuration>")
-                    End If
-                End If
-
-                ' Special service path
-                If Not String.IsNullOrWhiteSpace(_context.INI_SpecialServicePath) Then
-                    Dim sp = ExpandEnvironmentVariables(_context.INI_SpecialServicePath)
-                    If File.Exists(sp) AndAlso Not String.Equals(sp, mainPath, StringComparison.OrdinalIgnoreCase) Then
-                        sb.AppendLine("<Special Service Configuration>")
-                        sb.AppendLine($"Path: {sp}")
-                        Try
-                            Dim content = File.ReadAllText(sp)
-                            sb.AppendLine(SanitizeConfigContent(content))
-                        Catch ex As Exception
-                            sb.AppendLine($"Error reading file: {ex.Message}")
-                        End Try
-                        sb.AppendLine("</Special Service Configuration>")
-                    End If
-                End If
+                AppendConfigurationResource(sb, "Alternate Model Configuration", _context.INI_AlternateModelPath, mainReadPath)
+                AppendConfigurationResource(sb, "Special Service Configuration", _context.INI_SpecialServicePath, mainReadPath)
 
                 sb.AppendLine("</Configuration Files>")
                 Return sb.ToString()
-            Catch ex As Exception
+            Catch ex As System.Exception
                 Dbg($"GetConfigurationContent error: {ex.Message}")
                 Return $"<Configuration Files>Error retrieving configuration: {ex.Message}</Configuration Files>"
             End Try
         End Function
+
+        Private Sub AppendConfigurationResource(ByVal sb As StringBuilder,
+                                                ByVal label As String,
+                                                ByVal source As String,
+                                                ByVal mainReadPath As String)
+            If String.IsNullOrWhiteSpace(source) Then Return
+
+            sb.AppendLine("<" & label & ">")
+            sb.AppendLine("Source: " & ConfigurationResourceLoader.GetSafeSourceIdentifier(source))
+            Try
+                Dim readPath As String = ConfigurationResourceLoader.ResolveForRead(source, label)
+                If Not String.Equals(readPath, mainReadPath, StringComparison.OrdinalIgnoreCase) Then
+                    sb.AppendLine(SanitizeConfigContent(File.ReadAllText(readPath)))
+                End If
+            Catch ex As System.Exception
+                sb.AppendLine("Error reading configuration: " & ex.Message)
+            End Try
+            sb.AppendLine("</" & label & ">")
+        End Sub
 
         ''' <summary>
         ''' Redacts API keys and removes comment lines from INI-like configuration text before sending it to the LLM.
@@ -1072,6 +1085,7 @@ Namespace SharedLibrary
         ''' Serialized via `_modelSemaphore` to avoid concurrent model switching/restores.
         ''' </summary>
         Private Async Function CallHelpMeLlmAsync(systemPrompt As String, userPrompt As String) As Task(Of String)
+            _formLifetimeCts.Token.ThrowIfCancellationRequested()
             If _context Is Nothing Then Return ""
             If Not String.IsNullOrEmpty(_hostAppName) AndAlso systemPrompt.IndexOf(_hostAppName, StringComparison.OrdinalIgnoreCase) < 0 Then
                 systemPrompt &= $" (This chat runs inside Microsoft {_hostAppName}.)"
@@ -1088,7 +1102,7 @@ Namespace SharedLibrary
                 Dbg($"Alternate HelpMe model available={_helpMeAltAvailable}")
             End If
 
-            Await _modelSemaphore.WaitAsync().ConfigureAwait(False)
+            Await _modelSemaphore.WaitAsync(_formLifetimeCts.Token).ConfigureAwait(False)
             Dim backupConfig As ModelConfig = Nothing
             Dim appliedAlternate As Boolean = False
             Dim useSecondApi As Boolean = False
@@ -1111,7 +1125,8 @@ Namespace SharedLibrary
                                            "",
                                            timeout,
                                            useSecondApi,
-                                           True).ConfigureAwait(False)
+                                           True,
+                                           cancellationToken:=_formLifetimeCts.Token).ConfigureAwait(False)
             Finally
                 If appliedAlternate AndAlso backupConfig IsNot Nothing Then
                     SharedMethods.RestoreDefaults(_context, backupConfig)
@@ -1157,6 +1172,19 @@ Namespace SharedLibrary
         ''' a deterministic temp file and refreshed at least every 72 hours.
         ''' </summary>
         Private Async Function EnsureLocalSemanticSearchIndexPathAsync(
+            pathOrUrl As String,
+            Optional statusReporter As System.Action(Of String) = Nothing) As System.Threading.Tasks.Task(Of String)
+
+            Return Await ResolveSemanticSearchIndexPathAsync(pathOrUrl, statusReporter).ConfigureAwait(False)
+        End Function
+
+        ''' <summary>
+        ''' Resolves a local semantic-search index path for a local or remote HelpMeInky
+        ''' manual source. Remote sources use the same deterministic cache/refresh path as
+        ''' the HelpMeInky UI, so other hosts (for example AutoPilot inability handling) do
+        ''' not silently fall back to loading a remote indexed manual as one large text blob.
+        ''' </summary>
+        Public Shared Async Function ResolveSemanticSearchIndexPathAsync(
             pathOrUrl As String,
             Optional statusReporter As System.Action(Of String) = Nothing) As System.Threading.Tasks.Task(Of String)
 

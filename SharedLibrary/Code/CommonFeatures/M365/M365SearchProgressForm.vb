@@ -15,6 +15,10 @@
 '
 '          Headless callers can ignore this form entirely and pass their own
 '          IProgress(Of M365SearchProgress) (e.g. wired to ApDashboardLog).
+'
+' KEY ARCHITECTURE
+'   • Surface: M365SearchProgressForm (host partial/UI).
+'   • Entry points/helpers: Report, ApplyProgress, btnCancel_Click.
 ' =============================================================================
 
 Option Explicit On

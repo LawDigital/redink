@@ -65,6 +65,11 @@
 '      * In-place JSON editor for manual task creation/modification
 '      * Pause/resume and delete operations refresh display immediately
 '
+'
+' KEY ARCHITECTURE
+'   • Surface: ThisAddIn, ScheduledTask (host partial/UI).
+'   • Entry points/helpers: GetScheduleFilePath, GetScheduleAttachmentBaseDir,
+'     GetTaskWorkspaceDir.
 ' =============================================================================
 
 Option Explicit On
@@ -681,7 +686,7 @@ Partial Public Class ThisAddIn
             _apLocalSchedulerCts = New CancellationTokenSource()
         End If
 
-        SchedulerPurgeOrphanDirectories()
+        If Not _apActive Then SchedulerPurgeOrphanDirectories()
         StartSchedulerTimer()
     End Sub
 
@@ -703,6 +708,7 @@ Partial Public Class ThisAddIn
     End Sub
 
     Private Function IsLocalSchedulerEnabled() As Boolean
+        If IsAutoPilotDrainRequested() Then Return False
         If INI_WebServerBlock = 2 OrElse INI_WebServerBlock = 4 Then Return False
         If _apActive Then Return False
 
@@ -754,7 +760,7 @@ Partial Public Class ThisAddIn
     Friend Sub SchedulerCatchUp()
         Try
             ' Purge orphan directories from manually deleted tasks
-            SchedulerPurgeOrphanDirectories()
+            If Not _apActive Then SchedulerPurgeOrphanDirectories()
 
             Dim schedule = ReadScheduleFile()
             Dim now = DateTime.UtcNow
@@ -784,10 +790,11 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Ensures a persisted task is only executed by the runtime identity that owns it.
-    ''' AutoPilot tasks require an explicit authenticated CreatedBy identity. When the
+    ''' AutoPilot tasks require an explicit stored CreatedBy ownership key. When the
     ''' Local Agent scheduler is active instead, the task owner must be the local main
     ''' mailbox. This also prevents legacy tasks without CreatedBy from being silently
-    ''' adopted after a mode/user transition.
+    ''' adopted after a mode/user transition. This routing check does not independently
+    ''' authenticate a requester or grant Semantic Archive source access.
     ''' </summary>
     Private Function IsScheduledTaskOwnedByCurrentRuntime(task As ScheduledTask) As Boolean
         If task Is Nothing OrElse String.IsNullOrWhiteSpace(task.CreatedBy) Then Return False
@@ -803,7 +810,7 @@ Partial Public Class ThisAddIn
 
     ''' <summary>Checks for due tasks and executes them sequentially.</summary>
     Private Async Function CheckAndExecuteDueTasks(ct As CancellationToken) As Task
-        If Not IsSchedulerRuntimeAvailable() Then Return
+        If Not IsSchedulerRuntimeAvailable() OrElse IsAutoPilotDrainRequested() Then Return
 
         Dim schedule = ReadScheduleFile()
         Dim now = DateTime.UtcNow
@@ -833,11 +840,17 @@ Partial Public Class ThisAddIn
                 Continue For
             End If
 
+            If IsAutoPilotDrainRequested() Then Return
             If Not _apProcessingSemaphore.Wait(0) Then
                 Return
             End If
 
             Try
+                SyncLock _apJobAdmissionSync
+                    If IsAutoPilotDrainRequested() Then Return
+                End SyncLock
+                ' A real due task (including local interactive tasks) pre-empts diagnostics.
+                CancelAutoPilotLogDiagnosticsForForegroundWork()
                 If isLocalInteractiveTask Then
                     Await HandleDueLocalInteractiveTaskAsync(task, ct)
                     Continue For
@@ -923,6 +936,10 @@ Partial Public Class ThisAddIn
         Dim senderDesignScope As System.IDisposable = Nothing
 
         Try
+            ' A due scheduled task is foreground AutoPilot work. Pre-empt any idle log
+            ' diagnostics before waiting for the shared LLM/agent gate.
+            CancelAutoPilotLogDiagnosticsForForegroundWork()
+
             Await SharedLibrary.Agents.AgentGate.BeginOwnedScopeAsync(ct).ConfigureAwait(False)
             runIsolationOwned = True
 
@@ -939,6 +956,8 @@ Partial Public Class ThisAddIn
             ' Every scheduled execution owns a fresh top-level tooling/delivery result.
             ' A no-tool scheduled run must never see the previous AutoPilot/Local-Agent registry.
             _lastCompletedToolingRunState = Nothing
+            _lastCompletedToolingWorkflowId = System.String.Empty
+            _lastCompletedToolingWasBlocked = False
             _lastCompletedToolResponses = New List(Of ToolResponse)()
 
             ' Create isolated temp directory
@@ -1041,12 +1060,24 @@ Partial Public Class ThisAddIn
             senderDesignScope = SharedLibrary.Agents.DesignRepository.PushAccessScope(
                 senderDesignAccess.AllowDesigns, senderDesignAccess.AllowDesignSets)
 
+            ' Scheduled archive access requires fresh independent verification; a
+            ' persisted CreatedBy email never restores an earlier or interactive grant.
+            Dim archiveScope As Global.SharedLibrary.SharedLibrary.SemanticArchiveRunScope =
+                Await CreateAutoPilotSemanticArchiveRunScopeAsync(
+                    Global.SharedLibrary.SharedLibrary.SemanticArchiveRequesterOrigin.ScheduledTask, task.Id, task.CreatedBy, ct)
+            Dim archivePrepared As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest =
+                Await Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.PrepareAsync(
+                    _context, If(task Is Nothing, "", task.Instruction), archiveScope,
+                    allowInteractiveSelection:=False, cancellationToken:=ct)
+
             ' Build prompts — tell the LLM it is executing a scheduled task
             Dim userPrompt As StringBuilder =
                 BuildScheduledTaskExecutionPrompt(
                     task,
                     inputFileNames,
-                    workspaceFileNames)
+                    workspaceFileNames,
+                    If(archivePrepared.HasTrigger, archivePrepared.CleanPrompt, Nothing))
+            If archivePrepared.HasTrigger Then userPrompt.AppendLine(archivePrepared.ContextText)
 
             Dim systemPrompt = InterpolateAtRuntime(SP_AutoPilot)
 
@@ -1094,20 +1125,31 @@ Partial Public Class ThisAddIn
                 End If
 
                 If schedulerTools.Count > 0 Then
-                    response = Await ExecuteToolingLoop(
-                        systemPrompt, userPrompt.ToString(),
-                        schedulerTools, executionUseSecondApi,
-                        hideSplash:=True, hideLogWindow:=True,
-                        cancellationToken:=ct, binaryOutputDirectory:=tempDir,
-                        toolingLogArchivePath:=BuildAutoPilotToolingLogArchivePath(
-                            task.CreatedBy,
-                            If(String.IsNullOrWhiteSpace(task.Subject), task.Instruction, task.Subject)))
+                    Dim originalRequest As New Global.SharedLibrary.Agents.ToolingOriginalRequestLog.Record(
+                        requestText:=task.Instruction, subject:=task.Subject, senderEmail:=task.CreatedBy,
+                        source:="autopilot_schedule", messageId:=task.Id)
+                    Dim coachingArchivePath As System.String = BuildAutoPilotToolingLogArchivePath(
+                        task.CreatedBy, If(System.String.IsNullOrWhiteSpace(task.Subject), task.Instruction, task.Subject), originalRequest)
+                    Try
+                        response = Await ExecuteToolingLoop(
+                            systemPrompt, userPrompt.ToString(),
+                            schedulerTools, executionUseSecondApi,
+                            hideSplash:=True, hideLogWindow:=True,
+                            cancellationToken:=ct, binaryOutputDirectory:=tempDir,
+                            toolingLogArchivePath:=coachingArchivePath,
+                            toolingOriginalRequest:=originalRequest,
+                            semanticArchivePrepared:=archivePrepared,
+                            transportRetryProfile:=Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Unattended)
+                    Finally
+                        CompleteAutoPilotPromptCoachingRun(coachingArchivePath)
+                    End Try
                 Else
                     response = Await LLM(systemPrompt, userPrompt.ToString(),
                                          UseSecondAPI:=executionUseSecondApi,
                                          HideSplash:=True, EnsureUI:=False,
                                          cancellationToken:=ct,
-                                         binaryOutputDirectory:=tempDir)
+                                         binaryOutputDirectory:=tempDir,
+                                         transportRetryProfile:=Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Unattended)
                 End If
             Else
                 Dim effectiveSystemPrompt = If(modelCanCallTools, systemPrompt, InterpolateAtRuntime(SP_AutoPilot_NoTools))
@@ -1115,7 +1157,8 @@ Partial Public Class ThisAddIn
                                      UseSecondAPI:=executionUseSecondApi,
                                      HideSplash:=True, EnsureUI:=False,
                                      cancellationToken:=ct,
-                                     binaryOutputDirectory:=tempDir)
+                                     binaryOutputDirectory:=tempDir,
+                                     transportRetryProfile:=Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Unattended)
             End If
 
             If String.IsNullOrWhiteSpace(response) Then
@@ -1164,6 +1207,7 @@ Partial Public Class ThisAddIn
                 ' Re-sync the workspace file list
                 SyncWorkspaceFileList(task)
             End If
+            AddSemanticArchiveEvidenceAttachments(resultAttachments, archiveScope, tempDir)
 
             ' Send result e-mail
             Await SwitchToUi(Sub() SendScheduledTaskResult(task, response, resultAttachments, sourcesHtml))
@@ -1643,7 +1687,8 @@ Partial Public Class ThisAddIn
 
     Private Function BuildScheduledTaskExecutionPrompt(task As ScheduledTask,
                                                        inputFileNames As IEnumerable(Of String),
-                                                       workspaceFileNames As IEnumerable(Of String)) As StringBuilder
+                                                       workspaceFileNames As IEnumerable(Of String),
+                                                       Optional authoritativeInstructionOverride As System.String = Nothing) As System.Text.StringBuilder
         Dim prompt As New StringBuilder()
         Dim shortTaskId As String = ""
 
@@ -1670,9 +1715,16 @@ Partial Public Class ThisAddIn
                 OrderBy(Function(name) name, StringComparer.OrdinalIgnoreCase).
                 ToList()
 
+        Dim executionLocal As System.DateTimeOffset = System.DateTimeOffset.Now
+
         prompt.AppendLine("[SCHEDULED TASK EXECUTION]")
         prompt.AppendLine($"You are executing a previously scheduled task (ID: {shortTaskId}...).")
         prompt.AppendLine($"Schedule: {If(task?.ScheduleDescription, "one-time")}")
+        prompt.AppendLine($"Execution local datetime: {executionLocal:yyyy-MM-ddTHH:mm:sszzz}")
+        prompt.AppendLine($"Execution local date: {executionLocal:yyyy-MM-dd}")
+        prompt.AppendLine($"Execution UTC datetime: {executionLocal.UtcDateTime:yyyy-MM-ddTHH:mm:ssZ}")
+        prompt.AppendLine($"Execution timezone: {System.TimeZoneInfo.Local.Id}")
+        prompt.AppendLine("Treat these execution timestamps as authoritative for relative date/time terms such as today, tomorrow, this morning, and tonight.")
         prompt.AppendLine("This task is already scheduled — do NOT call manage_scheduled_tasks to create, update, or re-schedule it.")
         prompt.AppendLine("Just perform the work described below and return the result.")
 
@@ -1693,7 +1745,7 @@ Partial Public Class ThisAddIn
 
         prompt.AppendLine()
         prompt.AppendLine("[TASK INSTRUCTION]")
-        prompt.AppendLine(If(task?.Instruction, ""))
+        prompt.AppendLine(If(authoritativeInstructionOverride, If(task?.Instruction, "")))
         prompt.AppendLine("[/TASK INSTRUCTION]")
 
         Return prompt
@@ -1800,9 +1852,7 @@ Partial Public Class ThisAddIn
             Next
 
             ' Tag as AutoPilot reply for loop prevention
-            Try
-                newMail.PropertyAccessor.SetProperty(AP_LoopHeaderProperty, AP_LoopHeaderValue)
-            Catch : End Try
+            StampAutoPilotReplyHeaders(newMail, AP_LoopHeaderValue)
             Try : newMail.Categories = AP_CategoryName : Catch : End Try
 
             Dim cleanupGroupId As String = Nothing
@@ -1891,7 +1941,7 @@ Partial Public Class ThisAddIn
             Catch
             End Try
 
-            newMail.Send()
+            SubmitAutoPilotMailOnce(newMail)
 
             ' Do not access newMail properties after Send().
             ' The Outlook MailItem may already have been moved from Drafts/Outbox,
@@ -2641,14 +2691,14 @@ Partial Public Class ThisAddIn
     Friend Sub ShowSchedulerDashboard()
         If _apSchedulerDashboard IsNot Nothing AndAlso Not _apSchedulerDashboard.IsDisposed Then
             RefreshSchedulerDashboard()
-            _apSchedulerDashboard.Show()
+            ShowHostModelessForm(_apSchedulerDashboard)
             _apSchedulerDashboard.BringToFront()
             Return
         End If
 
         _apSchedulerDashboard = CreateSchedulerDashboardForm()
         RefreshSchedulerDashboard()
-        _apSchedulerDashboard.Show()
+        ShowHostModelessForm(_apSchedulerDashboard)
     End Sub
 
     ''' <summary>Creates the scheduler dashboard form with a DataGridView and action buttons.</summary>
@@ -2669,8 +2719,7 @@ Partial Public Class ThisAddIn
         }
 
         Try
-            frm.Icon = Drawing.Icon.FromHandle(
-                (New Drawing.Bitmap(GetLogoBitmap(LogoType.Standard))).GetHicon())
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(frm)
         Catch
         End Try
 
@@ -2783,7 +2832,7 @@ Partial Public Class ThisAddIn
 
         ' Hide instead of closing
         AddHandler frm.FormClosing, Sub(s As Object, e As FormClosingEventArgs)
-                                        If e.CloseReason = CloseReason.UserClosing Then
+                                        If e.CloseReason = CloseReason.UserClosing AndAlso Not IsHostModelessClosing Then
                                             e.Cancel = True
                                             frm.Hide()
                                         End If

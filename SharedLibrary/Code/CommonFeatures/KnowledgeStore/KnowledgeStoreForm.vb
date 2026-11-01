@@ -145,9 +145,7 @@ Namespace SharedLibrary
 
             ' Set icon
             Try
-                Dim bmp As New Bitmap(GetLogoBitmap(LogoType.Standard))
-                Me.Icon = Icon.FromHandle(bmp.GetHicon())
-                bmp.Dispose()
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(Me)
             Catch
             End Try
 
@@ -1252,9 +1250,7 @@ Namespace SharedLibrary
 
                 ' Match main form icon
                 Try
-                    Dim bmp As New Bitmap(GetLogoBitmap(LogoType.Standard))
-                    dlg.Icon = Icon.FromHandle(bmp.GetHicon())
-                    bmp.Dispose()
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(dlg)
                 Catch
                 End Try
 

@@ -412,6 +412,176 @@ Partial Public Class ThisAddIn
         Next
     End Sub
 
+    Private Shared Function IsOutlookWordRangeOutOfRangeException(
+        ex As System.Exception) As System.Boolean
+
+        Dim current As System.Exception = ex
+        Do While current IsNot Nothing
+            If TypeOf current Is System.ArgumentOutOfRangeException Then Return True
+
+            Dim message As System.String = If(current.Message, System.String.Empty)
+            If message.IndexOf("value out of range", System.StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+               message.IndexOf("out of range", System.StringComparison.OrdinalIgnoreCase) >= 0 Then
+                Return True
+            End If
+
+            current = current.InnerException
+        Loop
+
+        Return False
+    End Function
+
+    Private Shared Sub SetOutlookSelectionRangeSafe(
+        selection As Microsoft.Office.Interop.Word.Selection,
+        requestedStart As System.Int32,
+        requestedEnd As System.Int32)
+
+        If selection Is Nothing OrElse selection.Document Is Nothing Then
+            Throw New System.ArgumentNullException(NameOf(selection))
+        End If
+
+        Try
+            selection.SetRange(requestedStart, requestedEnd)
+            Return
+        Catch ex As System.Exception When IsOutlookWordRangeOutOfRangeException(ex)
+            ' Outlook's WordEditor can reject an otherwise plausible end position when the
+            ' selection touches the terminal story paragraph. Recover at the actual COM call
+            ' boundary, against the document's CURRENT Content range, rather than trusting a
+            ' range that may have become stale after markdown/HTML transformations.
+            Dim document As Microsoft.Office.Interop.Word.Document = selection.Document
+            Dim documentStart As System.Int32 = document.Content.Start
+            Dim documentEnd As System.Int32 = document.Content.End
+            Dim maximumWritablePosition As System.Int32 =
+                If(documentEnd > documentStart, documentEnd - 1, documentStart)
+
+            Dim safeStart As System.Int32 =
+                System.Math.Max(documentStart, System.Math.Min(requestedStart, maximumWritablePosition))
+            Dim safeEnd As System.Int32 =
+                System.Math.Max(safeStart, System.Math.Min(requestedEnd, maximumWritablePosition))
+
+            Dim safeRange As Microsoft.Office.Interop.Word.Range =
+                document.Range(safeStart, safeEnd)
+            safeRange.Select()
+
+            System.Diagnostics.Debug.WriteLine(
+                "Outlook SetRange recovered terminal story boundary: requested=" &
+                requestedStart.ToString(System.Globalization.CultureInfo.InvariantCulture) & ":" &
+                requestedEnd.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                "; applied=" &
+                safeStart.ToString(System.Globalization.CultureInfo.InvariantCulture) & ":" &
+                safeEnd.ToString(System.Globalization.CultureInfo.InvariantCulture))
+        End Try
+    End Sub
+
+    Private Shared Sub NormalizeOutlookSelectionTerminalBoundary(
+        selection As Microsoft.Office.Interop.Word.Selection)
+
+        If selection Is Nothing OrElse selection.Document Is Nothing Then Return
+
+        Dim document As Microsoft.Office.Interop.Word.Document = selection.Document
+        Dim currentRange As Microsoft.Office.Interop.Word.Range = selection.Range.Duplicate()
+        Dim documentStart As System.Int32 = document.Content.Start
+        Dim documentEnd As System.Int32 = document.Content.End
+
+        If documentEnd <= documentStart Then Return
+        If currentRange.End < documentEnd Then Return
+
+        ' Ctrl+A / whole-mail selections include Outlook WordEditor's terminal paragraph mark.
+        ' That mark is structural, not user content. Remove only that terminal boundary at the
+        ' command entry point so every downstream pipeline receives a writable source range.
+        Dim safeEnd As System.Int32 = System.Math.Max(currentRange.Start, documentEnd - 1)
+        SetOutlookSelectionRangeSafe(selection, currentRange.Start, safeEnd)
+    End Sub
+
+    Private Shared Sub InsertTextWithMarkdownOutlookInsertAfterSafe(
+        selection As Microsoft.Office.Interop.Word.Selection,
+        text As System.String,
+        trailingCR As System.Boolean,
+        useHostDefaultFontColor As System.Boolean,
+        formattingSourceRange As Microsoft.Office.Interop.Word.Range)
+
+        Try
+            SLib.InsertTextWithMarkdown(
+                selection,
+                text,
+                trailingCR,
+                useHostDefaultFontColor,
+                FormattingSourceRange:=formattingSourceRange)
+        Catch ex As System.Exception When IsOutlookWordRangeOutOfRangeException(ex)
+            ' Last-resort host recovery at the invocation itself. The shared renderer remains
+            ' host-agnostic; Outlook alone knows that its WordEditor terminal story mark is not
+            ' a valid InsertAfter destination. Re-resolve from the live document and retry once.
+            Dim retryRange As Microsoft.Office.Interop.Word.Range =
+                ResolveSafeInsertAfterRange(selection.Range)
+            If retryRange Is Nothing Then Throw
+
+            SetOutlookSelectionRangeSafe(selection, retryRange.Start, retryRange.End)
+
+            System.Diagnostics.Debug.WriteLine(
+                "Outlook InsertTextWithMarkdown recovered Value out of range at terminal story boundary.")
+
+            SLib.InsertTextWithMarkdown(
+                selection,
+                text,
+                trailingCR,
+                useHostDefaultFontColor,
+                FormattingSourceRange:=formattingSourceRange)
+        End Try
+    End Sub
+
+    Private Shared Sub InsertTextWithFormatOutlookInsertAfterSafe(
+        formattedText As System.String,
+        ByRef range As Microsoft.Office.Interop.Word.Range,
+        noTrailingCR As System.Boolean,
+        useHostDefaultFontColor As System.Boolean)
+
+        Try
+            SLib.InsertTextWithFormat(
+                formattedText,
+                range,
+                False,
+                noTrailingCR,
+                useHostDefaultFontColor)
+        Catch ex As System.Exception When IsOutlookWordRangeOutOfRangeException(ex)
+            Dim retryRange As Microsoft.Office.Interop.Word.Range = ResolveSafeInsertAfterRange(range)
+            If retryRange Is Nothing Then Throw
+
+            range = retryRange
+            System.Diagnostics.Debug.WriteLine(
+                "Outlook InsertTextWithFormat recovered Value out of range at terminal story boundary.")
+
+            SLib.InsertTextWithFormat(
+                formattedText,
+                range,
+                False,
+                noTrailingCR,
+                useHostDefaultFontColor)
+        End Try
+    End Sub
+
+    Private Shared Function ResolveSafeInsertAfterRange(
+        sourceRange As Microsoft.Office.Interop.Word.Range) As Microsoft.Office.Interop.Word.Range
+
+        If sourceRange Is Nothing OrElse sourceRange.Document Is Nothing Then Return Nothing
+
+        Dim document As Microsoft.Office.Interop.Word.Document = sourceRange.Document
+        Dim documentStart As System.Int32 = document.Content.Start
+        Dim documentEnd As System.Int32 = document.Content.End
+        Dim insertionPosition As System.Int32 = sourceRange.End
+
+        ' Outlook's WordEditor selection can include the terminal story paragraph mark when
+        ' the whole mail is selected. Collapsing that selection to End yields document.Content.End,
+        ' which is outside the writable character range for subsequent Range.Text/InsertAfter
+        ' operations and raises COM "Value out of range". Insert immediately before the terminal
+        ' paragraph mark instead. Normal partial selections keep their exact end position.
+        If documentEnd > documentStart AndAlso insertionPosition >= documentEnd Then
+            insertionPosition = documentEnd - 1
+        End If
+
+        insertionPosition = System.Math.Max(documentStart, System.Math.Min(insertionPosition, documentEnd))
+        Return document.Range(insertionPosition, insertionPosition)
+    End Function
+
     Private Shared Function ResolveInsertionFormattingSourceBeforePosition(
         sourceRange As Microsoft.Office.Interop.Word.Range) As Microsoft.Office.Interop.Word.Range
 
@@ -445,7 +615,10 @@ Partial Public Class ThisAddIn
 
         ' Empty/new message fallback: use the insertion point itself only when there is no
         ' preceding concrete text from which Outlook can inherit the destination formatting.
-        Dim fallback As Microsoft.Office.Interop.Word.Range = sourceRange.Duplicate()
+        Dim fallback As Microsoft.Office.Interop.Word.Range = ResolveSafeInsertAfterRange(sourceRange)
+        If fallback IsNot Nothing Then Return fallback
+
+        fallback = sourceRange.Duplicate()
         fallback.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
         Return fallback
     End Function
@@ -655,6 +828,12 @@ Partial Public Class ThisAddIn
             InitializeConfig(False, False)
 
             If GPTSetupError OrElse INIValuesMissing() Or Not INIloaded Then Return
+
+            If RI_Command = "CheckPhishing" Then CheckPhishing() : Return
+            If RI_Command = "MarkdownEditor" Then
+                Global.SharedLibrary.SharedLibrary.MarkdownEditorForm.ShowEditor("Outlook")
+                Return
+            End If
 
             ' Use fully qualified names to avoid ambiguity
             Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
@@ -1204,6 +1383,23 @@ Partial Public Class ThisAddIn
 
 
     ''' <summary>
+    ''' Keeps Sum-up list styling without hiding the content from the shared HTML viewer's
+    ''' fragment styling (font, background and horizontal inset). A full HTML wrapper
+    ''' is intentionally not used: the viewer preserves full Word-exported documents.
+    ''' </summary>
+    Private Shared Function BuildSumupHtmlFragment(ByVal contentHtml As System.String) As System.String
+        ' These rules provide a stable list indentation even when the embedded HTML
+        ' browser uses its legacy IE rendering mode. Keep native Markdown <strong>
+        ' and <em> semantics; never impose bold on the complete summary.
+        Return "<style type=""text/css"">" &
+               "html, body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 9pt; font-weight: normal; }" &
+               "ul, ol { margin: 0.65em 0 0.8em 0; padding-left: 2em; list-style-position: outside; }" &
+               "li { margin: 0.2em 0; padding-left: 0.15em; }" &
+               "li ul, li ol { margin-top: 0.25em; margin-bottom: 0.25em; }" &
+               "</style>" & If(contentHtml, System.String.Empty)
+    End Function
+
+    ''' <summary>
     ''' Generates summary HTML for a mail chain: calls LLM with SP_MailSumup, optional post-correction, Markdown to HTML conversion, displays result.
     ''' </summary>
     Private Async Sub ShowSumup(selectedtext As String)
@@ -1223,20 +1419,12 @@ Partial Public Class ThisAddIn
 
         Dim htmlText As String = Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(LLMResult), markdownPipeline)
 
-        Dim fullHtml As String =
-              "<!DOCTYPE html>" &
-              "<html><head>" &
-              "  <meta charset=""utf-8"" />" &
-              "  <style>" &
-              "    ul { margin-left: 0.5em; padding-left: 0; list-style-position: outside; }" &
-              "    ul ul { margin-left: 1em; padding-left: 0; list-style-type: circle; }" &
-              "    ul ul ul { margin-left: 1.5em; padding-left: 0; list-style-type: square; }" &
-              "  </style>" &
-              "</head><body>" &
-                htmlText &
-              "</body></html>"
+        ' Pass a fragment rather than a full HTML document. The common HTML viewer
+        ' applies its 20px content inset, Segoe UI font and form background only to
+        ' fragments; complete Word-exported HTML retains its own native styles.
+        Dim htmlFragment As String = BuildSumupHtmlFragment(htmlText)
 
-        ShowHTMLCustomMessageBox(fullHtml, $"{AN} Sum-up")
+        ShowHTMLCustomMessageBox(htmlFragment, $"{AN} Sum-up")
 
     End Sub
 
@@ -1289,20 +1477,12 @@ Partial Public Class ThisAddIn
 
         Dim htmlText As String = Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(LLMResult), markdownPipeline)
 
-        Dim fullHtml As String =
-              "<!DOCTYPE html>" &
-              "<html><head>" &
-              "  <meta charset=""utf-8"" />" &
-              "  <style>" &
-              "    ul { margin-left: 0.5em; padding-left: 0; list-style-position: outside; }" &
-              "    ul ul { margin-left: 1em; padding-left: 0; list-style-type: circle; }" &
-              "    ul ul ul { margin-left: 1.5em; padding-left: 0; list-style-type: square; }" &
-              "  </style>" &
-              "</head><body>" &
-                htmlText &
-              "</body></html>"
+        ' Pass a fragment rather than a full HTML document. The common HTML viewer
+        ' applies its 20px content inset, Segoe UI font and form background only to
+        ' fragments; complete Word-exported HTML retains its own native styles.
+        Dim htmlFragment As String = BuildSumupHtmlFragment(htmlText)
 
-        ShowHTMLCustomMessageBox(fullHtml, $"{AN} Sum-up (of unanswered/unread mails)")
+        ShowHTMLCustomMessageBox(htmlFragment, $"{AN} Sum-up (of unanswered/unread mails)")
 
     End Sub
 
@@ -1513,11 +1693,91 @@ Partial Public Class ThisAddIn
     End Sub
 
 
+    ' An AI error is recorded at the precise Await boundary, rather than
+    ' guessed from an unrelated exception's text or the user's current UI.
+    Private NotInheritable Class OutlookModelRequestException
+        Inherits System.Exception
+
+        Public Sub New(cause As System.Exception)
+            MyBase.New("Model request failed.", cause)
+        End Sub
+    End Class
+
+    Private Async Function AwaitOutlookModelRequestAsync(
+        request As System.Func(Of System.Threading.Tasks.Task(Of System.String))) _
+        As System.Threading.Tasks.Task(Of System.String)
+        Try
+            Return Await request().ConfigureAwait(False)
+        Catch ex As System.OperationCanceledException
+            Throw
+        Catch ex As System.Exception When IsOutlookCommandCancellation(ex)
+            Throw
+        Catch ex As System.Exception
+            Throw New OutlookModelRequestException(ex)
+        End Try
+    End Function
+
+    Private Shared Function IsOutlookCommandCancellation(ex As System.Exception, Optional pureCausesOnly As System.Boolean = False) As System.Boolean
+        If TypeOf ex Is System.OperationCanceledException Then
+            Return Not pureCausesOnly OrElse ex.InnerException Is Nothing OrElse IsOutlookCommandCancellation(ex.InnerException, True)
+        End If
+        Dim aggregate As System.AggregateException = TryCast(ex, System.AggregateException)
+        If aggregate IsNot Nothing Then
+            Dim nested As System.Collections.ObjectModel.ReadOnlyCollection(Of System.Exception) =
+                aggregate.Flatten().InnerExceptions
+            If nested.Count = 0 Then Return False
+            For Each candidate As System.Exception In nested
+                If Not IsOutlookCommandCancellation(candidate, pureCausesOnly) Then Return False
+            Next
+            Return True
+        End If
+        Dim invoked As System.Reflection.TargetInvocationException =
+            TryCast(ex, System.Reflection.TargetInvocationException)
+        Return invoked IsNot Nothing AndAlso invoked.InnerException IsNot Nothing AndAlso
+            IsOutlookCommandCancellation(invoked.InnerException, pureCausesOnly)
+    End Function
+
+    Private Sub ReportOutlookCommandFailure(operation As System.String, ex As System.Exception)
+        Dim cancelled As System.Boolean = IsOutlookCommandCancellation(ex)
+        Dim normalCancellation As System.Boolean = cancelled AndAlso IsOutlookCommandCancellation(ex, pureCausesOnly:=True)
+        ' A cancellation caused by a real fault (e.g. unavailable progress UI) retains its full diagnosis.
+        Dim diagnostic As System.String = "Outlook command [" & operation & "]: " & If(normalCancellation, "cancelled_by_user", ex.ToString())
+        System.Diagnostics.Debug.WriteLine(diagnostic)
+        Try
+            If _context IsNot Nothing AndAlso _context.INI_APIDebug Then
+                Global.SharedLibrary.SharedLogger.Log(_context, _context.RDV, diagnostic)
+            End If
+        Catch loggingFailure As System.Exception
+            System.Diagnostics.Debug.WriteLine("Outlook command logging failed: " & loggingFailure.ToString())
+        End Try
+
+        ' Timeouts and mixed failures still reach the normal error boundary.
+        If cancelled Then Return
+
+        Dim modelFailure As OutlookModelRequestException = TryCast(ex, OutlookModelRequestException)
+        If modelFailure IsNot Nothing Then
+            Dim cause As System.Exception = If(modelFailure.InnerException, modelFailure)
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox(
+                Global.SharedLibrary.SharedLibrary.SharedMethods.FormatModelRequestFailureForUser(cause), "Inky")
+            Return
+        End If
+        If TypeOf ex Is System.TimeoutException Then
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox(
+                Global.SharedLibrary.SharedLibrary.SharedMethods.FormatModelRequestFailureForUser(ex), "Inky")
+            Return
+        End If
+
+        ' Real internal failures still retain their operation context.
+        Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox(
+            "Error in " & operation & ": " & ex.Message, "Error")
+    End Sub
+
     ''' <summary>
     ''' Inserts LLM result before existing content (prepend) in current MailItem; optionally prompts user for answer instructions and applies MyStyle.
     ''' </summary>
     Private Async Sub FreeStyle_InsertBefore(Command As String, Optional AskForPrompt As Boolean = False)
         Try
+            Await EnsureUIThread()
             Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
             Dim inspector As Inspector = ComRetry(Function() outlookApp.ActiveInspector())
 
@@ -1573,6 +1833,7 @@ Partial Public Class ThisAddIn
 
             OtherPrompt = ""
             Dim LLMResult As String = ""
+            Dim archiveReplyContext As System.String = ""
 
             If AskForPrompt Then
 
@@ -1600,6 +1861,14 @@ Partial Public Class ThisAddIn
                     My.Settings.Save()
                 End If
 
+                If Global.SharedLibrary.SharedLibrary.SemanticArchiveTriggerHelper.HasSemanticArchiveTrigger(OtherPrompt) Then
+                    Dim archivePrepared = Await Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.PrepareAsync(
+                        _context, OtherPrompt, CreateSelectedSemanticArchiveRunScope(), allowInteractiveSelection:=True)
+                    Await EnsureUIThread()
+                    OtherPrompt = archivePrepared.CleanPrompt
+                    archiveReplyContext = System.Environment.NewLine & archivePrepared.ContextText
+                End If
+
                 If DoMyStyle Then
                     MyStyleInsert = MyStyleHelpers.SelectPromptFromMyStyle(StylePath, "Outlook", 0, "Choose the style prompt to apply …", $"{AN} MyStyle", True)
                     If MyStyleInsert = "ERROR" Then Return
@@ -1607,13 +1876,16 @@ Partial Public Class ThisAddIn
                 End If
 
                 ' Call LLM function with selected text
-                LLMResult = Await LLM(InterpolateAtRuntime(SP_MailReply) & If(DoMyStyle, " " & MyStyleInsert, ""), "<MAILCHAIN>" & selectedText & "</MAILCHAIN>", "", "", 0)
+                LLMResult = Await AwaitOutlookModelRequestAsync(Function() LLM(InterpolateAtRuntime(SP_MailReply) & If(DoMyStyle, " " & MyStyleInsert, "") & archiveReplyContext, "<MAILCHAIN>" & selectedText & "</MAILCHAIN>", "", "", 0))
+                Await EnsureUIThread()
             Else
-                LLMResult = Await LLM(InterpolateAtRuntime(SP_MailSumup), "<MAILCHAIN>" & selectedText & "</MAILCHAIN>", "", "", 0)
+                LLMResult = Await AwaitOutlookModelRequestAsync(Function() LLM(InterpolateAtRuntime(SP_MailSumup), "<MAILCHAIN>" & selectedText & "</MAILCHAIN>", "", "", 0))
+                Await EnsureUIThread()
             End If
 
             If INI_PostCorrection <> "" Then
-                LLMResult = Await PostCorrection(LLMResult)
+                LLMResult = Await AwaitOutlookModelRequestAsync(Function() PostCorrection(LLMResult))
+                Await EnsureUIThread()
             End If
 
             If String.IsNullOrWhiteSpace(LLMResult) Then
@@ -1668,7 +1940,7 @@ Partial Public Class ThisAddIn
             'If outlookApp IsNot Nothing Then Marshal.ReleaseComObject(outlookApp) : outlookApp = Nothing
 
         Catch ex As System.Exception
-            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in Freestyle_InsertBefore: " & ex.Message, "Error")
+            ReportOutlookCommandFailure("Freestyle_InsertBefore", ex)
         End Try
     End Sub
 
@@ -1678,6 +1950,7 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Async Sub Command_InsertAfter(ByVal SysCommand As String, Optional ByVal DoMarkup As Boolean = False, Optional KeepFormat As Boolean = False, Optional Inplace As Boolean = False, Optional MarkupMethod As Integer = 3)
         Try
+            Await EnsureUIThread()
             Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
             Dim inspector As Microsoft.Office.Interop.Outlook.Inspector = ComRetry(Function() outlookApp.ActiveInspector())
 
@@ -1725,6 +1998,7 @@ Partial Public Class ThisAddIn
 
             ' Get the selected text and range
             Dim selection As Microsoft.Office.Interop.Word.Selection = wordEditor.Application.Selection
+            NormalizeOutlookSelectionTerminalBoundary(selection)
             Dim range As Microsoft.Office.Interop.Word.Range = selection.Range.Duplicate ' Duplicate to preserve original
 
             ' Capture both authorities BEFORE ConvertRangeToMarkdown or any review/selection
@@ -1793,12 +2067,14 @@ Partial Public Class ThisAddIn
             End If
 
             ' Call LLM function with selected text
-            Dim LLMResult As String = Await LLM(SysCommand & If(KeepFormat, " " & SP_Add_KeepHTMLIntact, SP_Add_KeepInlineIntact), "<TEXTTOPROCESS>" & selectedTextForProcessing & "</TEXTTOPROCESS>", "", "", 0)
+            Dim LLMResult As String = Await AwaitOutlookModelRequestAsync(Function() LLM(SysCommand & If(KeepFormat, " " & SP_Add_KeepHTMLIntact, SP_Add_KeepInlineIntact), "<TEXTTOPROCESS>" & selectedTextForProcessing & "</TEXTTOPROCESS>", "", "", 0))
+            Await EnsureUIThread()
 
             LLMResult = LLMResult.Replace("<TEXTTOPROCESS>", "").Replace("</TEXTTOPROCESS>", "")
 
             If INI_PostCorrection <> "" Then
-                LLMResult = Await PostCorrection(LLMResult)
+                LLMResult = Await AwaitOutlookModelRequestAsync(Function() PostCorrection(LLMResult))
+                Await EnsureUIThread()
             End If
 
             ' Remove horizontal whitespace (incl. NBSP) between real newline tokens (CRLF/CR/LF)
@@ -1847,7 +2123,15 @@ Partial Public Class ThisAddIn
                     Dim Plaintext As String = ""
 
                     SelectedText = selection.Text
-                    SLib.InsertTextWithFormat(LLMResult, range, Inplace, Not trailingCR, INI_UseHostColorOutlook)
+                    If Inplace Then
+                        SLib.InsertTextWithFormat(LLMResult, range, True, Not trailingCR, INI_UseHostColorOutlook)
+                    Else
+                        InsertTextWithFormatOutlookInsertAfterSafe(
+                            LLMResult,
+                            range,
+                            Not trailingCR,
+                            INI_UseHostColorOutlook)
+                    End If
 
                     If Inplace AndAlso restoreReviewTrailingSpaces Then
                         RestoreTrailingSpacesAtSelectionEnd(selection, reviewTrailingSpaces, trailingCR)
@@ -1910,28 +2194,31 @@ Partial Public Class ThisAddIn
                         Dim sourceFormatting As System.Collections.Generic.List(Of ParagraphFormattingSnapshot) =
                             CaptureInsertionPointFormatting(insertionFormattingSource)
 
-                        Dim selRange As Microsoft.Office.Interop.Word.Range = selection.Range.Duplicate
-                        selRange.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
-                        selRange.Text = vbCrLf & vbCrLf
+                        Dim selRange As Microsoft.Office.Interop.Word.Range =
+                            ResolveSafeInsertAfterRange(range)
+                        If selRange Is Nothing Then
+                            Throw New System.InvalidOperationException("Unable to resolve a writable insertion point after the current mail selection.")
+                        End If
 
-                        Dim newStart As Integer = selRange.End - 2
-                        Dim newEnd As Integer = selRange.End
-                        selection.SetRange(newStart, newEnd)
+                        Dim newStart As System.Int32 = selRange.Start
+                        selRange.Text = vbCrLf & vbCrLf
+                        Dim newEnd As System.Int32 = selRange.End
+                        SetOutlookSelectionRangeSafe(selection, newStart, newEnd)
 
                         If DoMarkup AndAlso MarkupMethod <> 3 AndAlso MarkupMethod <> 4 Then
-                            SLib.InsertTextWithMarkdown(
+                            InsertTextWithMarkdownOutlookInsertAfterSafe(
                                 selection,
                                 LLMResult & "<p>MARKUP:</p>" & vbCrLf,
                                 trailingCR,
                                 INI_UseHostColorOutlook,
-                                FormattingSourceRange:=insertionFormattingSource)
+                                insertionFormattingSource)
                         Else
-                            SLib.InsertTextWithMarkdown(
+                            InsertTextWithMarkdownOutlookInsertAfterSafe(
                                 selection,
                                 LLMResult,
                                 trailingCR,
                                 INI_UseHostColorOutlook,
-                                FormattingSourceRange:=insertionFormattingSource)
+                                insertionFormattingSource)
                         End If
 
                         Dim insertedRange As Microsoft.Office.Interop.Word.Range =
@@ -1986,7 +2273,7 @@ Partial Public Class ThisAddIn
             'If outlookApp IsNot Nothing Then Marshal.ReleaseComObject(outlookApp) : outlookApp = Nothing
 
         Catch ex As System.Exception
-            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in Command_InsertAfter: " & ex.Message, "Error")
+            ReportOutlookCommandFailure("Command_InsertAfter", ex)
         End Try
     End Sub
 
@@ -1996,6 +2283,7 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Async Sub FreeStyle_InsertAfter()
         Try
+            Await EnsureUIThread()
 
             Dim DoMarkup As Boolean = False
             Dim DoInplace As Boolean = False
@@ -2011,6 +2299,7 @@ Partial Public Class ThisAddIn
             Dim DoMyStyle As Boolean = False
             Dim DoAddMail As Boolean = False
             Dim MailChainText As String = ""
+            Dim archivePrepared As Global.SharedLibrary.SharedLibrary.SemanticArchiveHostRequest = Nothing
 
             Dim UseSecondAPI As Boolean = False
 
@@ -2086,6 +2375,7 @@ Partial Public Class ThisAddIn
 
             ' Get the selected text
             Dim selection As Microsoft.Office.Interop.Word.Selection = wordEditor.Application.Selection
+            NormalizeOutlookSelectionTerminalBoundary(selection)
             Dim selectedText As String = selection.Text
             If String.IsNullOrWhiteSpace(selectedText) Then
                 NoText = True
@@ -2146,6 +2436,7 @@ SkipPromptWin:
             End Try
 
             Dim promptOptions As New SLib.FreestylePromptOptions() With {
+                .SourceMenuProvider = Global.SharedLibrary.SharedLibrary.RetrievalSourceDiscovery.CreateMenuProvider(_context),
                 .Title = $"{AN} Freestyle",
                 .Heading = "What would you like Red Ink to do?",
                 .ModeCaption = "Output",
@@ -2675,6 +2966,45 @@ SkipPromptWin:
                 End Select
             End If
 
+            If Global.SharedLibrary.SharedLibrary.SemanticArchiveTriggerHelper.HasSemanticArchiveTrigger(OtherPrompt) Then
+                Dim saSplash As New SLib.SplashScreen("Querying Semantic Archive...   ")
+                saSplash.Show()
+                System.Windows.Forms.Application.DoEvents()
+                Try
+                    archivePrepared = Await Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.PrepareAsync(
+                        _context, OtherPrompt, CreateSelectedSemanticArchiveRunScope(), allowInteractiveSelection:=True)
+                    Await EnsureUIThread()
+                Finally
+                    Try
+                        If Not saSplash.IsDisposed Then
+                            If saSplash.InvokeRequired Then
+                                saSplash.BeginInvoke(New System.Action(
+                                    Sub()
+                                        If Not saSplash.IsDisposed Then
+                                            saSplash.Close()
+                                            saSplash.Dispose()
+                                        End If
+                                    End Sub))
+                            Else
+                                saSplash.Close()
+                                saSplash.Dispose()
+                            End If
+                        End If
+                    Catch ex As System.ObjectDisposedException
+                        ' The host/form already completed cleanup during cancellation.
+                    Catch ex As System.InvalidOperationException
+                        ' The owning UI dispatcher is already shutting down; never wait here.
+                    End Try
+                End Try
+                OtherPrompt = archivePrepared.CleanPrompt
+                If Not System.String.Equals(archivePrepared.Status, "ok", System.StringComparison.OrdinalIgnoreCase) AndAlso
+                   Not System.String.Equals(archivePrepared.Status, "partial", System.StringComparison.OrdinalIgnoreCase) Then
+                    ShowCustomMessageBox("Semantic Archive: " & archivePrepared.Status &
+                        If(System.String.IsNullOrWhiteSpace(archivePrepared.ContextText), "", System.Environment.NewLine & archivePrepared.ContextText),
+                        $"{AN} Semantic Archive")
+                End If
+            End If
+
             Dim trailingCR As Boolean = selectedText.EndsWith(vbCrLf)
 
             ' Word returns a paragraph mark as a single vbCr (not vbCrLf) in Selection.Text,
@@ -2716,13 +3046,18 @@ SkipPromptWin:
                 UserPrompt &= "<MAILCHAIN>" & MailChainText & "</MAILCHAIN>"
             End If
 
-            LLMResult = Await LLM(SystemPrompt, UserPrompt, "", "", 0, UseSecondAPI, False, OtherPrompt, FileObject)
+            If archivePrepared IsNot Nothing AndAlso archivePrepared.HasTrigger Then
+                SystemPrompt &= System.Environment.NewLine & archivePrepared.ContextText
+            End If
+            LLMResult = Await AwaitOutlookModelRequestAsync(Function() LLM(SystemPrompt, UserPrompt, "", "", 0, UseSecondAPI, False, OtherPrompt, FileObject))
+            Await EnsureUIThread()
 
             If Not NoText Then
                 LLMResult = LLMResult.Replace("<TEXTTOPROCESS>", "").Replace("</TEXTTOPROCESS>", "")
             End If
             If INI_PostCorrection <> "" Then
-                LLMResult = Await PostCorrection(LLMResult)
+                LLMResult = Await AwaitOutlookModelRequestAsync(Function() PostCorrection(LLMResult))
+                Await EnsureUIThread()
             End If
 
             If DoMarkup AndAlso MarkupMethod = 4 AndAlso Not NoText Then
@@ -2781,7 +3116,12 @@ SkipPromptWin:
             Else
                 ' Collapse selection to end if not in-place
                 If Not DoInplace Then
-                    selection.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
+                    Dim freestyleInsertRange As Microsoft.Office.Interop.Word.Range =
+                        ResolveSafeInsertAfterRange(selection.Range)
+                    If freestyleInsertRange Is Nothing Then
+                        Throw New System.InvalidOperationException("Unable to resolve a writable insertion point after the current mail selection.")
+                    End If
+                    SetOutlookSelectionRangeSafe(selection, freestyleInsertRange.Start, freestyleInsertRange.End)
                 Else
                     If Not selectionEndsWithPara And LLMResult.EndsWith(ControlChars.Lf) Then LLMResult = LLMResult.TrimEnd(ControlChars.Lf)
                     If Not selectionEndsWithPara And LLMResult.EndsWith(ControlChars.Cr) Then LLMResult = LLMResult.TrimEnd(ControlChars.Cr)
@@ -2789,7 +3129,22 @@ SkipPromptWin:
 
                 ' Insert result
                 If DoMarkup AndAlso MarkupMethod <> 3 AndAlso MarkupMethod <> 4 Then
-                    SLib.InsertTextWithMarkdown(selection, vbCrLf & LLMResult & vbCrLf & "<p>MARKUP:</p>", trailingCR, INI_UseHostColorOutlook)
+                    If DoInplace Then
+                        SLib.InsertTextWithMarkdown(
+                            selection,
+                            vbCrLf & LLMResult & vbCrLf & "<p>MARKUP:</p>",
+                            trailingCR,
+                            INI_UseHostColorOutlook)
+                    Else
+                        Dim freestyleMarkupFormattingSource As Microsoft.Office.Interop.Word.Range =
+                            selection.Range.Duplicate()
+                        InsertTextWithMarkdownOutlookInsertAfterSafe(
+                            selection,
+                            vbCrLf & LLMResult & vbCrLf & "<p>MARKUP:</p>",
+                            trailingCR,
+                            INI_UseHostColorOutlook,
+                            freestyleMarkupFormattingSource)
+                    End If
                 Else
                     If DoInplace Then
                         Dim insertText As String = LLMResult
@@ -2808,12 +3163,12 @@ SkipPromptWin:
                         ' search forward into unrelated later text.
                         Dim freestyleFormattingSource As Microsoft.Office.Interop.Word.Range = selection.Range.Duplicate()
 
-                        SLib.InsertTextWithMarkdown(
+                        InsertTextWithMarkdownOutlookInsertAfterSafe(
                             selection,
                             vbCrLf & LLMResult & vbCrLf,
                             trailingCR,
                             INI_UseHostColorOutlook,
-                            FormattingSourceRange:=freestyleFormattingSource)
+                            freestyleFormattingSource)
                     End If
                 End If
 
@@ -2855,7 +3210,7 @@ SkipPromptWin:
             End If
 
         Catch ex As System.Exception
-            Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in Freestyle_InsertAfter: " & ex.Message, "Error")
+            ReportOutlookCommandFailure("Freestyle_InsertAfter", ex)
         End Try
     End Sub
 
@@ -2927,6 +3282,7 @@ SkipPromptWin:
 
     Private Async Function InsertClipboard() As System.Threading.Tasks.Task
         Try
+            Await EnsureUIThread()
             If System.String.IsNullOrWhiteSpace(INI_APICall_Object) Then
                 SLib.ShowCustomMessageBox($"Your model ({INI_Model}) is not configured to process clipboard data (binary/object).")
                 Return
@@ -2945,6 +3301,7 @@ SkipPromptWin:
                 cancellationToken:=Nothing,
                 EnsureUI:=False
             )
+            Await EnsureUIThread()
 
             If String.IsNullOrWhiteSpace(result) Then Return
 
@@ -2963,6 +3320,7 @@ SkipPromptWin:
 
             If Not haveMail Then
                 Await HandleNoInsertableMailAsync(result).ConfigureAwait(False)
+                Await EnsureUIThread()
                 Return
             End If
 
@@ -3057,9 +3415,11 @@ SkipPromptWin:
                     Try : inspector.Display() : Catch : End Try
                 Else
                     Await HandleNoInsertableMailAsync(result).ConfigureAwait(False)
+                    Await EnsureUIThread()
                 End If
             Else
                 Await HandleNoInsertableMailAsync(result).ConfigureAwait(False)
+                Await EnsureUIThread()
             End If
 
             If wordEditor IsNot Nothing Then Marshal.ReleaseComObject(wordEditor) : wordEditor = Nothing
@@ -3105,36 +3465,27 @@ SkipPromptWin:
 
         Dim clipOk As Boolean = Await SetClipboardRobustAsync(dataObj).ConfigureAwait(False)
 
-        Await SwitchToUi(
-            Sub()
-                If clipOk Then
-                    SLib.ShowCustomMessageBox($"The content has been copied to the clipboard:{Environment.NewLine}{Environment.NewLine}{displayText}")
-                Else
-                    Dim edited As String = SLib.ShowCustomWindow(
-                        "Clipboard is busy. You can copy the result below manually (Ctrl+A, Ctrl+C) or edit it and click OK:",
-                        result,
-                        "If copying still fails, the text will be saved to a temporary file.",
-                        AN, False)
-
-                    If Not String.IsNullOrWhiteSpace(edited) Then
-                        Dim editedObj As New System.Windows.Forms.DataObject()
-                        editedObj.SetData(System.Windows.Forms.DataFormats.UnicodeText, edited)
-                        editedObj.SetData(System.Windows.Forms.DataFormats.Text, edited)
-
-                        Dim editedOk As Boolean = SetClipboardRobustAsync(editedObj).GetAwaiter().GetResult()
-                        If Not editedOk Then
-                            Dim tmp As String = SaveTextToTempFile(edited)
-                            If Not String.IsNullOrWhiteSpace(tmp) Then
-                                SLib.ShowCustomMessageBox($"Clipboard is locked. The result was saved to: {tmp}")
-                            Else
-                                SLib.ShowCustomMessageBox("Clipboard is locked and saving failed.")
-                            End If
-                        Else
-                            SLib.ShowCustomMessageBox("Your edited text has been copied to the clipboard.")
-                        End If
-                    End If
-                End If
-            End Sub).ConfigureAwait(False)
+        If clipOk Then
+            Await SwitchToUi(Sub() SLib.ShowCustomMessageBox($"The content has been copied to the clipboard:{Environment.NewLine}{Environment.NewLine}{displayText}")).ConfigureAwait(False)
+            Return
+        End If
+        Dim edited As System.String = Await SwitchToUi(Of System.String)(
+            Function() SLib.ShowCustomWindow(
+                "Clipboard is busy. You can copy the result below manually (Ctrl+A, Ctrl+C) or edit it and click OK:",
+                result, "If copying still fails, the text will be saved to a temporary file.", AN, False)).ConfigureAwait(False)
+        If System.String.IsNullOrWhiteSpace(edited) Then Return
+        Dim editedObj As New System.Windows.Forms.DataObject()
+        editedObj.SetData(System.Windows.Forms.DataFormats.UnicodeText, edited)
+        editedObj.SetData(System.Windows.Forms.DataFormats.Text, edited)
+        Dim editedOk As System.Boolean = Await SetClipboardRobustAsync(editedObj).ConfigureAwait(False)
+        Dim status As System.String
+        If editedOk Then
+            status = "Your edited text has been copied to the clipboard."
+        Else
+            Dim tmp As System.String = SaveTextToTempFile(edited)
+            status = If(System.String.IsNullOrWhiteSpace(tmp), "Clipboard is locked and saving failed.", "Clipboard is locked. The result was saved to: " & tmp)
+        End If
+        Await SwitchToUi(Sub() SLib.ShowCustomMessageBox(status)).ConfigureAwait(False)
     End Function
 
 
@@ -3148,20 +3499,16 @@ SkipPromptWin:
         Optional verificationText As String = Nothing
     ) As System.Threading.Tasks.Task(Of Boolean)
 
-        ' Try on current thread (if STA) with persistent copy.
-        For i As Integer = 1 To uiAttempts
-            If TrySetClipboardImmediate(dataObj, verificationText) Then
-                Return True
-            End If
-            Await System.Threading.Tasks.Task.Delay(50 * i).ConfigureAwait(False)
-        Next
-
-        ' STA thread attempts.
-        For i As Integer = 1 To staAttempts
-            If TrySetClipboardSta(dataObj, verificationText) Then
-                Return True
-            End If
-            Await System.Threading.Tasks.Task.Delay(80 * i).ConfigureAwait(False)
+        ' Never block Office's message pump on OLE clipboard work or a worker Join.
+        For i As System.Int32 = 1 To System.Math.Max(1, uiAttempts + staAttempts)
+            Try
+                If Await TrySetClipboardStaAsync(dataObj, verificationText).ConfigureAwait(False) Then Return True
+            Catch ex As System.TimeoutException
+                ' Do not launch competing writes after an in-flight OLE call timed out.
+                System.Diagnostics.Trace.TraceWarning("Red Ink clipboard worker timed out; Office UI remains responsive and the manual/file fallback is used.")
+                Return False
+            End Try
+            Await System.Threading.Tasks.Task.Delay(System.Math.Min(400, 50 * i)).ConfigureAwait(False)
         Next
 
         Return False
@@ -3190,22 +3537,23 @@ SkipPromptWin:
     ''' <summary>
     ''' Performs clipboard set on a dedicated STA background thread and verifies result.
     ''' </summary>
-    Private Function TrySetClipboardSta(dataObj As System.Windows.Forms.DataObject, verificationText As String) As Boolean
-        Dim success As Boolean = False
-        Dim t As New System.Threading.Thread(
+    Private Async Function TrySetClipboardStaAsync(dataObj As System.Windows.Forms.DataObject, verificationText As System.String) As System.Threading.Tasks.Task(Of System.Boolean)
+        Dim completion As New System.Threading.Tasks.TaskCompletionSource(Of System.Boolean)(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
+        Dim worker As New System.Threading.Thread(
             Sub()
                 Try
-                    System.Windows.Forms.Clipboard.SetDataObject(dataObj, True) ' persistent copy
-                    success = VerifyClipboard(verificationText)
-                Catch
-                    success = False
+                    System.Windows.Forms.Clipboard.SetDataObject(dataObj, True)
+                    completion.TrySetResult(VerifyClipboard(verificationText))
+                Catch ex As System.Exception
+                    completion.TrySetResult(False)
                 End Try
             End Sub)
-        t.SetApartmentState(System.Threading.ApartmentState.STA)
-        t.IsBackground = True
-        t.Start()
-        t.Join()
-        Return success
+        worker.SetApartmentState(System.Threading.ApartmentState.STA)
+        worker.IsBackground = True
+        worker.Start()
+        Dim finished As System.Threading.Tasks.Task = Await System.Threading.Tasks.Task.WhenAny(completion.Task, System.Threading.Tasks.Task.Delay(5000)).ConfigureAwait(False)
+        If finished IsNot completion.Task Then Throw New System.TimeoutException("The clipboard STA worker did not complete within five seconds.")
+        Return Await completion.Task.ConfigureAwait(False)
     End Function
 
     ''' <summary>
@@ -3273,8 +3621,8 @@ SkipPromptWin:
                 New System.Globalization.CultureInfo(
                     Globals.ThisAddIn.Application.LanguageSettings.LanguageID(Microsoft.Office.Core.MsoAppLanguageID.msoLanguageIDUI)).DisplayName)
         End If
-        ' No owner needed
-        _win.ShowRaised()
+        ' Keep HelpMeInky tied to the Outlook process and close it on add-in exit.
+        _win.ShowRaised(RegisterHostModelessForm(_win))
     End Sub
 
     ''' <summary>
@@ -3314,6 +3662,12 @@ SkipPromptWin:
                         {"ToolingLogWindow", "Agents: Show log window"},
                         {"ToolingDryRun", $"Agents: Show {ToolFriendlyName.ToLower} overview before running"},
                         {"ToolingMaximumIterations", $"Agents: Number of rounds that {ToolFriendlyName.ToLower} may be called"},
+                        {"SemanticArchiveCatalogPathLocal", "Semantic Archives: Catalog directory"},
+                        {"SemanticArchiveCatalogLibraryPath", "Semantic Archives: Central library directory"},
+                        {"SemanticArchiveBackgroundIndexingEnabled", "Semantic Archives: Background indexing"},
+                        {"SemanticArchiveBackgroundIndexingWindow", "Semantic Archives: Background processing window"},
+                        {"SemanticArchivePermissionMaintenanceEnabled", "Semantic Archives: Automatic permission maintenance"},
+                        {"SemanticArchivePermissionMaintenanceWindow", "Semantic Archives: Permission maintenance window"},
                         {"KnowledgeStorePath", "Knowledge store file (central)"},
                         {"KnowledgeStorePathLocal", "Knowledge store file (local)"},
                         {"KnowledgeStoreUseLLMIndex", "Knowledge store: Use LLM for indexing"},
@@ -3354,6 +3708,12 @@ SkipPromptWin:
                         {"ToolingLogWindow", $"When an LLM is allowed to call {ToolFriendlyName.ToLower} within Red Ink (e.g., Special Services), a log window will automatically open and show the progress."},
                         {"ToolingDryRun", $"When an LLM is allowed to call {ToolFriendlyName.ToLower} within Red Ink (e.g., Special Services), the {ToolFriendlyName.ToLower} made available to the LLM will be shown first, allowing the user to decide whether to proceed."},
                         {"ToolingMaximumIterations", $"When an LLM is allowed to call {ToolFriendlyName.ToLower} within Red Ink (e.g., Special Services), this number will define how many rounds of such calls may be done by the LLM."},
+                        {"SemanticArchiveCatalogPathLocal", "Directory containing redink-sa-catalog.json and semantic archive indexes; supports environment variables. Empty disables archive search and indexing."},
+                        {"SemanticArchiveCatalogLibraryPath", "Optional central directory of per-archive definitions. Requires a local catalog path. Readable entries are automatically subscribed; write access is required to publish, update or withdraw. Supports SharedMethods placeholders."},
+                        {"SemanticArchiveBackgroundIndexingEnabled", "Independent per-user switch for automatic archive indexing while Word or Outlook is running. Defaults to off. Manual maintenance and published search remain available."},
+                        {"SemanticArchiveBackgroundIndexingWindow", "Independent local-time window, e.g. allow:22:00-06:00;12:00-13:00 or deny:08:00-18:00. Empty allows any time; archive preferences can narrow it."},
+                        {"SemanticArchivePermissionMaintenanceEnabled", "Controls independent background reconciliation of generated artifact permissions while Word or Outlook is running. Content indexing may remain off; retrieval still checks current source access."},
+                        {"SemanticArchivePermissionMaintenanceWindow", "Independent local-time window for automatic permission maintenance, e.g. allow:22:00-06:00 or deny:08:00-18:00; separate multiple ranges with semicolons. Empty permits any time. Separate from the content-indexing window."},
                         {"KnowledgeStorePath", "The file path for the central knowledge store index (supports env variables); used by the (kb) trigger"},
                         {"KnowledgeStorePathLocal", "The file path for the local knowledge store index (supports env variables); used by the (kb) trigger"},
                         {"KnowledgeStoreUseLLMIndex", "When enabled, the indexer uses the LLM to generate richer summaries and keywords (uses API credits)"},
@@ -3367,6 +3727,7 @@ SkipPromptWin:
 
         ApplyEffectiveToolingLogWindowSettingToContext()
         ShowSettingsWindow(Settings, SettingsTips)
+        InitializeKnowledgeStoreService()
 
         If hadToolingLogOverrideBefore OrElse _context.INI_ToolingLogWindow <> toolingLogSettingBefore Then
             SetToolingLogWindowOverride(_context.INI_ToolingLogWindow)

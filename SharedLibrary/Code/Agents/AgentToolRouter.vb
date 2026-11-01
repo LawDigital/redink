@@ -43,8 +43,15 @@ Namespace Agents
                                                     arguments As IDictionary(Of String, Object),
                                                     host As ISubAgentHost,
                                                     Optional cancellationToken As CancellationToken = Nothing,
-                                                    Optional sharedContext As ISharedContext = Nothing) As Task(Of String)
+                                                    Optional sharedContext As ISharedContext = Nothing,
+                                                    Optional authoritativeUserRequest As System.String = Nothing,
+                                                    Optional semanticArchiveScope As Global.SharedLibrary.SharedLibrary.SemanticArchiveRunScope = Nothing,
+                                                    Optional onSkillLoaded As System.Action(Of System.String) = Nothing) As System.Threading.Tasks.Task(Of System.String)
             If String.IsNullOrWhiteSpace(toolName) Then Return Nothing
+
+            If SemanticArchiveTools.IsSemanticArchiveTool(toolName) Then
+                Return Await SemanticArchiveTools.ExecuteAsync(toolName, arguments, sharedContext, semanticArchiveScope, cancellationToken).ConfigureAwait(False)
+            End If
 
             If MemoryTools.IsMemoryTool(toolName) Then
                 Return MemoryTools.Execute(toolName, arguments)
@@ -79,7 +86,7 @@ Namespace Agents
             End If
 
             If String.Equals(toolName, SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) Then
-                Return SkillInvokeTool.Execute(arguments)
+                Return SkillInvokeTool.Execute(arguments, authoritativeUserRequest, onSkillLoaded)
             End If
 
             If toolName.StartsWith(AgentToolPrefix, StringComparison.OrdinalIgnoreCase) Then
@@ -208,6 +215,7 @@ Namespace Agents
         ''' <summary>True if the tool name belongs to the agent layer (memory_*, skill_use, agent_*).</summary>
         Public Shared Function IsAgentLayerTool(toolName As String) As Boolean
             If String.IsNullOrWhiteSpace(toolName) Then Return False
+            If SemanticArchiveTools.IsSemanticArchiveTool(toolName) Then Return True
             If MemoryTools.IsMemoryTool(toolName) Then Return True
             If TextTools.IsTextTool(toolName) Then Return True
             If FileTools.IsFileTool(toolName) Then Return True
@@ -255,7 +263,10 @@ Namespace Agents
                 If value = "" Then Return Nothing
 
                 Dim stored As ToolResultStore.StoredResult = Nothing
-                If Not ToolResultStore.TryGet(value, stored) OrElse stored Is Nothing Then
+                If Not ToolResultStore.TryGetForWorkflow(
+                    value,
+                    WorkflowContinuity.CurrentWorkflowId,
+                    stored) OrElse stored Is Nothing Then
                     Return Nothing
                 End If
 

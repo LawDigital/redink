@@ -97,6 +97,7 @@ Partial Public Class ThisAddIn
         Dim win As Microsoft.Office.Interop.Word.Window = app.ActiveWindow
         Dim hwnd As System.IntPtr = System.IntPtr.Zero
         Dim winWasEnabled As System.Boolean = True
+        Dim windowDisabledByUs As System.Boolean = False
         Dim prevShowRevs As System.Boolean = False
         Dim prevScreenUpdating As System.Boolean = True
 
@@ -121,11 +122,11 @@ Partial Public Class ThisAddIn
             Catch ex As System.Exception
             End Try
 
-            If hwnd <> System.IntPtr.Zero Then
+            If Global.SharedLibrary.SharedLibrary.SharedMethods.IsWindowOnCurrentThread(hwnd) Then
                 Try
                     winWasEnabled = IsWindowEnabled(hwnd)
                 Catch ex As System.Exception
-                    winWasEnabled = True
+                    winWasEnabled = False ' Unknown state must not be disabled/re-enabled by us.
                 End Try
                 Try
                     SharedLibrary.SharedLibrary.OfficeWindowWatchdog.InspectCachedHwndUse(
@@ -134,7 +135,10 @@ Partial Public Class ThisAddIn
                 End Try
                 Try
                     ' Disable the Word window so clicks cannot move the live Selection while ranges are being created
-                    EnableWindow(hwnd, False)
+                    If winWasEnabled Then
+                        EnableWindow(hwnd, False)
+                        windowDisabledByUs = Not IsWindowEnabled(hwnd)
+                    End If
                 Catch ex As System.Exception
                 End Try
             End If
@@ -284,7 +288,10 @@ Partial Public Class ThisAddIn
             ' ─────────────────────────────────────────────────────────────────
             ' Restore Word window + UI
             Try
-                If hwnd <> System.IntPtr.Zero Then EnableWindow(hwnd, winWasEnabled)
+                If windowDisabledByUs AndAlso Global.SharedLibrary.SharedLibrary.SharedMethods.IsWindowOnCurrentThread(hwnd) AndAlso
+                    win IsNot Nothing AndAlso New System.IntPtr(win.Hwnd) = hwnd Then
+                    EnableWindow(hwnd, True)
+                End If
             Catch ex As System.Exception
             End Try
             Try
@@ -391,6 +398,7 @@ Partial Public Class ThisAddIn
 
         Dim prevScreenUpdating As Boolean = True
         Dim winWasEnabled As Boolean = True
+        Dim windowDisabledByUs As System.Boolean = False
 
         ' Split into individual reply items
         Dim items As String() = LLMResult.Split(New String() {"§§§"}, StringSplitOptions.RemoveEmptyEntries)
@@ -455,7 +463,10 @@ Partial Public Class ThisAddIn
                             hwnd, "EnableWindow(False) in AddReplies (comment replies)")
                     Catch
                     End Try
-                    EnableWindow(hwnd, False)
+                    If Global.SharedLibrary.SharedLibrary.SharedMethods.IsWindowOnCurrentThread(hwnd) AndAlso winWasEnabled Then
+                        EnableWindow(hwnd, False)
+                        windowDisabledByUs = Not IsWindowEnabled(hwnd)
+                    End If
                 Catch
                 End Try
             End If
@@ -563,8 +574,9 @@ Partial Public Class ThisAddIn
         Finally
             ' Restore UI and selection
             Try
-                If win IsNot Nothing AndAlso hwnd <> IntPtr.Zero Then
-                    EnableWindow(hwnd, winWasEnabled)
+                If windowDisabledByUs AndAlso Global.SharedLibrary.SharedLibrary.SharedMethods.IsWindowOnCurrentThread(hwnd) AndAlso
+                    win IsNot Nothing AndAlso New System.IntPtr(win.Hwnd) = hwnd Then
+                    EnableWindow(hwnd, True)
                 End If
             Catch
             End Try
@@ -770,7 +782,9 @@ Partial Public Class ThisAddIn
     ''' <param name="SortByDate">Sorts output by date when true; otherwise by document order.</param>
     ''' <returns>XML payload containing summary metadata and comment nodes, or an empty string if none were exported.</returns>
     Public Shared Function BubblesExtract(ByVal rng As Microsoft.Office.Interop.Word.Range,
-                                      Optional ByVal Silent As Boolean = False, Optional ByVal SortByDate As Boolean = False) As System.String
+                                      Optional ByVal Silent As Boolean = False, Optional ByVal SortByDate As Boolean = False,
+                                      Optional ByVal TargetCommentIndex As System.Int32 = 0,
+                                      Optional ByVal IncludeOverlappingAnchors As System.Boolean = False) As System.String
 
         Dim app As Microsoft.Office.Interop.Word.Application = Nothing
         Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
@@ -831,6 +845,17 @@ Partial Public Class ThisAddIn
                 End Try
 
                 For Each c As Microsoft.Office.Interop.Word.Comment In doc.Comments
+                    ' A reply launched from a comment cursor targets only that comment.
+                    ' Normal selected-text extraction keeps its established all-comments behavior.
+                    If TargetCommentIndex > 0 Then
+                        Try
+                            If c.Index <> TargetCommentIndex Then Continue For
+                        Catch ex As System.Exception
+                            System.Diagnostics.Debug.WriteLine($"Comment index unavailable during reply extraction: {ex.Message}")
+                            Continue For
+                        End Try
+                    End If
+
                     Dim cStart As System.Int32
                     Dim cEnd As System.Int32
                     Try
@@ -844,7 +869,12 @@ Partial Public Class ThisAddIn
                             Continue For
                         End Try
                     End Try
-                    If cStart >= effectiveRange.Start AndAlso cEnd <= effectiveRange.End Then
+                    Dim fullyContained As System.Boolean = cStart >= effectiveRange.Start AndAlso cEnd <= effectiveRange.End
+                    Dim overlaps As System.Boolean = IncludeOverlappingAnchors AndAlso
+                        If(cStart = cEnd,
+                           cStart >= effectiveRange.Start AndAlso cStart < effectiveRange.End,
+                           cStart < effectiveRange.End AndAlso cEnd > effectiveRange.Start)
+                    If fullyContained OrElse overlaps Then
                         allInRange.Add(c)
                     End If
                 Next
@@ -1157,12 +1187,19 @@ Partial Public Class ThisAddIn
                                               ByVal pseudoHashId As System.String,
                                               ByVal replyText As System.String,
                                               ByVal formatted As System.Boolean) As System.Boolean
+        Return ReplyToScopedWordComment(wordId, pseudoHashId, replyText, formatted, Nothing)
+    End Function
+
+    Friend Shared Function ReplyToScopedWordComment(ByVal wordId As System.Nullable(Of System.Int32),
+                                              ByVal pseudoHashId As System.String,
+                                              ByVal replyText As System.String,
+                                              ByVal formatted As System.Boolean, scope As Microsoft.Office.Interop.Word.Range) As System.Boolean
         Dim app As Microsoft.Office.Interop.Word.Application = Nothing
         Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
 
         Try
             Try
-                app = CType(System.Runtime.InteropServices.Marshal.GetActiveObject("Word.Application"), Microsoft.Office.Interop.Word.Application)
+                app = If(scope Is Nothing, CType(System.Runtime.InteropServices.Marshal.GetActiveObject("Word.Application"), Microsoft.Office.Interop.Word.Application), scope.Application)
             Catch ex As System.Exception
                 app = Globals.ThisAddIn.Application
             End Try
@@ -1172,7 +1209,7 @@ Partial Public Class ThisAddIn
         End Try
 
         Try
-            doc = app.ActiveDocument
+            doc = If(scope Is Nothing, app.ActiveDocument, scope.Document)
         Catch ex As System.Exception
             Debug.WriteLine("ReplyToWordComment: No active document found.")
             Return False
@@ -1227,6 +1264,11 @@ Partial Public Class ThisAddIn
         If target Is Nothing Then
             Debug.WriteLine("ReplyToWordComment: Target comment not found by Word-ID or pseudo hash id.")
             Return False
+        End If
+
+        If scope IsNot Nothing Then
+            Dim marked As Microsoft.Office.Interop.Word.Range = target.Scope
+            If Not marked.InStory(scope) OrElse marked.Start < scope.Start OrElse marked.End > scope.End Then Return False
         End If
 
         ' 3) Try to create a threaded reply if available, else fall back to appending inside the original comment range.
@@ -1364,6 +1406,7 @@ Partial Public Class ThisAddIn
 ) As Task(Of String)
 
         Try
+            Await EnsureUIThread()
             Dim app As Word.Application = Globals.ThisAddIn.Application
             If app Is Nothing Then Return ""
 
@@ -1452,11 +1495,13 @@ Partial Public Class ThisAddIn
                 AddUserPrompt:=OtherPrompt,
                 FileObject:=FileObject
             )
+            Await EnsureUIThread()
 
             llmResult = llmResult.Replace("<TEXTTOPROCESS>", "").Replace("</TEXTTOPROCESS>", "")
 
             If Not String.IsNullOrEmpty(llmResult) Then
                 llmResult = Await PostCorrection(llmResult, UseSecondAPI)
+                Await EnsureUIThread()
             End If
 
             If String.IsNullOrWhiteSpace(llmResult) Then
@@ -1497,6 +1542,7 @@ Partial Public Class ThisAddIn
             For i As Integer = 1 To 6
                 System.Windows.Forms.Application.DoEvents()
                 Await System.Threading.Tasks.Task.Delay(75)
+                Await EnsureUIThread()
 
                 Try
                     afterText = NormalizeCommentText(activeComment.Range.Text)
@@ -1514,6 +1560,7 @@ Partial Public Class ThisAddIn
                 For i As Integer = 1 To 4
                     System.Windows.Forms.Application.DoEvents()
                     Await System.Threading.Tasks.Task.Delay(75)
+                    Await EnsureUIThread()
 
                     Try
                         afterText = NormalizeCommentText(activeComment.Range.Text)
@@ -1536,9 +1583,10 @@ Partial Public Class ThisAddIn
 
             Return ""
 
-        Catch ex As Exception
-            Debug.WriteLine($"ProcessSelectedTextInActiveCommentBubble error: {ex.Message}{vbCrLf}{ex.StackTrace}")
-            ShowCustomMessageBox($"Error processing comment bubble: {ex.Message}")
+        Catch ex As System.Exception When IsWordCommandCancellation(ex)
+            Throw
+        Catch ex As System.Exception
+            ReportWordCommandFailure("ProcessCommentText", ex, "Inky could not update this comment. Please finish editing the comment and try again.")
             Return ""
         End Try
     End Function

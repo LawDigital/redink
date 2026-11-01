@@ -13,7 +13,7 @@
 '   analysis, panes, and file workflows are implemented in the other ThisAddIn.* files.
 ' =============================================================================
 '
-' 21.9.2026
+' 1.11.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -40,7 +40,12 @@
 ' Includes PDFsharp in unchanged form; Copyright (c) 2025 PDFSharp Team; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://docs.pdfsharp.net/
 ' Includes System.Interactive.Async in unchanged form; Copyright (c) 2025 by .NET Foundation and Contributors; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://github.com/dotnet/reactive
 ' Includes Microsoft.Playwright (Playwright for .NET) in unchanged form; Copyright (c) 2020 Darío Kondratiuk and other contributors, with modifications copyright (c) Microsoft Corporation where stated in the source files; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://github.com/microsoft/playwright-dotnet
+' Includes adapted Lucide icon paths; Copyright (c) 2026 Lucide Icons and Contributors, with portions Copyright (c) 2013-present Cole Bemis (Feather); licensed under the ISC and MIT licenses (https://lucide.dev/license).
+' Includes adapted Nord, Catppuccin, Tokyo Night, Dracula, Gruvbox and Solarized color palettes; Copyright (c) Sven Greb, Catppuccin, Enkia and Tokyo Night contributors, Dracula Theme, Pavel Pertsev (morhetz) and Ethan Schoonover respectively; licensed under the MIT license. No theme application or font binaries are included.
 ' Includes also various Microsoft distributables and libraries copyrighted by Microsoft Corporation and available, among others, under the Microsoft EULA, the Visual Studio Community 2022 License, the Microsoft.Web.WebView2 License (for Microsoft.Web.WebView2, see license on https://www.nuget.org/packages/Microsoft.Web.WebView2/ and below) and the MIT License (including Microsoft.Bcl.*, Microsoft.Extensions.*, Microsoft.Identity.Client, Microsoft.Identity.Client.Extensions.Msal, System.*, System.Security.*, System.CodeDom, DocumentFormat.OpenXml.*, Microsoft.ml.*, CommunityToolkit.HighPerformance licensed under MIT License) (https://licenses.nuget.org/MIT); Copyright (c) 2016- Microsoft Corp.
+' Includes libgcc_s_seh-1.dll (GCC runtime support) from Vosk 0.3.38 for Windows x64; upstream licensing: GNU GPLv3 with GCC Runtime Library Exception 3.1 (where applicable); https://www.gnu.org/licenses/gcc-exception-3.1.html; source code: https://sources.debian.org/src/gcc-8/8.3.0-6/
+' Includes libstdc++-6.dll (GNU C++ runtime) from Vosk 0.3.38 for Windows x64; upstream licensing: GNU GPLv3 with GCC Runtime Library Exception 3.1; https://gcc.gnu.org/onlinedocs/libstdc++/manual/license.html; source code: https://sources.debian.org/src/gcc-8/8.3.0-6/
+' Includes libwinpthread-1.dll (MinGW-w64 winpthreads runtime) from Vosk 0.3.38 for Windows x64; upstream copyright/license notices: MIT and BSD-3-Clause; https://github.com/mingw-w64/mingw-w64/blob/master/mingw-w64-libraries/winpthreads/COPYING; source code: https://sources.debian.org/src/mingw-w64/6.0.0-3/
 '
 ' Licenses of Red Ink and of third-party components and further legal terms/notices are available in the installation folder and via https://redink.ai.
 '
@@ -69,7 +74,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.210926" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.011126" & SharedMethods.VersionQualifier
 
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
@@ -138,26 +143,14 @@ Partial Public Class ThisAddIn
     Public Shared undoStates As New List(Of CellState)
 
     Private Shared _uiContext As SynchronizationContext
+    Private Shared _uiThreadId As System.Int32
     Private Shared _uiScheduler As TaskScheduler
     Private mainThreadControl As New System.Windows.Forms.Control()
 
-    ' Lightweight UI switch helper (no exception risk).
-    Private Shared Function EnsureUIThread() As Task
-        ' If already on UI thread (or UI context not captured), do nothing.
-        If _uiContext Is Nothing OrElse SynchronizationContext.Current Is _uiContext Then
-            Return Task.CompletedTask
-        End If
-
-        Dim tcs As New TaskCompletionSource(Of Object)(TaskCreationOptions.RunContinuationsAsynchronously)
-
-        ' Post back to the captured UI context.
-        _uiContext.Post(
-            Sub(state As Object)
-                tcs.SetResult(Nothing)
-            End Sub,
-            Nothing)
-
-        Return tcs.Task
+    Private Shared Function EnsureUIThread() As Global.SharedLibrary.SharedLibrary.OfficeUiThreadAwaitable
+        ' Await posts the continuation itself; a posted no-op Task cannot switch an MTA caller.
+        Return New Global.SharedLibrary.SharedLibrary.OfficeUiThreadAwaitable(
+            _uiContext, _uiThreadId, Globals.ThisAddIn.HostWindowLifetimeToken)
     End Function
 
     Private chatForm As frmAIChat
@@ -171,7 +164,51 @@ Partial Public Class ThisAddIn
         Return automationObject
     End Function
 
+    Private _hostModelessWindows As Global.SharedLibrary.SharedLibrary.HostModelessFormRegistry
+
+    Friend Function RegisterHostModelessForm(form As System.Windows.Forms.Form) As System.Windows.Forms.IWin32Window
+        If _hostModelessWindows Is Nothing Then
+            Throw New System.InvalidOperationException("Office modeless window lifetime is not initialized.")
+        End If
+        Return _hostModelessWindows.Register(form)
+    End Function
+
+    Friend ReadOnly Property HostWindowLifetimeToken As System.Threading.CancellationToken
+        Get
+            If _hostModelessWindows Is Nothing Then
+                Return New System.Threading.CancellationToken(True)
+            End If
+            Return _hostModelessWindows.ShutdownToken
+        End Get
+    End Property
+
+    Friend Sub ShowHostModelessForm(form As System.Windows.Forms.Form)
+        If _hostModelessWindows Is Nothing Then
+            Throw New System.InvalidOperationException("Office modeless window lifetime is not initialized.")
+        End If
+        _hostModelessWindows.Show(form)
+    End Sub
+
+    Private Sub CloseHostModelessWindows()
+        Try
+            Global.SharedLibrary.SharedLibrary.LogWindow.Shutdown()
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine("Red Ink shared log shutdown failed: " & ex.Message)
+        End Try
+        Try
+            If _hostModelessWindows IsNot Nothing Then _hostModelessWindows.CloseAll()
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine("Red Ink modeless host shutdown failed: " & ex.Message)
+            Try
+                Global.SharedLibrary.SharedLibrary.RiCrashLogger.LogMarker("MODELESS_HOST_SHUTDOWN_FAILED", ex.ToString())
+            Catch
+            End Try
+        End Try
+    End Sub
+
     Private Sub ThisAddIn_Startup() Handles Me.Startup
+        _hostModelessWindows = New Global.SharedLibrary.SharedLibrary.HostModelessFormRegistry()
+
 
         ' Crash diagnostics: enabled only when the user's My.Settings.CrashLog is True.
         ' This flag is reconciled from INI_Crashlog after config load, so it takes effect
@@ -192,6 +229,7 @@ Partial Public Class ThisAddIn
         Dim dummy = mainThreadControl.Handle
 
         ' 2) Capture synchronization context & scheduler exactly once.
+        _uiThreadId = System.Threading.Thread.CurrentThread.ManagedThreadId
         _uiContext = SynchronizationContext.Current
         If _uiContext Is Nothing Then
             ' Fallback: install a WindowsFormsSynchronizationContext explicitly.
@@ -199,12 +237,14 @@ Partial Public Class ThisAddIn
             SynchronizationContext.SetSynchronizationContext(_uiContext)
         End If
         _uiScheduler = TaskScheduler.FromCurrentSynchronizationContext()
+        Global.SharedLibrary.SharedLibrary.LogWindow.InitializeUiDispatcher(_uiContext, _hostModelessWindows)
 
         ' 3) Give that Control to the UpdateHandler so it can Invoke on it
         UpdateHandler.MainControl = mainThreadControl
 
         ' 4) Capture the host window’s HWND.
         Dim hwnd As IntPtr = New IntPtr(CInt(Me.Application.Hwnd))
+        SharedMethods.InitializeHostWindow("XLMAIN", hwnd)
         UpdateHandler.HostHandle = hwnd
 
         ' Other startup tasks
@@ -247,16 +287,25 @@ Partial Public Class ThisAddIn
             InitializeAddInFeatures(startupTimings)
         Finally
             totalStartupStopwatch.Stop()
-            startupTimings.Add(
-                "ThisAddIn_Startup.total=" &
-                totalStartupStopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
-                " ms; uiThread=" &
-                (System.Threading.SynchronizationContext.Current Is _uiContext).ToString())
-            QueueExcelStartupTimingSnapshot(startupTimings)
+            If _context IsNot Nothing AndAlso _context.INI_APIDebug Then
+                startupTimings.Add(
+                    "ThisAddIn_Startup.total=" &
+                    totalStartupStopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    " ms; uiThread=" &
+                    (System.Threading.SynchronizationContext.Current Is _uiContext).ToString())
+                QueueExcelStartupTimingSnapshot(startupTimings)
+            End If
         End Try
     End Sub
 
+    Private licenseCounterReporter As System.IDisposable
+
     Private Sub ThisAddIn_Shutdown() Handles Me.Shutdown
+        If licenseCounterReporter IsNot Nothing Then
+            licenseCounterReporter.Dispose()
+            licenseCounterReporter = Nothing
+        End If
+        CloseHostModelessWindows()
         Try
             RiCrashLogger.Shutdown("ThisAddIn_Shutdown was called.")
         Catch
@@ -304,10 +353,14 @@ Partial Public Class ThisAddIn
 
         MeasureExcelStartupStep("ContextMenu", Sub() AddContextMenu(), startupTimings)
 
-        If _context IsNot Nothing AndAlso _context.INIloaded Then
+        ' License counting must not depend on successful model setup.
+        If _context IsNot Nothing Then
             MeasureExcelStartupStep(
                 "LicenseCounter",
-                Sub() SharedMethods.RegisterLicenseCounterUsageAndReport(_context, "EX"),
+                Sub()
+                    If licenseCounterReporter IsNot Nothing Then licenseCounterReporter.Dispose()
+                    licenseCounterReporter = Global.SharedLibrary.SharedLibrary.SharedMethods.StartLicenseCounterReporting(_context, "EX")
+                End Sub,
                 startupTimings)
         End If
 
@@ -359,10 +412,12 @@ Partial Public Class ThisAddIn
                         System.Diagnostics.Debug.WriteLine("[PERF] Excel startup warm-up failed: " & ex.Message)
                     Finally
                         stopwatch.Stop()
-                        System.Diagnostics.Debug.WriteLine(
-                            "[PERF] Excel model warm-up: " &
-                            stopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
-                            " ms")
+                        PerformanceLogger.LogDuration(
+                            _context,
+                            "Warmup",
+                            "ModelDecrypt",
+                            stopwatch.ElapsedMilliseconds,
+                            hostName:="Excel")
                     End Try
                 End Sub)
         Catch ex As System.Exception
@@ -380,41 +435,19 @@ Partial Public Class ThisAddIn
             action.Invoke()
         Finally
             stopwatch.Stop()
-            Dim entry As String =
-                label & "=" &
-                stopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
-                " ms; uiThread=" &
-                (System.Threading.SynchronizationContext.Current Is _uiContext).ToString()
-            System.Diagnostics.Debug.WriteLine("[PERF] Excel startup " & entry)
-            If timings IsNot Nothing Then timings.Add(entry)
+            If _context IsNot Nothing AndAlso _context.INI_APIDebug Then
+                Dim entry As String =
+                    label & "=" &
+                    stopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    " ms; uiThread=" &
+                    (System.Threading.SynchronizationContext.Current Is _uiContext).ToString()
+                If timings IsNot Nothing Then timings.Add(entry)
+            End If
         End Try
     End Sub
 
     Private Sub QueueExcelStartupTimingSnapshot(timings As System.Collections.Generic.List(Of String))
-        If timings Is Nothing OrElse timings.Count = 0 Then Return
-
-        Dim snapshot As String() = timings.ToArray()
-        Dim versionSnapshot As String = Version
-
-        System.Threading.Tasks.Task.Run(
-            Sub()
-                Try
-                    Dim basePath As String =
-                        System.IO.Path.Combine(
-                            System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
-                            "redink")
-                    System.IO.Directory.CreateDirectory(basePath)
-                    Dim outputPath As String = System.IO.Path.Combine(basePath, "RI_Excel_Startup_Perf.txt")
-                    Dim lines As New System.Collections.Generic.List(Of String)()
-                    lines.Add("Red Ink Excel Startup Performance")
-                    lines.Add("Created=" & System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", System.Globalization.CultureInfo.InvariantCulture))
-                    lines.Add("Version=" & If(versionSnapshot, ""))
-                    lines.AddRange(snapshot)
-                    System.IO.File.WriteAllLines(outputPath, lines, System.Text.Encoding.UTF8)
-                Catch ex As System.Exception
-                    System.Diagnostics.Debug.WriteLine("[PERF] Excel startup timing snapshot failed: " & ex.Message)
-                End Try
-            End Sub)
+        PerformanceLogger.LogStartupSnapshot(_context, "Excel", Version, timings)
     End Sub
 
     ' Bridge to SharedLibrary
@@ -432,7 +465,7 @@ Partial Public Class ThisAddIn
     End Function
     Public Shared Async Function LLM(ByVal promptSystem As String, ByVal promptUser As String, Optional ByVal Model As String = "", Optional ByVal Temperature As String = "", Optional ByVal Timeout As Long = 0, Optional ByVal UseSecondAPI As Boolean = False, Optional ByVal Hidesplash As Boolean = True, Optional ByVal AddUserPrompt As String = "", Optional ByVal FileObject As String = "") As Task(Of String)
         Dim Response = Await SharedMethods.LLM(_context, promptSystem, promptUser, Model, Temperature, Timeout, UseSecondAPI, Hidesplash, AddUserPrompt, FileObject)
-        Await EnsureUIThread().ConfigureAwait(False)
+        Await EnsureUIThread()
         Return Response
     End Function
     Private Sub ShowSettingsWindow(Settings As Dictionary(Of String, String), SettingsTips As Dictionary(Of String, String))

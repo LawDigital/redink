@@ -89,47 +89,44 @@ Namespace SharedLibrary
         ''' The window handle if a known Office application class is found; otherwise <see cref="IntPtr.Zero"/>.
         ''' </returns>
         Private Shared Function GetOfficeApplicationHwnd() As IntPtr
-            ' Prefer the host window captured at add-in startup (UpdateHandler.HostHandle).
-            ' It points at the actually running host (Outlook, Word or Excel). Probing by
-            ' window class below would otherwise return a different Office app that merely
-            ' happens to be open (e.g. Word in the background while the Outlook add-in shows
-            ' a dialog), parenting the dialog to the wrong application, pushing it behind
-            ' that app and stealing focus from it.
-            Dim host As System.IntPtr = UpdateHandler.HostHandle
-            If host <> System.IntPtr.Zero Then
-                ' If the user is currently working in another top-level window of the SAME
-                ' host process (e.g. an Outlook Inspector while editing an e-mail, rather
-                ' than the main Explorer window), prefer that foreground window as the owner.
-                ' Otherwise parenting to the main host window would bring the main window to
-                ' the front and hide the Inspector the user is actually editing.
-                Dim fg As System.IntPtr = NativeMethods.GetForegroundWindow()
-                If fg <> System.IntPtr.Zero AndAlso fg <> host Then
-                    Dim hostPid As Integer = 0
-                    Dim fgPid As Integer = 0
-                    NativeMethods.GetWindowThreadProcessId(host, hostPid)
-                    NativeMethods.GetWindowThreadProcessId(fg, fgPid)
-                    If hostPid <> 0 AndAlso fgPid = hostPid Then Return fg
-                End If
-
-                Return host
-            End If
-
-            ' Fallbacks (only used if the host handle was not captured at startup).
-            ' Try Word first.
-            Dim hwnd As System.IntPtr = FindWindow("OpusApp", Nothing)
-            If hwnd <> System.IntPtr.Zero Then Return hwnd
-
-            ' Try Excel.
-            hwnd = FindWindow("XLMAIN", Nothing)
-            If hwnd <> IntPtr.Zero Then Return hwnd
-
-            ' Try Outlook.
-            hwnd = FindWindow("rctrl_renwnd32", Nothing)
-            If hwnd <> IntPtr.Zero Then Return hwnd
-
-            Return IntPtr.Zero
+            ' Foreground preference remains local to this process. Modal callers
+            ' additionally enforce the calling UI thread through DialogOwner.
+            Dim foreground As System.IntPtr = NativeMethods.GetForegroundWindow()
+            If SharedMethods.IsWindowInCurrentProcess(foreground) Then Return foreground
+            Return UpdateHandler.HostHandle
         End Function
 
+
+
+        ' A complete modeless lifetime belongs to the initialized Office dispatcher.
+        ' Do not infer it from OpenForms, an arbitrary SynchronizationContext, or a
+        ' single DoEvents call. Asynchronous failures are observed without more UI.
+        Private Shared Sub ObserveCustomFormDispatch(pending As System.Threading.Tasks.Task)
+            Dim observed As System.Threading.Tasks.Task = pending.ContinueWith(
+                Sub(failed As System.Threading.Tasks.Task)
+                    Try
+                        RiCrashLogger.LogMarker("CUSTOM_FORM_DISPATCH_FAILED", failed.Exception.GetBaseException().ToString())
+                    Catch
+                    End Try
+                End Sub,
+                System.Threading.CancellationToken.None,
+                System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted Or System.Threading.Tasks.TaskContinuationOptions.ExecuteSynchronously,
+                System.Threading.Tasks.TaskScheduler.Default)
+        End Sub
+
+        Private Shared Sub RequireCustomFormCallbackThread(hasCallbacks As System.Boolean)
+            If hasCallbacks AndAlso Not SharedMethods.IsOnHostUiThread AndAlso Not SharedMethods.IsOnHostNeutralSta Then
+                Throw New System.InvalidOperationException("A dialog with host callbacks must be opened on the initialized Office UI thread. Use PostToHostUiAsync for the complete dialog operation.")
+            End If
+        End Sub
+
+        Private Shared Sub DisposeCustomFormTimerWhenClosed(form As System.Windows.Forms.Form, timer As System.Windows.Forms.Timer)
+            AddHandler form.Disposed,
+                Sub(sender As System.Object, e As System.EventArgs)
+                    timer.Stop()
+                    timer.Dispose()
+                End Sub
+        End Sub
 
         ''' <summary>
         ''' Shows a fixed-size modal dialog with a prompt and a list of options to select from.
@@ -145,6 +142,11 @@ Namespace SharedLibrary
                                             title As String,
                                             options As IEnumerable(Of String)
                                         ) As String
+
+            If Not SharedMethods.IsOnHostUiThread AndAlso Not SharedMethods.IsOnHostNeutralSta Then
+                Dim capturedOptions As System.Collections.Generic.List(Of System.String) = If(options, System.Linq.Enumerable.Empty(Of System.String)()).ToList()
+                Return RunOnStaThread(Function() ShowSelectionForm(prompt, title, capturedOptions), "Red Ink selection", alwaysUseWorker:=True)
+            End If
 
             Dim selectedOption As String = "ESC"
 
@@ -169,12 +171,12 @@ Namespace SharedLibrary
         .AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font,
         .MinimumSize = New System.Drawing.Size(MIN_WIDTH, MIN_HEIGHT)
     }
+            Try
             Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
             inputForm.Font = standardFont
 
             ' Use logo as icon.
-            Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-            inputForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(inputForm)
 
             ' --- Measure content to determine optimal width ---
             Dim optionsList As String() = options.ToArray()
@@ -364,6 +366,10 @@ Namespace SharedLibrary
             End If
 
             Return selectedOption
+
+            Finally
+                If Not inputForm.IsDisposed Then inputForm.Dispose()
+            End Try
         End Function
 
         ''' <summary>
@@ -401,6 +407,12 @@ Namespace SharedLibrary
                                                     Optional InsertButtonMaxOccurrences As System.Collections.Generic.IDictionary(Of System.String, System.Int32) = Nothing
                                                 ) As String
 
+            RequireInteractiveExecution("input_dialog")
+            If Not SharedMethods.IsOnHostUiThread AndAlso Not SharedMethods.IsOnHostNeutralSta Then
+                RequireCustomFormCallbackThread(Context IsNot Nothing)
+                Return RunOnStaThread(Function() ShowCustomInputBox(prompt, title, SimpleInput, DefaultValue, CtrlP, OptionalButtons, InsertButtons, Nothing, InsertButtonMaxOccurrences), "Red Ink input", alwaysUseWorker:=True)
+            End If
+
             ' Screen working area (accounts for taskbar, etc.).
             Dim wa As System.Drawing.Rectangle = Screen.FromPoint(Cursor.Position).WorkingArea
 
@@ -427,10 +439,10 @@ Namespace SharedLibrary
                 .AutoSize = True,
                 .AutoSizeMode = AutoSizeMode.GrowAndShrink
             }
+            Try
 
             ' Set the icon.
-            Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-            inputForm.Icon = Icon.FromHandle(bmp.GetHicon())
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(inputForm)
 
             ' Standard font.
             Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, FontStyle.Regular, GraphicsUnit.Point)
@@ -739,12 +751,12 @@ Namespace SharedLibrary
             Dim Result As DialogResult
 
 
-            ' Show the dialog, must be owned by Outlook (only then the title may contains "Browser").
+            ' Preserve Browser focus restoration, but only for this host's UI thread.
 
             If title.Contains("Browser") Then
-                ' Activate Outlook window via Win32 (no COM object needed since we're already in-process).
-                Dim outlookHwnd As IntPtr = FindWindow("rctrl_renwnd32", Nothing)
-                If outlookHwnd <> IntPtr.Zero Then
+                ' Never activate or synchronously message a foreign process/thread.
+                Dim outlookHwnd As System.IntPtr = GetOfficeApplicationHwnd()
+                If SharedMethods.IsWindowOnCurrentThread(outlookHwnd) Then
                     Const SW_RESTORE As Integer = 9
                     Const WM_SYSCOMMAND As Integer = &H112
                     Const SC_RESTORE As Integer = &HF120
@@ -789,6 +801,10 @@ Namespace SharedLibrary
             Else
                 Return If(Not SimpleInput, "ESC", "")
             End If
+
+            Finally
+                If Not inputForm.IsDisposed Then inputForm.Dispose()
+            End Try
         End Function
 
 
@@ -825,6 +841,12 @@ Namespace SharedLibrary
                         Optional nonModal As Boolean = False
                     ) As Integer
 
+            RequireInteractiveExecution("confirmation_dialog")
+            RequireCustomFormCallbackThread(extraButtonAction IsNot Nothing)
+            If Not SharedMethods.IsOnHostUiThread AndAlso Not SharedMethods.IsOnHostNeutralSta Then
+                Return RunOnStaThread(Function() ShowCustomYesNoBox(bodyText, button1Text, button2Text, header, autoCloseSeconds, Defaulttext, extraButtonText, Nothing, CloseAfterExtra, nonModal), "Red Ink confirmation", alwaysUseWorker:=True)
+            End If
+
             ' Screen working area.
             Dim wa As Rectangle = Screen.FromPoint(Cursor.Position).WorkingArea
             Dim maxScreenHeight As Integer = CInt(wa.Height * 0.5)
@@ -848,10 +870,10 @@ Namespace SharedLibrary
                 .TopMost = True,
                 .AutoScaleMode = AutoScaleMode.Font
             }
+            Try
 
             ' Icon.
-            Dim bmpIcon As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-            messageForm.Icon = Icon.FromHandle(bmpIcon.GetHicon())
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(messageForm)
 
             ' Font.
             Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, FontStyle.Regular, GraphicsUnit.Point)
@@ -876,11 +898,8 @@ Namespace SharedLibrary
             ' Result variable.
             Dim result As Integer = 0
 
-            ' For non-modal, we need a signal to know when dialog is closed
-            Dim dialogClosed As Threading.ManualResetEvent = Nothing
-            If nonModal Then
-                dialogClosed = New Threading.ManualResetEvent(False)
-            End If
+                ' This state is read and written only on the same form/host thread.
+                Dim dialogClosed As System.Boolean = False
 
             AddHandler button1.Click, Sub()
                                           result = 1
@@ -1075,6 +1094,7 @@ Namespace SharedLibrary
                                            messageForm.Close()
                                        End If
                                    End Sub
+                    DisposeCustomFormTimerWhenClosed(messageForm, t)
                 t.Start()
             End If
 
@@ -1088,7 +1108,7 @@ Namespace SharedLibrary
                                                    End Sub
 
                 AddHandler messageForm.FormClosed, Sub(sender, e)
-                                                       dialogClosed.Set()
+                                                           dialogClosed = True
                                                    End Sub
             End If
 
@@ -1105,17 +1125,26 @@ Namespace SharedLibrary
                 End Sub
 
             If nonModal Then
-                ' Show non-modal and pump messages until closed
+                    SharedMethods.AttachForeignForegroundWatchdog(messageForm)
+                    If SharedMethods.IsOnHostUiThread OrElse System.Windows.Forms.Application.MessageLoop Then
+                        If SharedMethods.IsOnHostUiThread Then
+                            SharedMethods.ShowHostUiForm(messageForm)
+                        Else
                 messageForm.Show()
+                        End If
                 messageForm.BringToFront()
                 messageForm.Activate()
-
-                ' Pump messages until dialog is closed
-                While Not dialogClosed.WaitOne(50)
+                        ' Preserve the existing synchronous choice contract while Office
+                        ' remains interactive. This is the explicit native host UI thread.
+                        While Not dialogClosed AndAlso Not messageForm.IsDisposed
                     System.Windows.Forms.Application.DoEvents()
+                            If Not dialogClosed AndAlso Not messageForm.IsDisposed Then System.Threading.Thread.Sleep(15)
                 End While
-
-                messageForm.Dispose()
+                    Else
+                        ' Host-neutral MTA callers were moved to an isolated STA above.
+                        ' Its form, native message loop and disposal stay on that STA.
+                        System.Windows.Forms.Application.Run(messageForm)
+                    End If
             Else
                 ' Show modal.
                 SharedMethods.AttachForeignForegroundWatchdog(messageForm)
@@ -1129,6 +1158,10 @@ Namespace SharedLibrary
             End If
 
             Return result
+
+            Finally
+                If Not messageForm.IsDisposed Then messageForm.Dispose()
+            End Try
         End Function
 
 
@@ -1141,7 +1174,7 @@ Namespace SharedLibrary
         ''' <param name="Defaulttext">Suffix appended to the countdown label text.</param>
         ''' <param name="SeparateThread">
         ''' If <c>True</c> and auto-close is enabled, shows the dialog using <c>ShowDialog()</c>;
-        ''' otherwise uses <c>Show()</c> with <c>Application.DoEvents()</c>.
+        ''' otherwise uses the registered host message loop for a modeless notification.
         ''' </param>
         ''' <param name="extraButtonText">Optional extra button text (only when no auto-close is active).</param>
         ''' <param name="extraButtonAction">Action invoked when the extra button is clicked.</param>
@@ -1156,6 +1189,37 @@ Namespace SharedLibrary
     Optional extraButtonAction As System.Action = Nothing,
     Optional CloseAfterExtra As Boolean = False
 )
+            RequireInteractiveExecution("message_dialog")
+            If autoCloseSeconds.HasValue AndAlso Not SeparateThread Then
+                If SharedMethods.HasHostUiDispatcher Then
+                    ObserveCustomFormDispatch(SharedMethods.PostToHostUiAsync(
+                        Sub() ShowCustomMessageBoxCore(bodyText, header, autoCloseSeconds, Defaulttext, False, extraButtonText, extraButtonAction, CloseAfterExtra)))
+                    Return
+                End If
+                ' Before host initialization, a pure notification can still own a
+                ' modal STA lifetime. Never create a modeless form on a worker.
+                RunOnStaThread(Sub() ShowCustomMessageBoxCore(bodyText, header, autoCloseSeconds, Defaulttext, True, Nothing, Nothing, CloseAfterExtra), "Red Ink notification", alwaysUseWorker:=Not SharedMethods.IsOnHostNeutralSta)
+                Return
+            End If
+            RequireCustomFormCallbackThread(extraButtonAction IsNot Nothing AndAlso Not autoCloseSeconds.HasValue)
+            If Not SharedMethods.IsOnHostUiThread AndAlso Not SharedMethods.IsOnHostNeutralSta Then
+                RunOnStaThread(Sub() ShowCustomMessageBoxCore(bodyText, header, autoCloseSeconds, Defaulttext, SeparateThread, extraButtonText, Nothing, CloseAfterExtra), "Red Ink message", alwaysUseWorker:=True)
+                Return
+            End If
+            ShowCustomMessageBoxCore(bodyText, header, autoCloseSeconds, Defaulttext, SeparateThread, extraButtonText, extraButtonAction, CloseAfterExtra)
+        End Sub
+
+        Private Shared Sub ShowCustomMessageBoxCore(
+    ByVal bodyText As String,
+    Optional header As String = AN,
+    Optional autoCloseSeconds As System.Nullable(Of Integer) = Nothing,
+    Optional Defaulttext As String = " - execution continues meanwhile",
+    Optional SeparateThread As Boolean = False,
+    Optional extraButtonText As String = Nothing,
+    Optional extraButtonAction As System.Action = Nothing,
+    Optional CloseAfterExtra As Boolean = False
+)
+            RequireInteractiveExecution("message_dialog")
             If System.String.IsNullOrWhiteSpace(header) Then header = AN
             Dim isTruncated As System.Boolean = False
             If bodyText IsNot Nothing AndAlso bodyText.Length > 10000 Then
@@ -1163,6 +1227,7 @@ Namespace SharedLibrary
                 isTruncated = True
             End If
 
+            Dim retainedByHost As System.Boolean = False
             Dim messageForm As New System.Windows.Forms.Form() With {
         .Opacity = 0,
         .Text = header,
@@ -1175,9 +1240,9 @@ Namespace SharedLibrary
         .AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font,
         .AutoSize = False
     }
+            Try
 
-            Dim bmpIcon As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-            messageForm.Icon = System.Drawing.Icon.FromHandle(bmpIcon.GetHicon())
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(messageForm)
 
             Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
             messageForm.Font = standardFont
@@ -1342,6 +1407,7 @@ Namespace SharedLibrary
                     End If
                 End If
             End Sub
+                DisposeCustomFormTimerWhenClosed(messageForm, t)
                 t.Start()
 
                 messageForm.Opacity = 1
@@ -1361,8 +1427,8 @@ Namespace SharedLibrary
                         messageForm.ShowDialog()
                     End If
                 Else
-                    messageForm.Show()
-                    System.Windows.Forms.Application.DoEvents()
+                    SharedMethods.ShowHostUiForm(messageForm)
+                    retainedByHost = True
                 End If
             Else
 
@@ -1384,6 +1450,10 @@ Namespace SharedLibrary
                 End If
 
             End If
+
+            Finally
+                If Not retainedByHost AndAlso Not messageForm.IsDisposed Then messageForm.Dispose()
+            End Try
         End Sub
 
 
@@ -1416,8 +1486,42 @@ Namespace SharedLibrary
             Optional CloseAfterSecondary As Boolean = True
         ) As Integer
 
+            RequireInteractiveExecution("rtf_dialog")
+            Dim modeless As System.Boolean = autoCloseSeconds.HasValue AndAlso autoCloseSeconds.Value > 0
+            If modeless AndAlso SharedMethods.HasHostUiDispatcher Then
+                ObserveCustomFormDispatch(SharedMethods.PostToHostUiAsync(
+                    Sub() ShowRTFCustomMessageBoxCore(bodyText, header, autoCloseSeconds, Defaulttext, RestoreWindow, okButtonText, secondaryButtonText, okButtonAction, secondaryButtonAction, CloseAfterOk, CloseAfterSecondary, True)))
+                ' Preserve the existing auto-close API: its immediate result is 0;
+                ' callbacks remain on the live host UI thread until the form closes.
+                Return 0
+            End If
+            RequireCustomFormCallbackThread(okButtonAction IsNot Nothing OrElse secondaryButtonAction IsNot Nothing)
+            If (Not SharedMethods.IsOnHostUiThread AndAlso Not SharedMethods.IsOnHostNeutralSta) OrElse modeless Then
+                Return RunOnStaThread(Function() ShowRTFCustomMessageBoxCore(bodyText, header, autoCloseSeconds, Defaulttext, RestoreWindow, okButtonText, secondaryButtonText, okButtonAction, secondaryButtonAction, CloseAfterOk, CloseAfterSecondary, False), "Red Ink RTF message", alwaysUseWorker:=Not SharedMethods.IsOnHostNeutralSta)
+            End If
+            Return ShowRTFCustomMessageBoxCore(bodyText, header, autoCloseSeconds, Defaulttext, RestoreWindow, okButtonText, secondaryButtonText, okButtonAction, secondaryButtonAction, CloseAfterOk, CloseAfterSecondary, False)
+        End Function
+
+        Private Shared Function ShowRTFCustomMessageBoxCore(
+            ByVal bodyText As String,
+            Optional header As String = AN,
+            Optional autoCloseSeconds As Integer? = Nothing,
+            Optional Defaulttext As String = " - execution continues meanwhile",
+            Optional RestoreWindow As Boolean = False,
+            Optional okButtonText As String = "OK",
+            Optional secondaryButtonText As String = Nothing,
+            Optional okButtonAction As System.Action = Nothing,
+            Optional secondaryButtonAction As System.Action = Nothing,
+            Optional CloseAfterOk As Boolean = True,
+            Optional CloseAfterSecondary As Boolean = True,
+            Optional showModelessOnHost As System.Boolean = False
+        ) As Integer
+
+            Dim retainedByHost As System.Boolean = False
             Dim RTFMessageForm As New System.Windows.Forms.Form()
+            Try
             Dim bodyLabel As New System.Windows.Forms.RichTextBox()
+                RTFMessageForm.Controls.Add(bodyLabel)
             Dim okButton As New System.Windows.Forms.Button()
             Dim secondaryButton As System.Windows.Forms.Button = Nothing
             Dim countdownLabel As New System.Windows.Forms.Label()
@@ -1439,8 +1543,7 @@ Namespace SharedLibrary
             RTFMessageForm.AutoScaleDimensions = New System.Drawing.SizeF(96.0F, 96.0F)
             RTFMessageForm.MinimumSize = New System.Drawing.Size(650, 335)
 
-            Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-            RTFMessageForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(RTFMessageForm)
 
             Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
 
@@ -1615,6 +1718,7 @@ Namespace SharedLibrary
                         End If
                     End Sub
 
+                    DisposeCustomFormTimerWhenClosed(RTFMessageForm, timer)
                 timer.Start()
 
                 RTFMessageForm.BringToFront()
@@ -1627,11 +1731,17 @@ Namespace SharedLibrary
                     End Sub
 
                 RTFMessageForm.Opacity = 1
-                RTFMessageForm.Show()
-                RTFMessageForm.BringToFront()
-                RTFMessageForm.Activate()
-                System.Windows.Forms.Application.DoEvents()
-
+                    If showModelessOnHost Then
+                        SharedMethods.ShowHostUiForm(RTFMessageForm)
+                        retainedByHost = True
+                    Else
+                        Dim timerOwner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
+                        If timerOwner IsNot Nothing Then
+                            RTFMessageForm.ShowDialog(timerOwner)
+                        Else
+                            RTFMessageForm.ShowDialog()
+                        End If
+                    End If
                 Return result
             Else
                 RTFMessageForm.BringToFront()
@@ -1653,6 +1763,10 @@ Namespace SharedLibrary
                 Return result
             End If
 
+
+            Finally
+                If Not retainedByHost AndAlso Not RTFMessageForm.IsDisposed Then RTFMessageForm.Dispose()
+            End Try
         End Function
 
 
@@ -1694,8 +1808,31 @@ Namespace SharedLibrary
             Catch
             End Try
 
-            Dim appendedStyle As String =
-                $"background-color: rgb({hostBackColor.R}, {hostBackColor.G}, {hostBackColor.B}); margin: 20px; font-family: 'Segoe UI'; font-size: 9pt;"
+            Dim backgroundCss As System.String =
+                $"background-color: rgb({hostBackColor.R}, {hostBackColor.G}, {hostBackColor.B});"
+            Dim appendedStyle As System.String =
+                backgroundCss & " margin: 0; padding: 20px; font-family: 'Segoe UI'; font-size: 9pt;"
+
+            ' The embedded browser has its own HTML canvas. Styling only <body> with
+            ' a margin leaves a white strip around it under some IE/WebBrowser modes.
+            ' Give the root canvas the same form background, then use body padding
+            ' rather than a margin so the inset remains inside that background.
+            Try
+                Dim htmlRoots As System.Windows.Forms.HtmlElementCollection =
+                    htmlBrowser.Document.GetElementsByTagName("html")
+                If htmlRoots IsNot Nothing AndAlso htmlRoots.Count > 0 Then
+                    Dim htmlRoot As System.Windows.Forms.HtmlElement = htmlRoots(0)
+                    Dim existingRootStyle As System.String = If(htmlRoot.GetAttribute("style"), System.String.Empty)
+                    If existingRootStyle.IndexOf(backgroundCss, System.StringComparison.OrdinalIgnoreCase) < 0 Then
+                        htmlRoot.Style = If(System.String.IsNullOrWhiteSpace(existingRootStyle),
+                                            backgroundCss,
+                                            existingRootStyle.Trim().TrimEnd(";"c) & "; " & backgroundCss)
+                    End If
+                End If
+            Catch ex As System.Exception
+                ' Some older browser hosts reject writes to <html>; body padding/background still work.
+                System.Diagnostics.Debug.WriteLine("HTML viewer root styling fallback: " & ex.Message)
+            End Try
 
             If String.IsNullOrWhiteSpace(existingStyle) Then
                 body.Style = appendedStyle
@@ -1705,7 +1842,7 @@ Namespace SharedLibrary
         End Sub
 
         ''' <summary>
-        ''' Shows an HTML message dialog using a WinForms WebBrowser control on an STA thread.
+        ''' Shows an HTML preview on the registered Office UI thread so callbacks retain host affinity.
         ''' </summary>
         ''' <param name="bodyText">HTML assigned to DocumentText.</param>
         ''' <param name="header">Dialog title.</param>
@@ -1727,17 +1864,25 @@ Namespace SharedLibrary
             Optional nonModal As Boolean = False,
             Optional onClose As System.Action = Nothing
         )
-            ' For non-modal on the current thread
+            RequireInteractiveExecution("html_dialog")
+            Dim hasCallbacks As System.Boolean = extraButtonAction IsNot Nothing OrElse onClose IsNot Nothing OrElse
+                (additionalButtons IsNot Nothing AndAlso additionalButtons.Any(Function(item) item IsNot Nothing AndAlso item.Item2 IsNot Nothing))
             If nonModal Then
+                RequireCustomFormCallbackThread(hasCallbacks)
+                If Not SharedMethods.IsOnHostUiThread AndAlso Not SharedMethods.IsOnHostNeutralSta Then
+                    RunOnStaThread(Sub() ShowHTMLCustomMessageBoxNonModal(bodyText, header, extraButtonText, Nothing, CloseAfterExtra, Nothing, Nothing), "Red Ink HTML preview", alwaysUseWorker:=Not SharedMethods.IsOnHostNeutralSta)
+                    Return
+                End If
                 ShowHTMLCustomMessageBoxNonModal(bodyText, header, extraButtonText, extraButtonAction, CloseAfterExtra, additionalButtons, onClose)
                 Return
             End If
-
-            Dim t As New Thread(Sub()
-                                    ShowHTMLCustomMessageBoxInternal(bodyText, header, extraButtonText, extraButtonAction, CloseAfterExtra, additionalButtons, onClose)
-                                End Sub)
-            t.SetApartmentState(System.Threading.ApartmentState.STA)
-            t.Start()
+            If SharedMethods.HasHostUiDispatcher Then
+                ObserveCustomFormDispatch(SharedMethods.PostToHostUiAsync(
+                    Sub() ShowHTMLCustomMessageBoxInternal(bodyText, header, extraButtonText, extraButtonAction, CloseAfterExtra, additionalButtons, onClose, True)))
+                Return
+            End If
+            RequireCustomFormCallbackThread(hasCallbacks)
+            RunOnStaThread(Sub() ShowHTMLCustomMessageBoxInternal(bodyText, header, extraButtonText, extraButtonAction, CloseAfterExtra, additionalButtons, onClose, False), "Red Ink HTML preview", alwaysUseWorker:=Not SharedMethods.IsOnHostNeutralSta)
         End Sub
 
         Private Shared Sub ShowHTMLCustomMessageBoxInternal(
@@ -1747,9 +1892,11 @@ Namespace SharedLibrary
             extraButtonAction As System.Action,
             CloseAfterExtra As Boolean,
             additionalButtons As System.Tuple(Of System.String, System.Action, System.Boolean)(),
-            onClose As System.Action
+            onClose As System.Action,
+            Optional showModelessOnHost As System.Boolean = False
         )
             ' Create and configure form
+            Dim retainedByHost As System.Boolean = False
             Dim HTMLMessageForm As New System.Windows.Forms.Form() With {
                 .Opacity = 0,
                 .Text = If(String.IsNullOrWhiteSpace(header), AN, header),
@@ -1762,11 +1909,11 @@ Namespace SharedLibrary
                 .KeyPreview = True,
                 .AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font
             }
+            Try
 
             ' Set the icon
             Try
-                Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                HTMLMessageForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(HTMLMessageForm)
             Catch
             End Try
 
@@ -1781,7 +1928,6 @@ Namespace SharedLibrary
                 .IsWebBrowserContextMenuEnabled = True,
                 .ScrollBarsEnabled = True,
                 .ScriptErrorsSuppressed = True,
-                .DocumentText = bodyText,
                 .Dock = System.Windows.Forms.DockStyle.Fill,
                 .BackColor = HTMLMessageForm.BackColor,
                 .Margin = New System.Windows.Forms.Padding(20)
@@ -1789,6 +1935,9 @@ Namespace SharedLibrary
             AddHandler htmlBrowser.DocumentCompleted, Sub(sender2, e2)
                                                           ApplyHtmlViewerBodyStyle(htmlBrowser, HTMLMessageForm.BackColor, bodyText)
                                                       End Sub
+            ' Register before navigation: otherwise a cached/synchronous document load
+            ' may finish before the handler is attached, dropping the body inset.
+            htmlBrowser.DocumentText = bodyText
 
             ' OK button
             Dim okButton As New System.Windows.Forms.Button() With {
@@ -1895,13 +2044,22 @@ Namespace SharedLibrary
                 End Sub
 
             HTMLMessageForm.Opacity = 1
+                If showModelessOnHost Then
+                    SharedMethods.ShowHostUiForm(HTMLMessageForm)
+                    retainedByHost = True
+                Else
             Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveSameThreadDialogOwner()
             If __owner IsNot Nothing Then
                 HTMLMessageForm.ShowDialog(__owner)
             Else
                 HTMLMessageForm.ShowDialog()
             End If
+                End If
 
+
+            Finally
+                If Not retainedByHost AndAlso Not HTMLMessageForm.IsDisposed Then HTMLMessageForm.Dispose()
+            End Try
         End Sub
 
         Private Shared Sub ShowHTMLCustomMessageBoxNonModal(
@@ -1913,7 +2071,7 @@ Namespace SharedLibrary
             additionalButtons As System.Tuple(Of System.String, System.Action, System.Boolean)(),
             onClose As System.Action
         )
-            Dim dialogClosed As New Threading.ManualResetEvent(False)
+            Dim dialogClosed As System.Boolean = False
 
             ' Create and configure form
             Dim HTMLMessageForm As New System.Windows.Forms.Form() With {
@@ -1928,11 +2086,11 @@ Namespace SharedLibrary
                 .KeyPreview = True,
                 .AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font
             }
+            Try
 
             ' Set the icon
             Try
-                Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                HTMLMessageForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+                Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(HTMLMessageForm)
             Catch
             End Try
 
@@ -1947,7 +2105,6 @@ Namespace SharedLibrary
                 .IsWebBrowserContextMenuEnabled = True,
                 .ScrollBarsEnabled = True,
                 .ScriptErrorsSuppressed = True,
-                .DocumentText = bodyText,
                 .Dock = System.Windows.Forms.DockStyle.Fill,
                 .BackColor = HTMLMessageForm.BackColor,
                 .Margin = New System.Windows.Forms.Padding(20)
@@ -1955,6 +2112,9 @@ Namespace SharedLibrary
             AddHandler htmlBrowser.DocumentCompleted, Sub(sender2, e2)
                                                           ApplyHtmlViewerBodyStyle(htmlBrowser, HTMLMessageForm.BackColor, bodyText)
                                                       End Sub
+            ' Register before navigation: otherwise a cached/synchronous document load
+            ' may finish before the handler is attached, dropping the body inset.
+            htmlBrowser.DocumentText = bodyText
 
             ' OK button
             Dim okButton As New System.Windows.Forms.Button() With {
@@ -2063,7 +2223,7 @@ Namespace SharedLibrary
                                                            Catch
                                                            End Try
                                                        End If
-                                                       dialogClosed.Set()
+                                                           dialogClosed = True
                                                    End Sub
 
             AddHandler HTMLMessageForm.Shown,
@@ -2072,16 +2232,27 @@ Namespace SharedLibrary
                 End Sub
 
             HTMLMessageForm.Opacity = 1
+                If SharedMethods.IsOnHostUiThread OrElse System.Windows.Forms.Application.MessageLoop Then
+                    If SharedMethods.IsOnHostUiThread Then
+                        SharedMethods.ShowHostUiForm(HTMLMessageForm)
+                    Else
             HTMLMessageForm.Show()
+                    End If
             HTMLMessageForm.BringToFront()
             HTMLMessageForm.Activate()
+                    ' Existing callers consume button/callback results immediately
+                    ' after this method returns; preserve that contract on the host UI.
+                    While Not dialogClosed AndAlso Not HTMLMessageForm.IsDisposed
+                        System.Windows.Forms.Application.DoEvents()
+                        If Not dialogClosed AndAlso Not HTMLMessageForm.IsDisposed Then System.Threading.Thread.Sleep(15)
+                    End While
+                Else
+                    System.Windows.Forms.Application.Run(HTMLMessageForm)
+                End If
 
-            ' Pump messages until dialog is closed
-            While Not dialogClosed.WaitOne(50)
-                System.Windows.Forms.Application.DoEvents()
-            End While
-
-            HTMLMessageForm.Dispose()
+            Finally
+                If Not HTMLMessageForm.IsDisposed Then HTMLMessageForm.Dispose()
+            End Try
         End Sub
         ''' <summary>
         ''' Shows an HTML message dialog non-modally with topmost behavior, allowing interaction with other windows.
@@ -2095,166 +2266,7 @@ Namespace SharedLibrary
             CloseAfterExtra As Boolean,
             additionalButtons As System.Tuple(Of System.String, System.Action, System.Boolean)()
         )
-            Dim dialogClosed As New Threading.ManualResetEvent(False)
-
-            ' Create and configure form.
-            Dim HTMLMessageForm As New System.Windows.Forms.Form() With {
-                .Opacity = 0,
-                .Text = header,
-                .FormBorderStyle = System.Windows.Forms.FormBorderStyle.Sizable,
-                .StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen,
-                .MaximizeBox = True,
-                .MinimizeBox = True,
-                .ShowInTaskbar = True,
-                .TopMost = True,
-                .KeyPreview = True,
-                .MinimumSize = New System.Drawing.Size(800, 500),
-                .AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font
-            }
-
-            ' Header fallback.
-            If String.IsNullOrWhiteSpace(header) Then
-                HTMLMessageForm.Text = AN
-            End If
-
-            ' Set the icon.
-            Try
-                Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                HTMLMessageForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
-            Catch
-            End Try
-
-            ' Standard font.
-            Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
-            HTMLMessageForm.Font = standardFont
-
-            ' WebBrowser with margin - enable shortcuts for copy/paste.
-            Dim htmlBrowser As New System.Windows.Forms.WebBrowser() With {
-                .AllowNavigation = False,
-                .WebBrowserShortcutsEnabled = True,
-                .IsWebBrowserContextMenuEnabled = True,
-                .ScrollBarsEnabled = True,
-                .ScriptErrorsSuppressed = True,
-                .DocumentText = bodyText,
-                .Dock = System.Windows.Forms.DockStyle.Fill,
-                .BackColor = HTMLMessageForm.BackColor,
-                .Margin = New System.Windows.Forms.Padding(20)
-            }
-            AddHandler htmlBrowser.DocumentCompleted, Sub(sender2, e2)
-                                                          ApplyHtmlViewerBodyStyle(htmlBrowser, HTMLMessageForm.BackColor, bodyText)
-                                                      End Sub
-
-            ' OK button.
-            Dim okButton As New System.Windows.Forms.Button() With {
-                .Text = "OK",
-                .AutoSize = True,
-                .Font = standardFont,
-                .Margin = New System.Windows.Forms.Padding(0)
-            }
-            AddHandler okButton.Click, Sub()
-                                           HTMLMessageForm.Close()
-                                       End Sub
-
-            ' Form-level Escape.
-            AddHandler HTMLMessageForm.KeyDown, Sub(sender2, e2)
-                                                    If e2.KeyCode = System.Windows.Forms.Keys.Escape Then
-                                                        HTMLMessageForm.Close()
-                                                        e2.SuppressKeyPress = True
-                                                    End If
-                                                End Sub
-
-            ' Bottom flow panel.
-            Dim bottomFlow As New System.Windows.Forms.FlowLayoutPanel() With {
-                .FlowDirection = System.Windows.Forms.FlowDirection.LeftToRight,
-                .Dock = System.Windows.Forms.DockStyle.Bottom,
-                .AutoSize = True,
-                .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
-                .Padding = New System.Windows.Forms.Padding(20)
-            }
-            bottomFlow.Controls.Add(okButton)
-
-            ' First extra button (legacy parameter).
-            If (Not System.String.IsNullOrEmpty(extraButtonText)) AndAlso (extraButtonAction IsNot Nothing) Then
-                Dim extraButton As New System.Windows.Forms.Button() With {
-                    .Text = extraButtonText,
-                    .AutoSize = True,
-                    .Font = standardFont,
-                    .Margin = New System.Windows.Forms.Padding(10, okButton.Margin.Top, 0, okButton.Margin.Bottom)
-                }
-
-                AddHandler extraButton.Click,
-                    Sub()
-                        Try
-                            extraButtonAction.Invoke()
-                        Catch ex As System.Exception
-                        End Try
-                        If CloseAfterExtra Then HTMLMessageForm.Close()
-                    End Sub
-
-                bottomFlow.Controls.Add(extraButton)
-            End If
-
-            ' Additional buttons array.
-            If additionalButtons IsNot Nothing AndAlso additionalButtons.Length > 0 Then
-                For Each btnDef In additionalButtons
-                    If System.String.IsNullOrEmpty(btnDef.Item1) OrElse btnDef.Item2 Is Nothing Then Continue For
-                    Dim addBtn As New System.Windows.Forms.Button() With {
-                        .Text = btnDef.Item1,
-                        .AutoSize = True,
-                        .Font = standardFont,
-                        .Margin = New System.Windows.Forms.Padding(10, okButton.Margin.Top, 0, okButton.Margin.Bottom)
-                    }
-                    Dim closeAfter As Boolean = btnDef.Item3
-                    Dim action As System.Action = btnDef.Item2
-                    AddHandler addBtn.Click,
-                        Sub()
-                            Try
-                                action.Invoke()
-                            Catch ex As System.Exception
-                            End Try
-                            If closeAfter Then HTMLMessageForm.Close()
-                        End Sub
-                    bottomFlow.Controls.Add(addBtn)
-                Next
-            End If
-
-            ' Compose form.
-            HTMLMessageForm.Controls.Add(htmlBrowser)
-            HTMLMessageForm.Controls.Add(bottomFlow)
-
-            ' Keep topmost on deactivate.
-            AddHandler HTMLMessageForm.Deactivate, Sub(sender, e)
-                                                       Try
-                                                           HTMLMessageForm.TopMost = True
-                                                       Catch
-                                                       End Try
-                                                   End Sub
-
-            SharedMethods.AttachForeignForegroundWatchdog(HTMLMessageForm)
-
-            ' Signal when closed
-            AddHandler HTMLMessageForm.FormClosed, Sub(sender, e)
-                                                       dialogClosed.Set()
-                                                   End Sub
-
-            AddHandler HTMLMessageForm.Shown,
-                Sub(sender, e)
-                    SharedMethods.ForceDialogToForeground(HTMLMessageForm)
-                End Sub
-
-            HTMLMessageForm.Opacity = 1
-
-            ' Show non-modal
-            HTMLMessageForm.Show()
-            HTMLMessageForm.BringToFront()
-            HTMLMessageForm.Activate()
-
-            ' Pump messages until dialog is closed
-            While Not dialogClosed.WaitOne(50)
-                System.Windows.Forms.Application.DoEvents()
-            End While
-
-            HTMLMessageForm.Dispose()
+            ShowHTMLCustomMessageBoxNonModal(bodyText, header, extraButtonText, extraButtonAction, CloseAfterExtra, additionalButtons, Nothing)
         End Sub
 
 
@@ -2277,8 +2289,17 @@ Namespace SharedLibrary
                                             ByRef params() As InputParameter,
                                             Optional extraButtonText As System.String = Nothing,
                                             Optional extraButtonAction As System.Action = Nothing,
-                                            Optional CloseAfterExtra As System.Boolean = False
+                                            Optional CloseAfterExtra As System.Boolean = False,
+                                            Optional checkboxRightClearance As System.Int32 = 0,
+                                            Optional labelMaxWidth As System.Int32 = 0
                                         ) As Boolean
+            RequireCustomFormCallbackThread(extraButtonAction IsNot Nothing)
+            If Not SharedMethods.IsOnHostUiThread AndAlso Not SharedMethods.IsOnHostNeutralSta Then
+                Dim capturedParams As InputParameter() = params
+                Dim accepted As System.Boolean = RunOnStaThread(Function() ShowCustomVariableInputForm(prompt, header, capturedParams, extraButtonText, Nothing, CloseAfterExtra, checkboxRightClearance, labelMaxWidth), "Red Ink parameters", alwaysUseWorker:=True)
+                params = capturedParams
+                Return accepted
+            End If
             If String.IsNullOrWhiteSpace(header) Then header = String.Empty
 
             Dim inputForm As New Form() With {
@@ -2294,10 +2315,10 @@ Namespace SharedLibrary
                 .AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 .KeyPreview = True ' Allow form to see Ctrl+Enter before controls.
             }
+            Try
 
             ' Set icon.
-            Dim bmpIcon As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-            inputForm.Icon = Icon.FromHandle(bmpIcon.GetHicon())
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(inputForm)
 
             ' Layout.
             Dim mainLayout As New TableLayoutPanel() With {
@@ -2341,6 +2362,8 @@ Namespace SharedLibrary
                         .Anchor = AnchorStyles.Left,
                         .Margin = New Padding(0, 0, 8, 8)
                     }
+                    If labelMaxWidth > 0 Then lbl.MaximumSize = New System.Drawing.Size(CInt(labelMaxWidth * inputForm.Font.Height / 15.0), 0)
+                    If Not System.String.IsNullOrWhiteSpace(param.ToolTipText) Then toolTip.SetToolTip(lbl, param.ToolTipText)
                     mainLayout.Controls.Add(lbl, 0, i + 1)
                 End If
 
@@ -2367,7 +2390,7 @@ Namespace SharedLibrary
                         .Checked = initial,
                         .AutoSize = True,
                         .Anchor = AnchorStyles.Left,
-                        .Margin = New Padding(0, 0, 0, 8),
+                        .Margin = New System.Windows.Forms.Padding(0, 0, System.Math.Max(0, checkboxRightClearance), 8),
                         .Enabled = Not isNothing
                     }
                     If isNothing Then
@@ -2462,6 +2485,7 @@ Namespace SharedLibrary
                     toolTip.SetToolTip(ctrl, "Not available")
                 End If
 
+                If Not System.String.IsNullOrWhiteSpace(param.ToolTipText) Then toolTip.SetToolTip(ctrl, param.ToolTipText)
                 param.InputControl = ctrl
                 If showLabel Then
                     mainLayout.Controls.Add(ctrl, 1, i + 1)
@@ -2521,6 +2545,10 @@ Namespace SharedLibrary
                 btnCancel.TabIndex = 1
             End If
 
+            If labelMaxWidth > 0 Then
+                inputForm.MaximumSize = System.Windows.Forms.Screen.FromControl(inputForm).WorkingArea.Size
+                mainLayout.AutoScroll = True
+            End If
             inputForm.Controls.Add(mainLayout)
             inputForm.Controls.Add(buttonFlow)
 
@@ -2587,6 +2615,10 @@ Namespace SharedLibrary
 
             inputForm.Dispose()
             Return (result = DialogResult.OK)
+
+            Finally
+                If Not inputForm.IsDisposed Then inputForm.Dispose()
+            End Try
         End Function
 
         ''' <summary>
@@ -2623,6 +2655,10 @@ Namespace SharedLibrary
     Optional ReturnPlainText As Boolean = False
                 ) As String
 
+            If Not SharedMethods.IsOnHostUiThread AndAlso Not SharedMethods.IsOnHostNeutralSta Then
+                Return RunOnStaThread(Function() ShowCustomWindow(introLine, bodyText, finalRemark, header, NoRTF, Getfocus, InsertMarkdown, TransferToPane, parentWindowHwnd, PreserveLiterals, ReturnPlainText), "Red Ink text window", alwaysUseWorker:=True)
+            End If
+
             ' Store original body text.
             Dim OriginalText As String = bodyText
 
@@ -2636,8 +2672,10 @@ Namespace SharedLibrary
 
             ' Create controls.
             Dim styledForm As New System.Windows.Forms.Form()
+            Try
             Dim introLabel As New System.Windows.Forms.Label()
             Dim bodyTextBox As New RichTextBox()
+                styledForm.Controls.Add(bodyTextBox)
             Dim finalRemarkLabel As New System.Windows.Forms.Label()
             Dim btnEdited As New System.Windows.Forms.Button()
             Dim btnOriginal As New System.Windows.Forms.Button()
@@ -2673,8 +2711,7 @@ Namespace SharedLibrary
             styledForm.MinimumSize = New System.Drawing.Size(minFormWStatic, minFormHStatic)
 
             ' Icon.
-            Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-            styledForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+            Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(styledForm)
 
             ' Standard font.
             Dim stdFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
@@ -3034,6 +3071,10 @@ Namespace SharedLibrary
             End If
 
             Return returnValue
+
+            Finally
+                If Not styledForm.IsDisposed Then styledForm.Dispose()
+            End Try
         End Function
 
 
@@ -3042,6 +3083,8 @@ Namespace SharedLibrary
         ''' including the UI control created to edit the parameter.
         ''' </summary>
         Public Class InputParameter
+            ''' <summary>Optional explanatory tooltip for both the label and its input.</summary>
+            Public Property ToolTipText As System.String
             ''' <summary>
             ''' Display name used for the label.
             ''' </summary>
@@ -3297,6 +3340,14 @@ Namespace SharedLibrary
         End Class
 
 
+        ''' <summary>Host-prepared source descriptors. Displaying the menu must not perform I/O.</summary>
+        Public NotInheritable Class FreestylePromptSource
+            Public Property Group As System.String = System.String.Empty
+            Public Property Caption As System.String = System.String.Empty
+            Public Property Description As System.String = System.String.Empty
+            Public Property InsertText As System.String = System.String.Empty
+        End Class
+
         Public Class FreestylePromptOptions
 
             Public Property Title As System.String
@@ -3304,6 +3355,7 @@ Namespace SharedLibrary
             Public Property ModeCaption As System.String
             Public Property ModelText As System.String
             Public Property ContextStatusText As System.String
+            Public Property SourceMenuProvider As System.Func(Of System.Collections.Generic.IReadOnlyList(Of FreestylePromptSource))
 
             Public Property InitialPrompt As System.String
             Public Property LastPrompt As System.String
@@ -4049,6 +4101,9 @@ Namespace SharedLibrary
             If options Is Nothing Then
                 Return returnValue
             End If
+            If Not SharedMethods.IsOnHostUiThread Then
+                Throw New System.InvalidOperationException("The Freestyle dialog must be opened on the initialized Office UI thread because its source providers can access Office objects.")
+            End If
 
             Try
 
@@ -4104,8 +4159,7 @@ Namespace SharedLibrary
                                 freestyleForm.Font = standardFont
                                 freestyleForm.ClientSize = New System.Drawing.Size(preferredWidth, preferredHeight)
 
-                                Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                                freestyleForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+                                Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(freestyleForm)
 
                                 ' =========================================================
                                 ' ROOT
@@ -5089,7 +5143,9 @@ Namespace SharedLibrary
                                     .Margin = New System.Windows.Forms.Padding(0)
                                 }
 
+                                footer.ColumnCount = If(options.SourceMenuProvider Is Nothing, 2, 3)
                                 footer.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
+                                If options.SourceMenuProvider IsNot Nothing Then footer.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.AutoSize))
                                 footer.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.AutoSize))
                                 footer.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
 
@@ -5100,6 +5156,16 @@ Namespace SharedLibrary
                                     .Anchor = System.Windows.Forms.AnchorStyles.Left,
                                     .Margin = New System.Windows.Forms.Padding(0, 7, largeGap, 0)
                                 }
+
+                                If options.SourceMenuProvider IsNot Nothing Then
+                                    ' Keep the existing footer to one line even at narrow widths.
+                                    statusLabel.AutoSize = False
+                                    statusLabel.AutoEllipsis = True
+                                    statusLabel.Width = 1
+                                    statusLabel.Height = standardFont.Height
+                                    statusLabel.Anchor = System.Windows.Forms.AnchorStyles.Left Or System.Windows.Forms.AnchorStyles.Right
+                                    promptToolTip.SetToolTip(statusLabel, If(options.ContextStatusText, System.String.Empty))
+                                End If
 
                                 Dim actionFlow As New System.Windows.Forms.FlowLayoutPanel() With {
                                     .AutoSize = True,
@@ -5197,7 +5263,58 @@ Namespace SharedLibrary
                                 actionFlow.Controls.Add(runButton)
 
                                 footer.Controls.Add(statusLabel, 0, 0)
-                                footer.Controls.Add(actionFlow, 1, 0)
+                                footer.Controls.Add(actionFlow, If(options.SourceMenuProvider Is Nothing, 1, 2), 0)
+
+                                If options.SourceMenuProvider IsNot Nothing Then
+                                    ' Reuse the existing footer row. No extra row or dialog, and no catalog I/O here.
+                                    Dim sourcesLink As New System.Windows.Forms.LinkLabel() With {
+                                        .Text = "Sources " & Microsoft.VisualBasic.ChrW(&H25BE),
+                                        .Font = standardFont, .AutoSize = True,
+                                        .Anchor = System.Windows.Forms.AnchorStyles.Right,
+                                        .Margin = New System.Windows.Forms.Padding(0, 7, normalGap, 0)}
+                                    Dim sourcesMenu As New System.Windows.Forms.ContextMenuStrip() With {.ShowItemToolTips = True}
+                                    promptToolTip.SetToolTip(sourcesLink, "Available Semantic Archives and Knowledge Stores from the cached catalog overview. Choosing a source inserts its query trigger. Document access is checked when the request runs.")
+                                    AddHandler freestyleForm.Disposed, Sub() sourcesMenu.Dispose()
+                                    AddHandler sourcesLink.LinkClicked,
+                                        Sub(sender As System.Object, e As System.Windows.Forms.LinkLabelLinkClickedEventArgs)
+                                            While sourcesMenu.Items.Count > 0
+                                                Dim retired As System.Windows.Forms.ToolStripItem = sourcesMenu.Items(0)
+                                                sourcesMenu.Items.RemoveAt(0)
+                                                retired.Dispose()
+                                            End While
+                                            Dim groups As New System.Collections.Generic.Dictionary(Of System.String, System.Windows.Forms.ToolStripMenuItem)(System.StringComparer.Ordinal)
+                                            Try
+                                                Dim snapshot As System.Collections.Generic.IReadOnlyList(Of FreestylePromptSource) = options.SourceMenuProvider.Invoke()
+                                                If snapshot IsNot Nothing Then
+                                                    For Each source As FreestylePromptSource In snapshot
+                                                        If source Is Nothing Then Continue For
+                                                        Dim group As System.Windows.Forms.ToolStripMenuItem = Nothing
+                                                        Dim groupName As System.String = If(source.Group, System.String.Empty)
+                                                        If Not groups.TryGetValue(groupName, group) Then
+                                                            group = New System.Windows.Forms.ToolStripMenuItem(groupName.Replace("&", "&&"))
+                                                            groups.Add(groupName, group)
+                                                            sourcesMenu.Items.Add(group)
+                                                        End If
+                                                        Dim menuItem As New System.Windows.Forms.ToolStripMenuItem(If(source.Caption, System.String.Empty).Replace("&", "&&")) With {
+                                                            .ToolTipText = source.Description, .Enabled = Not System.String.IsNullOrWhiteSpace(source.InsertText)}
+                                                        Dim insertion As System.String = source.InsertText
+                                                        AddHandler menuItem.Click,
+                                                            Sub()
+                                                                promptTextBox.Text = RetrievalPromptEditing.SelectSource(promptTextBox.Text, insertion)
+                                                                promptTextBox.SelectionStart = promptTextBox.TextLength
+                                                                promptTextBox.Focus()
+                                                            End Sub
+                                                        group.DropDownItems.Add(menuItem)
+                                                    Next
+                                                End If
+                                            Catch ex As System.Exception
+                                                System.Diagnostics.Trace.WriteLine("[Freestyle] Source menu snapshot unavailable: " & ex.GetType().FullName)
+                                            End Try
+                                            If sourcesMenu.Items.Count = 0 Then sourcesMenu.Items.Add(New System.Windows.Forms.ToolStripMenuItem("Source overview is not available yet.") With {.Enabled = False})
+                                            sourcesMenu.Show(sourcesLink, New System.Drawing.Point(0, sourcesLink.Height))
+                                        End Sub
+                                    footer.Controls.Add(sourcesLink, 1, 0)
+                                End If
 
                                 root.Controls.Add(footer, 0, 3)
 
@@ -5499,7 +5616,9 @@ Namespace SharedLibrary
                                         End If
 
                                         If e.KeyCode = System.Windows.Forms.Keys.P AndAlso e.Modifiers = System.Windows.Forms.Keys.Control AndAlso Not System.String.IsNullOrEmpty(options.LastPrompt) Then
-                                            SharedMethods.InsertFreestyleTextAtCaret(promptTextBox, options.LastPrompt)
+                                            promptTextBox.Text = RetrievalPromptEditing.RestoreHistory(promptTextBox.Text, options.LastPrompt, promptTextBox.SelectionStart)
+                                            promptTextBox.SelectionStart = promptTextBox.TextLength
+                                            e.Handled = True
                                             e.SuppressKeyPress = True
                                         End If
 
@@ -5613,7 +5732,7 @@ Namespace SharedLibrary
                                 ' =========================================================
 
                                 returnValue.Accepted = True
-                                returnValue.Prompt = promptTextBox.Text
+                                returnValue.Prompt = RetrievalPromptEditing.NormalizeScopes(promptTextBox.Text)
                                 returnValue.KnownPrefixes.AddRange(SharedMethods.GetFreestylePromptKnownPrefixes(options.Modes))
 
                                 Dim finalSelectedMode As FreestylePromptMode = TryCast(modeCombo.SelectedItem, FreestylePromptMode)
@@ -5736,7 +5855,7 @@ Namespace SharedLibrary
 
             Next
 
-            Return prompt.Trim()
+            Return RetrievalPromptEditing.NormalizeScopes(prompt).Trim()
 
         End Function
 
