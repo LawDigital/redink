@@ -68,7 +68,7 @@ Partial Public Class ThisAddIn
     Public Function ExtractText(target As String, maxChars As Integer) As String Implements IWordDocumentHost.ExtractText
         Dim d = ResolveDoc(target)
         If d Is Nothing Then Return ""
-        Dim text = d.Content.Text
+        Dim text As System.String = GetChatVisibleText(d.Content)
         If maxChars > 0 AndAlso text.Length > maxChars Then text = text.Substring(0, maxChars)
         Return text
     End Function
@@ -80,7 +80,7 @@ Partial Public Class ThisAddIn
         If d Is Nothing Then Return Err_("not_found", "Document not found.")
         If maxHits < 1 Then maxHits = 50
         If maxHits > 500 Then maxHits = 500
-        Dim text = d.Content.Text
+        Dim text As System.String = GetChatVisibleText(d.Content)
         Dim hits As New List(Of Object)
         If useRegex Then
             Dim opt As RegexOptions = RegexOptions.CultureInvariant
@@ -109,14 +109,13 @@ Partial Public Class ThisAddIn
         Dim d = ResolveDoc(target)
         If d Is Nothing Then Return out
         For Each c As Word.Comment In d.Comments
-            Dim anchor As String = ""
-            Try : anchor = c.Scope.Text : Catch : End Try
+            Dim anchor As System.String = GetChatVisibleText(c.Scope)
             out.Add(New WordDocComment With {
                 .Id = c.Index.ToString(),
                 .Author = c.Author,
                 .Initials = c.Initial,
                 .Date_ = SafeDate(c.Date),
-                .Text = c.Range.Text,
+                .Text = GetChatVisibleText(c.Range),
                 .AnchorText = anchor
             })
         Next
@@ -128,6 +127,7 @@ Partial Public Class ThisAddIn
                                     Implements IWordDocumentHost.InsertTextJson
         Dim d = ResolveDoc(target)
         If d Is Nothing Then Return Err_("not_found", "Document not found.")
+        If WordSearchHelper.ContainsChatObjectMark(text) Then Return Err_("protected_object", "An inline object cannot be inserted as text.")
         Dim rng As Word.Range
         Select Case If(location, "end").ToLowerInvariant()
             Case "start" : rng = d.Range(0, 0)
@@ -158,8 +158,9 @@ Partial Public Class ThisAddIn
         If String.IsNullOrEmpty(find) Then Return Err_("missing_find", "find is required.")
         Dim rng = LocateRange(d, find, matchScope)
         If rng Is Nothing Then Return Err_("no_match", "No match for 'find'.")
-        If Not ApplyEdit(d, rng, replacement, trackChanges) Then
-            Return Err_("apply_failed", "Could not apply the replacement.")
+        Dim reason As System.String = System.String.Empty
+        If Not ApplyEdit(d, rng, replacement, trackChanges, reason) Then
+            Return Err_("apply_failed", If(reason.Length > 0, reason, "Could not apply the replacement."))
         End If
         Return JsonConvert.SerializeObject(New With {Key .target = d.Name, Key .replaced = True, Key .tracked = trackChanges})
     End Function
@@ -172,8 +173,9 @@ Partial Public Class ThisAddIn
         If String.IsNullOrEmpty(find) Then Return Err_("missing_find", "find is required.")
         Dim rng = LocateRange(d, find, matchScope)
         If rng Is Nothing Then Return Err_("no_match", "No match for 'find'.")
-        If Not ApplyEdit(d, rng, "", trackChanges) Then
-            Return Err_("apply_failed", "Could not apply the deletion.")
+        Dim reason As System.String = System.String.Empty
+        If Not ApplyEdit(d, rng, "", trackChanges, reason) Then
+            Return Err_("apply_failed", If(reason.Length > 0, reason, "Could not apply the deletion."))
         End If
         Return JsonConvert.SerializeObject(New With {Key .target = d.Name, Key .deleted = True, Key .tracked = trackChanges})
     End Function
@@ -250,14 +252,19 @@ Partial Public Class ThisAddIn
     ''' the enclosing sentence or paragraph.
     ''' </summary>
     Private Function LocateRange(d As Word.Document, find As String, matchScope As String) As Word.Range
-        If d Is Nothing OrElse String.IsNullOrEmpty(find) Then Return Nothing
+        If d Is Nothing OrElse String.IsNullOrEmpty(find) OrElse WordSearchHelper.ContainsChatObjectMark(find) Then Return Nothing
 
         Dim searchRange As Word.Range = Nothing
         Dim foundRange As Word.Range = Nothing
 
         Try
             searchRange = d.Content.Duplicate
-            If Not WordSearchHelper.FindLongTextAnchoredFastRange(searchRange, find, foundRange) Then Return Nothing
+            Dim snapshot As WordSearchHelper.ChatTextSearch = WordSearchHelper.CreateChatSearch(searchRange)
+            If snapshot IsNot Nothing Then
+                foundRange = snapshot.FindRange(searchRange, find)
+            ElseIf Not WordSearchHelper.FindLongTextAnchoredFastRange(searchRange, find, foundRange) Then
+                Return Nothing
+            End If
             If foundRange Is Nothing Then Return Nothing
 
             Dim rng As Word.Range = foundRange.Duplicate
@@ -284,9 +291,20 @@ Partial Public Class ThisAddIn
     ''' with tracking temporarily disabled so the edit is silent.
     ''' </summary>
     Private Function ApplyEdit(d As Word.Document, rng As Word.Range,
-                               replacement As String, trackChanges As Boolean) As Boolean
+                               replacement As String, trackChanges As Boolean, ByRef reason As System.String) As Boolean
         If rng Is Nothing Then Return False
         Try
+            If WordSearchHelper.ContainsChatObjectMark(replacement) OrElse HasChatInlineObject(rng) Then
+                reason = "The edit includes a protected inline object. Use separate text anchors on either side."
+            ElseIf rng.Font.Hidden <> 0 Then
+                reason = "The located text spans hidden content. Use a smaller visible anchor."
+            ElseIf Not trackChanges AndAlso BuildSurgicalTrackedDeletionSpans(rng).Count > 0 Then
+                reason = "An untracked edit would overwrite existing tracked deletions. Use a smaller anchor or enable tracked changes."
+            End If
+            If reason.Length > 0 Then
+                Global.SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb("WordDocHost", reason)
+                Return False
+            End If
             If trackChanges Then
                 Return ApplySurgicalReplacement(GetVisibleText(rng), If(replacement, ""), rng, showFailureNotice:=False)
             Else

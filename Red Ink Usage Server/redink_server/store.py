@@ -24,7 +24,7 @@ def iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS billing_usage (
@@ -90,6 +90,11 @@ CREATE TABLE IF NOT EXISTS server_meta (key TEXT PRIMARY KEY, value TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS schema_migrations (
  version INTEGER PRIMARY KEY, applied_utc TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS admin_remember_tokens (
+ token_hash TEXT PRIMARY KEY, password_fingerprint TEXT NOT NULL,
+ created_utc TEXT NOT NULL, expires_utc TEXT NOT NULL, last_seen_utc TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS admin_remember_expiry ON admin_remember_tokens(expires_utc);
 CREATE TABLE IF NOT EXISTS report_snapshots (
  report_id TEXT PRIMARY KEY, created_utc TEXT NOT NULL, content_json TEXT NOT NULL,
  sha256 TEXT NOT NULL
@@ -180,6 +185,43 @@ class Store:
         except Exception:
             destination_path.unlink(missing_ok=True)
             raise
+
+    def issue_admin_remember_token(self, password_hash: str, *, days: int = 30) -> str:
+        """Issue a random, revocable, expiring login token; store its digest only."""
+        if not 1 <= days <= 30:
+            raise ValueError('The remembered device duration must be 1-30 days.')
+        now = utc_now()
+        raw = secrets.token_urlsafe(48)
+        fingerprint = hashlib.sha256(password_hash.encode('utf-8')).hexdigest()
+        digest = hashlib.sha256(raw.encode('ascii')).hexdigest()
+        with self.connect() as connection:
+            connection.execute('DELETE FROM admin_remember_tokens WHERE expires_utc <= ?', (iso(now),))
+            connection.execute("INSERT INTO admin_remember_tokens (token_hash,password_fingerprint,created_utc,expires_utc,last_seen_utc) VALUES (?,?,?,?,?)",
+                (digest, fingerprint, iso(now), iso(now + timedelta(days=days)), iso(now)))
+        return raw
+
+    def valid_admin_remember_token(self, token: str, password_hash: str) -> bool:
+        """Validate both expiry and the password revision, without renewing TTL."""
+        if not isinstance(token, str) or not 40 <= len(token) <= 256 or not token.isascii():
+            return False
+        digest = hashlib.sha256(token.encode('ascii')).hexdigest()
+        fingerprint = hashlib.sha256(password_hash.encode('utf-8')).hexdigest()
+        now = iso(utc_now())
+        with self.connect() as connection:
+            item = connection.execute("SELECT password_fingerprint,expires_utc FROM admin_remember_tokens WHERE token_hash=?", (digest,)).fetchone()
+            if item is None:
+                return False
+            if item['expires_utc'] <= now or not secrets.compare_digest(item['password_fingerprint'], fingerprint):
+                connection.execute('DELETE FROM admin_remember_tokens WHERE token_hash=?', (digest,))
+                return False
+            connection.execute('UPDATE admin_remember_tokens SET last_seen_utc=? WHERE token_hash=?', (now, digest))
+            return True
+
+    def revoke_admin_remember_token(self, token: str) -> None:
+        if isinstance(token, str) and 40 <= len(token) <= 256 and token.isascii():
+            digest = hashlib.sha256(token.encode('ascii')).hexdigest()
+            with self.connect() as connection:
+                connection.execute('DELETE FROM admin_remember_tokens WHERE token_hash=?', (digest,))
 
     def retention_cutoff(self) -> str:
         return effective_cutoff(self.settings.cutoff_date, self.settings.keep_months,
@@ -426,7 +468,68 @@ class Store:
                 result[output] = [dict(row) for row in connection.execute(sql, args)]
         return result
 
-    def log_analysis(self, period: str = "30d", host: str = "ALL") -> dict:
+    def recent_addin_versions(self, period: str = "7d", host: str = "ALL") -> dict:
+        """Latest observed version for each SharedLogger user and Office host.
+
+        Use a short, independent reporting window to avoid counting an older
+        installation after the user upgraded. Individual events never become
+        users. No mapping to LicenseCounter identities is attempted.
+        """
+        from .version_comparison import version_sort_key
+
+        windows = {"7d": 7, "14d": 14, "30d": 30}
+        if period not in windows or host not in {"ALL", "WD", "EX", "OL"}:
+            raise ValueError("Invalid add-in version period or Office host.")
+        today = self.clock().date()
+        start = (today - timedelta(days=windows[period] - 1)).isoformat()
+        params = [start, today.isoformat()]
+        query = ("SELECT user_hash,host_id,version,MAX(timestamp_local) AS last_seen "
+                 "FROM log_events WHERE date >= ? AND date <= ? "
+                 "AND host_id IN ('WD','EX','OL')")
+        if host != 'ALL':
+            query += ' AND host_id=?'
+            params.append(host)
+        query += ' GROUP BY user_hash,host_id,version'
+        with self.connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        # Deliberately compare versions only within each user/host. The
+        # version syntax varies between dated V.DDMMYY and semantic Vx.y.z.
+        # Unknown/incomparable schemes use the most recently observed version.
+        latest = {}
+        for row in rows:
+            identity = (row['user_hash'], row['host_id'])
+            item = dict(row)
+            current = latest.get(identity)
+            if current is None:
+                latest[identity] = item
+                continue
+            # A known version always wins over a missing version for that
+            # user's host. Missing versions are shown as unknown only when
+            # there is no usable version in the chosen time window.
+            if not item['version'] and current['version']:
+                continue
+            if item['version'] and not current['version']:
+                latest[identity] = item
+                continue
+            a, b = version_sort_key(item['version']), version_sort_key(current['version'])
+            if a[0] == b[0] and a[0] != 'unknown':
+                replace = a[1] > b[1] or (a[1] == b[1] and item['last_seen'] > current['last_seen'])
+            else:
+                replace = item['last_seen'] > current['last_seen']
+            if replace:
+                latest[identity] = item
+        from collections import Counter
+        counts = Counter((item['host_id'], item['version'] or 'Version unavailable') for item in latest.values())
+        results = [dict(host=h, version=v, count=n) for (h,v), n in counts.items()]
+        results.sort(key=lambda x: (-x['count'], x['host'], x['version']))
+        return dict(period=period, from_date=start, to_date=today.isoformat(),
+                    identity_basis='Distinct SharedLogger username hash per Office host; not billable licence users.',
+                    counting_basis='One latest observed version per user and Office add-in within the selected window.',
+                    users_by_addin=[dict(host=h,count=sum(1 for identity in latest if identity[1]==h))
+                                    for h in ('WD','EX','OL') if host in ('ALL',h)],
+                    versions=results)
+
+    def log_analysis(self, period: str = "30d", host: str = "ALL", version_period: str = "7d") -> dict:
         """Metadata-only log trends, independent of billing/loadedDates.
 
         Client-local days are never reinterpreted as UTC timestamps. Missing
@@ -459,12 +562,10 @@ class Store:
             rows = connection.execute(
                 "SELECT feature,host_id,date,COUNT(*) AS count FROM log_events" + inv_clause +
                 " GROUP BY feature,host_id,date ORDER BY date,feature,host_id", args).fetchall()
-            versions = [dict(r) for r in connection.execute(
-                "SELECT version,COUNT(*) AS count FROM log_events" + clause +
-                " GROUP BY version ORDER BY count DESC,version LIMIT 100", args)]
             source_rows = [dict(r) for r in connection.execute(
                 "SELECT path,last_scan_utc,records,errors,detail FROM source_status WHERE kind='log' ORDER BY path")]
             total_files = connection.execute("SELECT COUNT(*) FROM imported_files WHERE kind='log' AND records>0").fetchone()[0]
+        version_summary = self.recent_addin_versions(version_period, host)
         features = Counter()
         agents = Counter()
         families = Counter()
@@ -525,7 +626,8 @@ class Store:
                       for h in ("WD", "EX", "OL")],
             "days": [dict(date=d,count=daily[d],agentic=daily_agents[d],standard=daily[d]-daily_agents[d])
                      for d in sorted(daily)],
-            "versions": versions,
+            "versions": version_summary["versions"],
+            "version_summary": version_summary,
         }
 
     def log_scan_cursor(self, path: Path) -> dict | None:

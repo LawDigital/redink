@@ -235,7 +235,8 @@ Partial Public Class ThisAddIn
     Public Function GatherSelectedDocuments(Optional IncludeName As Boolean = True,
                                             Optional IncludeNone As System.Boolean = False,
                                             Optional ExceptCurrent As Boolean = False,
-                                            Optional SilentAndGetAll As Boolean = False) As System.String
+                                            Optional SilentAndGetAll As Boolean = False,
+                                            Optional ReadRangeText As System.Func(Of Microsoft.Office.Interop.Word.Range, System.String) = Nothing) As System.String
         Try
             Dim app As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
 
@@ -274,7 +275,7 @@ Partial Public Class ThisAddIn
 
             ' If silent mode requested: return all (after optional exclusion) without prompting
             If SilentAndGetAll Then
-                Return BuildDocumentsResult(docList, IncludeName)
+                Return BuildDocumentsResult(docList, IncludeName, ReadRangeText)
             End If
 
             ' Build selection items for each open document
@@ -320,9 +321,10 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
-            Return BuildDocumentsResult(targets, IncludeName)
+            Return BuildDocumentsResult(targets, IncludeName, ReadRangeText)
 
         Catch ex As System.Exception
+            If ReadRangeText IsNot Nothing Then Throw
             Return "ERROR " & ex.Message
         End Try
     End Function
@@ -332,14 +334,15 @@ Partial Public Class ThisAddIn
     ''' Each document is wrapped in &lt;DOCUMENTn&gt; tags with optional name header.
     ''' </summary>
     Private Function BuildDocumentsResult(docs As System.Collections.Generic.List(Of Microsoft.Office.Interop.Word.Document),
-                                          includeName As System.Boolean) As System.String
+                                          includeName As System.Boolean,
+                                          readRangeText As System.Func(Of Microsoft.Office.Interop.Word.Range, System.String)) As System.String
         Dim insertedDocuments As System.String = System.String.Empty
         Dim tagIndex As System.Int32 = 1
 
         For Each d As Microsoft.Office.Interop.Word.Document In docs
             If includeName Then insertedDocuments &= $"Here follows document no. {tagIndex} with the name '" & d.Name & "': " & vbCrLf
             insertedDocuments &= $"<DOCUMENT{tagIndex}>" & vbCrLf
-            insertedDocuments &= d.Content.Text & vbCrLf
+            insertedDocuments &= If(readRangeText Is Nothing, d.Content.Text, readRangeText(d.Content)) & vbCrLf
             insertedDocuments &= $"</DOCUMENT{tagIndex}>" & vbCrLf
             tagIndex += 1
         Next

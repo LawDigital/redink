@@ -2406,7 +2406,8 @@ Partial Public Class ThisAddIn
     ''' carries neither. The numbering is passed as separate context and is never inserted
     ''' into the reinsertable TEXTTOPROCESS.
     ''' </summary>
-    Public Shared Function BuildParagraphNumberingContext(ByVal rng As Word.Range) As String
+    Public Shared Function BuildParagraphNumberingContext(ByVal rng As Word.Range,
+                                                         Optional ReadRangeText As System.Func(Of Microsoft.Office.Interop.Word.Range, System.String) = Nothing) As String
         Try
             If rng Is Nothing Then Return ""
 
@@ -2444,7 +2445,7 @@ Partial Public Class ThisAddIn
 
             For Each p As Word.Paragraph In paras
                 Dim pr As Word.Range = p.Range
-                Dim snippet As String = MakeSnippet(pr.Text)
+                Dim snippet As System.String = Nothing
 
                 ' ── Automatic list numbering: keep only numbered elements in PARAGRAPHNUMBERS ──
                 Dim lf As Word.ListFormat = pr.ListFormat
@@ -2477,6 +2478,8 @@ Partial Public Class ThisAddIn
                     End Try
 
                     If isNumberedElement Then
+                        snippet = MakeSnippet(If(ReadRangeText Is Nothing, pr.Text, ReadRangeText(pr)))
+                        If ReadRangeText IsNot Nothing AndAlso snippet.Length = 0 Then Continue For
                         Dim lvl As Integer = 0
                         Try
                             lvl = lf.ListLevelNumber
@@ -2548,11 +2551,12 @@ Partial Public Class ThisAddIn
                             If fld.Type = Word.WdFieldType.wdFieldSequence Then
                                 Dim num As String = Nothing
                                 Try
-                                    num = fld.Result.Text
+                                    num = If(ReadRangeText Is Nothing, fld.Result.Text, ReadRangeText(fld.Result))
                                 Catch
                                     num = Nothing
                                 End Try
                                 If Not String.IsNullOrWhiteSpace(num) Then
+                                    If snippet Is Nothing Then snippet = MakeSnippet(If(ReadRangeText Is Nothing, pr.Text, ReadRangeText(pr)))
                                     Dim seqKey As String = "seq:?"
                                     Try
                                         Dim code As String = fld.Code.Text
@@ -2592,6 +2596,7 @@ Partial Public Class ThisAddIn
             Return result.ToString()
 
         Catch ex As System.Exception
+            If ReadRangeText IsNot Nothing Then Throw
             Debug.WriteLine($"BuildParagraphNumberingContext error: {ex.Message}")
             Return ""
         End Try
@@ -2630,7 +2635,7 @@ Partial Public Class ThisAddIn
             Next
         End If
         result.References.Sort(Function(a, b) a.First.CompareTo(b.First))
-        result.Text = ReadVisibleProjection(src, result)
+        result.Text = ReadVisibleProjection(src, result, chatSource:=True)
         Return result
     End Function
 
@@ -2654,62 +2659,125 @@ Partial Public Class ThisAddIn
         Return ReadVisibleProjection(src, Nothing)
     End Function
 
-    Private Shared Function ReadVisibleProjection(src As Microsoft.Office.Interop.Word.Range, map As ChatNoteProjection) As System.String
-        If src Is Nothing Then Return System.String.Empty
-        ' Use the same physical ranges and revision filtering as surgical insertion.
-        ' Changing the window's revision view cannot establish a reliable source contract.
-        Dim hiddenFieldSpans As New System.Collections.Generic.List(Of SurgicalPositionSpan)()
+    Friend Shared ReadOnly ChatInlineObjectCharacter As System.Char = Microsoft.VisualBasic.ChrW(&HFFFC)
+
+    Friend Shared Function HasChatInlineObject(src As Microsoft.Office.Interop.Word.Range) As System.Boolean
+        If src.Start >= src.End Then Return False
+        For Each shape As Microsoft.Office.Interop.Word.InlineShape In src.InlineShapes
+            Dim mark As Microsoft.Office.Interop.Word.Range = shape.Range
+            If mark.Start < src.End AndAlso src.Start < mark.End Then Return True
+        Next
+        Return False
+    End Function
+
+    Friend Shared Function GetChatVisibleText(src As Microsoft.Office.Interop.Word.Range) As System.String
+        Return ReadVisibleProjection(src, Nothing, chatSource:=True)
+    End Function
+
+    ' Apply exclusions in Word positions BEFORE reading any strings. A tracked deletion,
+    ' a field code or an object need not contribute its physical length to Range.Text.
+    Private Shared Function ReadVisibleProjection(src As Microsoft.Office.Interop.Word.Range, map As ChatNoteProjection,
+                                                  Optional chatSource As System.Boolean = False) As System.String
+        If src Is Nothing OrElse src.Start >= src.End Then Return System.String.Empty
+        Dim first As System.Int32 = src.Start
+        Dim finish As System.Int32 = src.End
+        Dim excluded = BuildSurgicalTrackedDeletionSpans(src)
         For Each field As Microsoft.Office.Interop.Word.Field In src.Fields
-            hiddenFieldSpans.Add(New SurgicalPositionSpan With {.StartPos = field.Code.Start - 1, .EndPos = field.Result.Start})
-            hiddenFieldSpans.Add(New SurgicalPositionSpan With {.StartPos = field.Result.End, .EndPos = field.Result.End + 1})
+            excluded.Add(New SurgicalPositionSpan With {.StartPos = field.Code.Start - 1, .EndPos = field.Result.Start})
+            excluded.Add(New SurgicalPositionSpan With {.StartPos = field.Result.End, .EndPos = field.Result.End + 1})
         Next
-        hiddenFieldSpans.Sort(Function(a, b) a.StartPos.CompareTo(b.StartPos))
-        Dim merged As New System.Collections.Generic.List(Of SurgicalPositionSpan)()
-        For Each span As SurgicalPositionSpan In hiddenFieldSpans
-            If merged.Count > 0 AndAlso span.StartPos <= merged(merged.Count - 1).EndPos Then
-                Dim previous As SurgicalPositionSpan = merged(merged.Count - 1)
-                previous.EndPos = System.Math.Max(previous.EndPos, span.EndPos)
-                merged(merged.Count - 1) = previous
-            Else
-                merged.Add(span)
-            End If
-        Next
-        Dim fieldIndex As System.Int32 = 0
-        Dim visible As New System.Text.StringBuilder()
-        Dim noteIndex As System.Int32 = 0
-        Dim emitted As System.Int32 = -1
-        For Each atom As SurgicalLiveCharAtom In BuildSurgicalLiveCharAtoms(src)
-            If atom.IsTrackedDeletion OrElse SurgicalPositionIsInsideSpan(atom.LiveStart, merged, fieldIndex) Then Continue For
-            If map Is Nothing Then
-                visible.Append(atom.Text)
-                Continue For
-            End If
-            While noteIndex < map.References.Count AndAlso map.References(noteIndex).Finish <= atom.LiveStart
-                noteIndex += 1
-            End While
-            Dim text As System.String = atom.Text
-            Dim a As System.Int32 = atom.LiveStart
-            Dim b As System.Int32 = atom.LiveEnd
-            If noteIndex < map.References.Count AndAlso map.References(noteIndex).First <= a Then
-                If emitted = noteIndex Then Continue For
-                emitted = noteIndex
-                text = map.References(noteIndex).Token
-                a = map.References(noteIndex).First
-                b = map.References(noteIndex).Finish
-                map.Boundaries.Add(map.Flat.Length)
-            Else
-                If text.IndexOf(Microsoft.VisualBasic.ChrW(2)) >= 0 Then Throw New System.IO.InvalidDataException("Unmapped native note reference in the Word source.")
-                map.Flat.Append(text)
-            End If
-            visible.Append(text)
-            For charIndex As System.Int32 = 0 To text.Length - 1
-                map.Starts.Add(a)
-                map.Finishes.Add(b)
+        excluded.Sort(Function(a, b) a.StartPos.CompareTo(b.StartPos))
+
+        Dim marks As New System.Collections.Generic.List(Of (First As System.Int32, Finish As System.Int32, Token As System.String))()
+        If map IsNot Nothing Then
+            marks.AddRange(map.References)
+            map.References.Clear() ' Repopulate only with notes that survive the exclusions.
+        End If
+        If chatSource Then
+            For Each shape As Microsoft.Office.Interop.Word.InlineShape In src.InlineShapes
+                Dim mark As Microsoft.Office.Interop.Word.Range = shape.Range
+                If mark.Start < finish AndAlso first < mark.End Then
+                    marks.Add((mark.Start, mark.End, ChatInlineObjectCharacter.ToString()))
+                End If
             Next
+        End If
+        marks.Sort(Function(a, b) a.First.CompareTo(b.First))
+
+        Dim piece As Microsoft.Office.Interop.Word.Range = src.Duplicate
+        ' Read retained physical spans regardless of the review display. ShowAll applies
+        ' to this duplicate, and the range retrieval mode below controls hidden/field text.
+        If chatSource Then piece.ShowAll = True
+        piece.TextRetrievalMode.IncludeHiddenText = Not chatSource
+        piece.TextRetrievalMode.IncludeFieldCodes = Not chatSource
+        Dim visible As New System.Text.StringBuilder()
+        Dim cursor As System.Int32 = first
+        Dim nextMark As System.Int32 = 0
+        ' The final empty exclusion flushes the text after the last deletion/field.
+        excluded.Add(New SurgicalPositionSpan With {.StartPos = finish, .EndPos = finish})
+        For Each span As SurgicalPositionSpan In excluded
+            Dim limit As System.Int32 = System.Math.Min(finish, span.StartPos)
+            While cursor < limit AndAlso nextMark < marks.Count AndAlso marks(nextMark).First < limit
+                Dim mark = marks(nextMark)
+                nextMark += 1
+                If mark.Finish <= cursor Then Continue While
+                If mark.First < cursor OrElse mark.Finish > limit Then Throw New System.IO.InvalidDataException("A Word revision, field or range boundary splits a native reference.")
+                AppendVisibleWordRange(piece, cursor, mark.First, visible, map, chatSource)
+                visible.Append(mark.Token)
+                If map IsNot Nothing Then
+                    If mark.Token = ChatInlineObjectCharacter.ToString() Then
+                        map.Flat.Append(mark.Token)
+                    Else
+                        map.Boundaries.Add(map.Flat.Length)
+                        map.References.Add(mark)
+                    End If
+                    For i As System.Int32 = 1 To mark.Token.Length
+                        map.Starts.Add(mark.First)
+                        map.Finishes.Add(mark.Finish)
+                    Next
+                End If
+                cursor = mark.Finish
+            End While
+            AppendVisibleWordRange(piece, cursor, limit, visible, map, chatSource)
+            cursor = System.Math.Max(cursor, span.EndPos)
         Next
         Return visible.ToString()
     End Function
 
+    Private Shared Sub AppendVisibleWordRange(piece As Microsoft.Office.Interop.Word.Range,
+                                              first As System.Int32, finish As System.Int32,
+                                              visible As System.Text.StringBuilder, map As ChatNoteProjection, chatSource As System.Boolean)
+        If first >= finish Then Return
+        piece.SetRange(first, finish)
+        Dim value As System.String = If(piece.Text, System.String.Empty)
+        If chatSource Then
+            ' Word may expose an object as a text control, including a floating
+            ' drawing anchor (0x08). Keep one UTF-16 unit with the same physical bounds.
+            value = value.Replace(Microsoft.VisualBasic.ChrW(1), ChatInlineObjectCharacter).
+                          Replace(Microsoft.VisualBasic.ChrW(8), ChatInlineObjectCharacter)
+        End If
+        If map Is Nothing Then
+            visible.Append(value)
+            Return
+        End If
+        ' Locate skew only in the affected part (hidden text, supplementary characters,
+        ' Word controls). All UTF-16 units from a single Word position share its bounds.
+        Dim width As System.Int32 = finish - first
+        If width > 1 AndAlso value.Length > 0 AndAlso
+           (value.Length <> width OrElse piece.Font.Hidden = Microsoft.Office.Interop.Word.WdConstants.wdUndefined) Then
+            Dim middle As System.Int32 = first + width \ 2
+            AppendVisibleWordRange(piece, first, middle, visible, map, chatSource)
+            AppendVisibleWordRange(piece, middle, finish, visible, map, chatSource)
+            Return
+        End If
+        If value.IndexOf(Microsoft.VisualBasic.ChrW(2)) >= 0 Then Throw New System.IO.InvalidDataException("Unmapped native note reference in the Word source.")
+        visible.Append(value)
+        map.Flat.Append(value)
+        For i As System.Int32 = 0 To value.Length - 1
+            Dim position As System.Int32 = If(width = 1, first, first + i)
+            map.Starts.Add(position)
+            map.Finishes.Add(position + 1)
+        Next
+    End Sub
 
     ''' <summary>
     ''' Merges overlapping or adjacent integer intervals, returning a sorted list of non-overlapping ranges.

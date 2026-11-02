@@ -13,7 +13,7 @@ from fixtures import usage
 from redink_server.config import Settings
 from redink_server.protocol import ProtocolError, normalize_event, parse_legacy_query
 from redink_server.reports import daily_csv, monthly_report, users_csv, valid_day
-from redink_server.store import Store
+from redink_server.store import Store, CURRENT_SCHEMA_VERSION
 
 
 class DailyContractTests(unittest.TestCase):
@@ -92,7 +92,7 @@ class DailyContractTests(unittest.TestCase):
         self.assertEqual(store.monthly_rows()[0]["revision"], 7)
         self.assertEqual(store.daily_rows("2026-10-01", "2026-10-31"), [])
         with store.connect() as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], CURRENT_SCHEMA_VERSION)
             self.assertEqual(connection.execute("SELECT content_json FROM report_snapshots").fetchone()[0], old_snapshot)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM recent_reports").fetchone()[0], 1)
         store.ingest(normalize_event(usage(loaded_dates=["2026-10-30"])))
