@@ -784,7 +784,8 @@ Partial Public Class ThisAddIn
     Public Shared Function BubblesExtract(ByVal rng As Microsoft.Office.Interop.Word.Range,
                                       Optional ByVal Silent As Boolean = False, Optional ByVal SortByDate As Boolean = False,
                                       Optional ByVal TargetCommentIndex As System.Int32 = 0,
-                                      Optional ByVal IncludeOverlappingAnchors As System.Boolean = False) As System.String
+                                      Optional ByVal IncludeOverlappingAnchors As System.Boolean = False,
+                                      Optional ReadRangeText As System.Func(Of Microsoft.Office.Interop.Word.Range, System.String) = Nothing) As System.String
 
         Dim app As Microsoft.Office.Interop.Word.Application = Nothing
         Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
@@ -1112,6 +1113,12 @@ Partial Public Class ThisAddIn
                 ' Pseudo-stable ID derived from comment metadata/content (position independent; changes if those inputs change)
                 Dim idMaterial As System.String = author & "|" & initials & "|" & dateStr & "|" & referencedText & "|" & text
                 Dim stableId As System.String = ComputeSha256Hex(idMaterial)
+                ' Keep the lookup ID used by reply commands. Only the exported strings
+                ' use the caller's text projection. Never export the raw ID material.
+                If ReadRangeText IsNot Nothing Then
+                    referencedText = ReadRangeText(c.Scope)
+                    text = ReadRangeText(c.Range)
+                End If
 
                 sb.AppendLine("  <Comment " &
                           $"id=""{xmlEscapeSafe(stableId)}"" " &
@@ -1136,6 +1143,7 @@ Partial Public Class ThisAddIn
             End Try
 
         Catch ex As System.Exception
+            If ReadRangeText IsNot Nothing Then Throw
             If Not Silent Then ShowCustomMessageBox($"Unexpected error: {ex.Message}")
             Return ""
         End Try

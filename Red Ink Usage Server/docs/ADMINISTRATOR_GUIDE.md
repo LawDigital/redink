@@ -72,15 +72,15 @@ For Python installations, replace the executable with `.\.venv\Scripts\python.ex
 
 ### Windows login autostart
 
-The **Windows startup** controls under **Settings** can create or remove a Task Scheduler task for the **currently logged-in Windows user**, without requiring administrator rights in the usual current-user setup. The task launches the existing application headless at **Windows logon**. It does not run before logon. The scheduled process needs read/write access to the data directory and read access to its import locations. A dedicated pre-logon Windows service/account is a separate deployment choice and should be configured by IT.
+The **Windows startup** controls under **Settings** can create or remove a Task Scheduler task for the **Windows account running the Usage Server process**, without requiring administrator rights in the usual current-user setup. Any authenticated web administrator may operate these controls from a permitted remote browser; the scheduled task does not run under the remote browser user. The task launches the existing application headless at **Windows logon**. It does not run before logon. The scheduled process needs read/write access to the data directory and read access to its import locations. A dedicated pre-logon Windows service/account is a separate deployment choice and should be configured by IT.
 
-The UI's **Shut down server** action requests an orderly shutdown of the current process; it does not disable future autostart. To prevent a launch on the next sign-in, **disable Windows autostart separately**. Remote browsers cannot change the local autostart or invoke the local shutdown function. Shutdown is scheduled outside the HTTP request worker, allowing the response and other active requests to finish cleanly before sockets are closed.
+The UI's **Shut down server** action requests an orderly shutdown of the current process; it does not disable future autostart. To prevent a launch on the next sign-in, **disable Windows autostart separately**. Authenticated administrators may change autostart and request shutdown through the configured HTTPS DNS name or localhost. These actions require the existing admin session and anti-CSRF token, not a localhost source address. Shutdown is scheduled outside the HTTP request worker, allowing the response and other active requests to finish cleanly before sockets are closed. Opening the publishing folder launches Explorer on the server itself and only works when the server process has an interactive Windows desktop; it never opens a folder on the remote browser computer.
 
 ## 4. Open the dashboard and sign in
 
 Use **http://localhost:8765** or **http://127.0.0.1:8765** for local HTTP. Some Windows systems resolve `localhost` to IPv6 `::1` before IPv4; if the former URL fails while the service is bound only to IPv4, use `127.0.0.1` or adjust the listener/network policy. Neither address makes the server available from other computers.
 
-Use your administrator password or the optional **passwordless local sign-in** configured on Settings. Passwordless mode is allowed only for genuinely local administration on a loopback-bound service; it is not a replacement for HTTPS and controlled credentials in a shared deployment. Do not expose the desktop or local browser session to untrusted users. The passwordless setting is protected by a key in the separate `secrets.json`, not a freely editable `true` flag.
+Use your administrator password or the optional **passwordless local sign-in** configured on Settings. Authenticated administration works equally via a permitted server DNS hostname or localhost. The passwordless sign-in exception is deliberately different: Passwordless mode is allowed only for genuinely local administration on a loopback-bound service; it is not a replacement for HTTPS and controlled credentials in a shared deployment. Do not expose the desktop or local browser session to untrusted users. The passwordless setting is protected by a key in the separate `secrets.json`, not a freely editable `true` flag.
 
 ### Making the server available to multiple computers
 
@@ -115,9 +115,9 @@ Alternatively, terminate HTTPS at an organisation-managed reverse proxy and keep
 
 | Settings area | Administrator purpose | Effective when |
 |---|---|---|
-| `server.host`, `port`, `threads`, `trusted_hosts` | Listener address, port, allowed browser hostnames, capacity | Restart |
-| `server.secure_cookies`, `allow_insecure_remote` | HTTPS cookie and remote HTTP controls | Restart |
-| `tls.*` | Native HTTPS, certificate and private key | Restart |
+| `server.host`, `port`, `threads`, `trusted_hosts` | Listener address, port, allowed browser hostnames, capacity | Save; listener rebind |
+| `server.secure_cookies`, `allow_insecure_remote` | HTTPS cookie and remote HTTP controls | Save; listener rebind |
+| `tls.*` | Native HTTPS, certificate and private key | Save; listener rebind |
 | `collection.*` | Request size and legacy compatibility options | Restart |
 | `imports.counter_paths` | Folder(s) containing file-based LicenseCounter reports | Save, then scan |
 | `imports.log_paths` | Folder(s) containing SharedLogger `LogPath` files | Save, then scan |
@@ -312,7 +312,7 @@ An example backup command:
 | Feature counts seem inflated | Distinguish direct commands, explicit agent run starts and subordinate tool calls. Missing historical run markers are **unknown**, not zero. |
 | Cleaning does not remove a report | Check effective cutoff, boundary date, preview counts and confirmation. Exported external reports/backups require separate retention. |
 | Windows autostart not running | User has not logged in, Task Scheduler policy blocked it, scheduled user lacks folder rights, or the server is already running. |
-| Shutdown button unavailable | Requires authenticated **localhost** production server session. It does not terminate a separately managed Windows service or remote server. |
+| Shutdown button unavailable | Requires an authenticated admin session on the running production server; localhost is **not** required. It does not terminate a separately managed Windows service or a different server process. |
 
 Use `check --data-dir "..."` for configuration and database integrity, and review `server.log` in the data directory. Access tokens can appear in URL strings or deployment files: redact them before sharing diagnostics. The server intentionally avoids request-path logging for token-bearing endpoints.
 
@@ -345,3 +345,33 @@ The public Windows download intentionally excludes source files, build scripts, 
 **Document status:** This is the practical administrator operating guide. Windows Task Scheduler, executable startup and Office deployments must be validated in the target environment. Usage evidence is not a legal determination of an organisation's licence terms or privacy duties.
 
 **Activity over time:** Hover or focus chart points for the exact client-local date, direct commands and top-level agent starts; expand **Show exact daily values** for a full accessible table.
+
+### Remember a trusted administrator browser
+
+The password sign-in screen offers an optional **Remember this browser for 30 days**
+checkbox, initially unchecked. This sets a random HttpOnly, SameSite=Strict
+cookie; the server stores only a SHA-256 digest and checks it against the
+current administrator-password hash. Signing out revokes this device's token;
+a password change invalidates tokens from earlier passwords. This feature
+requires browser cookies; only enable it on trusted devices and use HTTPS.
+Passwordless localhost access never issues a remembered-device token.
+
+### Observed add-in versions
+
+Unlike function-call totals, **Observed add-in versions** counts each
+SharedLogger username hash once per Office host (Word, Excel or Outlook),
+under the newest observed version within its separate window. The default
+window is **7 days**, with **14** and **30 days** as alternatives. A version
+change never creates an extra user count for that Office add-in. Recorded
+entries without a parseable version are shown as **Version unavailable** if
+no known version is observed for that user/host. These are observed log users,
+not a current installed-software inventory or licence-billing identities;
+there can be missing records when log sources are unavailable.
+
+### Create a source support archive
+
+From the unpacked source tree run
+`scripts\create-source-zip-on-desktop.bat`. The generated desktop ZIP
+contains application sources, build configuration, tests, included assets
+and documentation. It does **not** contain the running database, tokens,
+server.toml, certificates, signing keys or generated EXE distributions.

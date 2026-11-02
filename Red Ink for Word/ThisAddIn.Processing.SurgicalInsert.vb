@@ -934,7 +934,7 @@ Partial Public Class ThisAddIn
     End Function
 
     Friend Shared Function ContainsChatWordStructure(value As System.String) As System.Boolean
-        Return System.Text.RegularExpressions.Regex.IsMatch(value, "[\x00-\x08\x0C\x0E-\x1F]")
+        Return WordSearchHelper.ContainsChatObjectMark(value) OrElse System.Text.RegularExpressions.Regex.IsMatch(value, "[\x00-\x08\x0C\x0E-\x1F]")
     End Function
 
     Friend Shared ReadOnly ChatNativeReferencePattern As New System.Text.RegularExpressions.Regex(
@@ -960,7 +960,7 @@ Partial Public Class ThisAddIn
         verifiedEnd = first
         failure = System.String.Empty
         Try
-            If ContainsChatWordStructure(source) OrElse ContainsChatWordStructure(desired) OrElse target.Fields.Count > 0 OrElse target.InlineShapes.Count > 0 Then Throw New System.InvalidOperationException("The target contains a protected Word object or control character.")
+            If ContainsChatWordStructure(source) OrElse ContainsChatWordStructure(desired) OrElse target.Fields.Count > 0 OrElse HasChatInlineObject(target) Then Throw New System.InvalidOperationException("The target contains a protected Word object or control character.")
             Dim map As ThisAddIn.ChatNoteProjection = ReadChatNoteProjection(target)
             notes = map.References.Count
             If Not System.String.Equals(map.Text, source, System.StringComparison.Ordinal) OrElse map.Starts.Count <> source.Length OrElse map.Finishes.Count <> source.Length Then Throw New System.InvalidOperationException("The current source no longer matches the selected block.")
@@ -1013,7 +1013,7 @@ Partial Public Class ThisAddIn
                     If edit.A < mark.Finish AndAlso edit.B > mark.First Then Throw New System.InvalidOperationException("Edit touches a native reference.")
                 Next
                 Dim part As Microsoft.Office.Interop.Word.Range = doc.Range(edit.A, edit.B)
-                If part.Fields.Count > 0 OrElse part.InlineShapes.Count > 0 OrElse Not System.String.Equals(ReadVisibleProjection(part, Nothing), edit.FromText, System.StringComparison.Ordinal) Then Throw New System.InvalidOperationException("A planned text span is not safely editable.")
+                If part.Fields.Count > 0 OrElse HasChatInlineObject(part) OrElse Not System.String.Equals(GetChatVisibleText(part), edit.FromText, System.StringComparison.Ordinal) Then Throw New System.InvalidOperationException("A planned text span is not safely editable.")
             Next
             trace.AppendLine($"BLOCK plan range=[{first},{finish}] notes={notes} writes={edits.Count}")
             phase = "write"
@@ -1023,7 +1023,7 @@ Partial Public Class ThisAddIn
                         If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then Throw New System.OperationCanceledException()
                         Dim edit = edits(i)
                         Dim part As Microsoft.Office.Interop.Word.Range = doc.Range(edit.A, edit.B)
-                        If Not doc.TrackRevisions OrElse part.Start <> edit.A OrElse part.End <> edit.B OrElse Not System.String.Equals(ReadVisibleProjection(part, Nothing), edit.FromText, System.StringComparison.Ordinal) Then Throw New System.InvalidOperationException("The planned write range changed.")
+                        If Not doc.TrackRevisions OrElse part.Start <> edit.A OrElse part.End <> edit.B OrElse HasChatInlineObject(part) OrElse Not System.String.Equals(GetChatVisibleText(part), edit.FromText, System.StringComparison.Ordinal) Then Throw New System.InvalidOperationException("The planned write range changed.")
                         mayHaveWritten = True
                         part.Text = edit.ToText
                         completed += 1
@@ -2539,8 +2539,11 @@ Partial Public Class ThisAddIn
 
         Try
             For Each revision As Microsoft.Office.Interop.Word.Revision In targetRange.Revisions
-                If revision.Type = Microsoft.Office.Interop.Word.WdRevisionType.wdRevisionDelete OrElse
-                   revision.Type = Microsoft.Office.Interop.Word.WdRevisionType.wdRevisionMovedFrom Then
+                Dim kind As Microsoft.Office.Interop.Word.WdRevisionType = revision.Type
+                If kind = Microsoft.Office.Interop.Word.WdRevisionType.wdRevisionDelete OrElse
+                   kind = Microsoft.Office.Interop.Word.WdRevisionType.wdRevisionMovedFrom OrElse
+                   kind = Microsoft.Office.Interop.Word.WdRevisionType.wdRevisionCellDeletion OrElse
+                   kind = Microsoft.Office.Interop.Word.WdRevisionType.wdRevisionConflictDelete Then
                     Dim spanStart As Integer = System.Math.Max(targetRange.Start, revision.Range.Start)
                     Dim spanEnd As Integer = System.Math.Min(targetRange.End, revision.Range.End)
 

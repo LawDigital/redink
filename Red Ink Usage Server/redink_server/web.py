@@ -32,6 +32,8 @@ from .store import Store, iso
 
 CONFIG_FILES = ("redink.ini", "allmodels.ini", "specialservices.ini")
 CONFIG_ALLOWLIST = CONFIG_FILES + tuple(name + ".sig" for name in CONFIG_FILES)
+REMEMBER_COOKIE = "redink_usage_remember"
+REMEMBER_DAYS = 30
 
 
 class LoginLimiter:
@@ -99,6 +101,18 @@ def create_app(settings: Settings, store: Store | None = None) -> Flask:
         if not supplied or not supplied.isascii() or not hmac.compare_digest(supplied, session.get("csrf", "")):
             abort(400, description="This form expired. Reload the page and try again.")
 
+    @app.before_request
+    def restore_remembered_admin():
+        # Passwordless localhost is intentionally NOT remembered. A stolen
+        # remember cookie never grants access to collector or config tokens.
+        if session.get('admin') or request.endpoint in ('logout', 'static'):
+            return
+        raw = request.cookies.get(REMEMBER_COOKIE, '')
+        if raw and store.valid_admin_remember_token(raw, settings.credentials['admin_password_hash']):
+            session.clear()
+            session['admin'] = True
+            session.permanent = True
+
     def admin_required(function):
         @functools.wraps(function)
         def wrapped(*args, **kwargs):
@@ -152,6 +166,8 @@ def create_app(settings: Settings, store: Store | None = None) -> Flask:
 
     @app.route("/login", methods=["GET", "POST"])
     def login():
+        if request.method == 'GET' and session.get('admin'):
+            return redirect(url_for('index'))
         error = None
         status = 200
         if request.method == "POST":
@@ -165,7 +181,23 @@ def create_app(settings: Settings, store: Store | None = None) -> Flask:
                 session.clear()
                 session["admin"] = True
                 session.permanent = True
-                return redirect(url_for("index"))
+                response = redirect(url_for("index"))
+                # A remembered device is opt-in and can be revoked at logout.
+                # Only a successful password login (not passwordless localhost)
+                # may create a persistent credential.
+                if (request.form.get('sign_in_mode') != 'localhost' and
+                        request.form.get('remember_device') == 'on'):
+                    raw = store.issue_admin_remember_token(settings.credentials['admin_password_hash'], days=REMEMBER_DAYS)
+                    response.set_cookie(REMEMBER_COOKIE, raw, max_age=REMEMBER_DAYS * 86400,
+                                        secure=settings.secure_cookies, httponly=True,
+                                        samesite='Strict', path='/')
+                else:
+                    old_raw = request.cookies.get(REMEMBER_COOKIE, '')
+                    if old_raw:
+                        store.revoke_admin_remember_token(old_raw)
+                    response.delete_cookie(REMEMBER_COOKIE, path='/', secure=settings.secure_cookies,
+                                           httponly=True, samesite='Strict')
+                return response
             else:
                 limiter.failed(address)
                 error, status = "The password was not accepted.", 401
@@ -175,8 +207,14 @@ def create_app(settings: Settings, store: Store | None = None) -> Flask:
     @admin_required
     def logout():
         check_csrf()
+        old_raw = request.cookies.get(REMEMBER_COOKIE, '')
+        if old_raw:
+            store.revoke_admin_remember_token(old_raw)
         session.clear()
-        return redirect(url_for("login"))
+        response = redirect(url_for("login"))
+        response.delete_cookie(REMEMBER_COOKIE, path='/', secure=settings.secure_cookies,
+                               httponly=True, samesite='Strict')
+        return response
 
     @app.get("/")
     @admin_required
@@ -314,13 +352,14 @@ def create_app(settings: Settings, store: Store | None = None) -> Flask:
     def set_passwordless_api():
         check_csrf()
         try:
-            if settings.host not in ('127.0.0.1', 'localhost', '::1'):
-                raise ConfigError('Passwordless administration is only supported on a loopback listener.')
-            if not is_loopback_request(request.remote_addr):
-                raise ConfigError('Passwordless policy can only be changed locally.')
+            # An authenticated administrator may manage this policy from any
+            # trusted host. The passwordless *login* itself remains limited to
+            # a loopback listener and an actual localhost request.
             requested = request.get_json(silent=False)
             if not isinstance(requested, dict) or type(requested.get('enabled')) is not bool:
                 raise ConfigError('Expected a boolean enabled value.')
+            if requested['enabled'] and settings.host not in ('127.0.0.1', 'localhost', '::1'):
+                raise ConfigError('Passwordless login requires a loopback-bound server. Disable the policy on a network listener.')
             updated = update_passwordless(settings, requested['enabled'])
             auth_policy['passwordless'] = is_passwordless(updated)
             return jsonify(enabled=auth_policy['passwordless'], saved=True)
@@ -330,8 +369,6 @@ def create_app(settings: Settings, store: Store | None = None) -> Flask:
     @app.get('/api/settings/autostart')
     @admin_required
     def autostart_status():
-        if not is_loopback_request(request.remote_addr):
-            return jsonify(error='Autostart can only be managed locally on the server.'), 403
         from .startup import manage_autostart, StartupError
         try:
             return jsonify(manage_autostart(settings.data_dir, 'status'))
@@ -342,8 +379,6 @@ def create_app(settings: Settings, store: Store | None = None) -> Flask:
     @admin_required
     def autostart_change():
         check_csrf()
-        if not is_loopback_request(request.remote_addr):
-            return jsonify(error='Autostart can only be managed locally on the server.'), 403
         body = request.get_json(silent=True)
         if not isinstance(body, dict) or type(body.get('enabled')) is not bool:
             return jsonify(error='Expected a boolean enabled value.'), 400
@@ -357,8 +392,6 @@ def create_app(settings: Settings, store: Store | None = None) -> Flask:
     @admin_required
     def server_shutdown():
         check_csrf()
-        if not is_loopback_request(request.remote_addr):
-            return jsonify(error='Shut down is restricted to localhost administration.'), 403
         stop = app.extensions.get('redink_shutdown')
         if stop is None:
             return jsonify(error='Shut down is only available while running the production server.'), 409
@@ -389,12 +422,15 @@ def create_app(settings: Settings, store: Store | None = None) -> Flask:
         data = request.get_json(silent=True) or {}
         if data.get('which') not in ('default', 'published'):
             return jsonify(error='Invalid directory selection.'), 400
-        if not is_loopback_request(request.remote_addr) or os.name != 'nt':
-            return jsonify(error='Opening a local server folder is supported on Windows localhost only.'), 403
+        if os.name != 'nt':
+            return jsonify(error='Opening a folder requires the server to run on Windows.'), 409
         folder = settings.data_dir / 'config-files' if data['which'] == 'default' else settings.config_directory
-        folder.mkdir(parents=True, exist_ok=True)
-        os.startfile(str(folder.resolve()))
-        return jsonify(opened=True)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(folder.resolve()))
+        except OSError:
+            return jsonify(error='Could not open Explorer in the Windows session running the server. Check that the server account has an interactive desktop and folder permissions.'), 409
+        return jsonify(opened=True, message='Folder opened on the server computer, not in the remote browser.')
 
     @app.get('/api/users/functions')
     @admin_required
@@ -475,7 +511,7 @@ def create_app(settings: Settings, store: Store | None = None) -> Flask:
     @admin_required
     def log_analysis():
         try:
-            return jsonify(store.log_analysis(request.args.get("period", "30d"), request.args.get("host", "ALL")))
+            return jsonify(store.log_analysis(request.args.get("period", "30d"), request.args.get("host", "ALL"), request.args.get("version_period", "7d")))
         except ValueError as exc:
             return jsonify(error=str(exc)), 400
 
@@ -485,7 +521,7 @@ def create_app(settings: Settings, store: Store | None = None) -> Flask:
         import csv
         import io
         try:
-            data = store.log_analysis(request.args.get("period", "30d"), request.args.get("host", "ALL"))
+            data = store.log_analysis(request.args.get("period", "30d"), request.args.get("host", "ALL"), request.args.get("version_period", "7d"))
         except ValueError as exc:
             return jsonify(error=str(exc)), 400
         out = io.StringIO(newline="")
