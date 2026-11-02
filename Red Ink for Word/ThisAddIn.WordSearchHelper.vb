@@ -73,6 +73,158 @@ Public Module WordSearchHelper
         System.Diagnostics.Debug.WriteLine($"{DateTime.Now:HH:mm:ss.fff} [FindLongTextAnchoredFast] {message}")
     End Sub
 
+    ' Only Word chat promises the same final-text projection for reading and editing.
+    ' Other helper clients can explicitly search the original revision view.
+    Friend Function CreateChatSearch(scope As Microsoft.Office.Interop.Word.Range) As ChatTextSearch
+        If scope.Revisions.Count = 0 AndAlso scope.InlineShapes.Count = 0 AndAlso
+           scope.Fields.Count = 0 AndAlso scope.Font.Hidden = 0 AndAlso scope.Document.Shapes.Count = 0 Then Return Nothing
+        Return New ChatTextSearch(ThisAddIn.ReadChatNoteProjection(scope))
+    End Function
+
+    Friend Function FindChatSelection(needle As System.String, selection As Microsoft.Office.Interop.Word.Selection,
+                                      Optional snapshot As ChatTextSearch = Nothing) As System.Boolean
+        Dim area As Microsoft.Office.Interop.Word.Range = selection.Range.Duplicate
+        Dim hit As Microsoft.Office.Interop.Word.Range = Nothing
+        Try
+            If area.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory Then Return False
+            If area.Start = area.End Then area.End = area.Document.Content.End
+            If area.Start >= area.End Then Return False
+            If snapshot Is Nothing Then snapshot = CreateChatSearch(area)
+            If snapshot Is Nothing Then Return FindLongTextAnchoredFast(selection, needle)
+            hit = snapshot.FindRange(area, needle)
+            If hit Is Nothing Then Return False
+            selection.SetRange(hit.Start, hit.End)
+            Return selection.Start = hit.Start AndAlso selection.End = hit.End
+        Finally
+            If hit IsNot Nothing Then System.Runtime.InteropServices.Marshal.ReleaseComObject(hit)
+            System.Runtime.InteropServices.Marshal.ReleaseComObject(area)
+        End Try
+    End Function
+
+    Friend NotInheritable Class ChatTextSearch
+        Private ReadOnly source As ThisAddIn.ChatNoteProjection
+        Private comparison As System.String
+        Private ReadOnly comparisonStarts As New System.Collections.Generic.List(Of System.Int32)()
+        Private ReadOnly comparisonEnds As New System.Collections.Generic.List(Of System.Int32)()
+
+        Friend Sub New(projection As ThisAddIn.ChatNoteProjection)
+            source = projection
+        End Sub
+
+        Friend Function FindRange(area As Microsoft.Office.Interop.Word.Range, needle As System.String, Optional literalOnly As System.Boolean = False) As Microsoft.Office.Interop.Word.Range
+            If System.String.IsNullOrWhiteSpace(needle) OrElse ContainsChatObjectMark(needle) Then Return Nothing
+            Dim hit As Microsoft.Office.Interop.Word.Range = FindMapped(area, source.Text, source.Starts, source.Finishes, needle, needle, exact:=True)
+            If hit IsNot Nothing OrElse literalOnly Then Return hit
+            Dim canonNeedle As System.String = Canonicalise(needle, True)
+            If canonNeedle.Length = 0 Then Return Nothing
+            If comparison Is Nothing Then BuildComparison()
+            Return FindMapped(area, comparison, comparisonStarts, comparisonEnds, canonNeedle, needle)
+        End Function
+
+        Private Shared Function FindMapped(area As Microsoft.Office.Interop.Word.Range, text As System.String,
+                                           starts As System.Collections.Generic.List(Of System.Int32),
+                                           finishes As System.Collections.Generic.List(Of System.Int32),
+                                           key As System.String, original As System.String, Optional exact As System.Boolean = False) As Microsoft.Office.Interop.Word.Range
+            Dim offset As System.Int32 = starts.BinarySearch(area.Start)
+            If offset < 0 Then
+                offset = Not offset
+            Else
+                While offset > 0 AndAlso starts(offset - 1) = area.Start
+                    offset -= 1
+                End While
+            End If
+            Dim limit As System.Int32 = area.End
+            While offset <= text.Length - key.Length
+                Dim i As System.Int32 = text.IndexOf(key, offset, System.StringComparison.OrdinalIgnoreCase)
+                If i < 0 OrElse starts(i) >= limit Then Exit While
+                Dim finish As System.Int32 = finishes(i + key.Length - 1)
+                If finish > limit Then Exit While
+                Dim candidate As Microsoft.Office.Interop.Word.Range = area.Duplicate
+                Try
+                    candidate.SetRange(starts(i), finish)
+                    If candidate.Start = starts(i) AndAlso candidate.End = finish AndAlso Not ThisAddIn.HasChatInlineObject(candidate) Then
+                        Dim live As System.String = ThisAddIn.GetChatVisibleText(candidate)
+                        Dim matches As System.Boolean = Not ContainsChatObjectMark(live) AndAlso If(exact, System.String.Equals(live, original, System.StringComparison.OrdinalIgnoreCase),
+                                                           IsEquivalentSearchText(live, original))
+                        If matches Then Return candidate.Duplicate
+                    End If
+                Finally
+                    System.Runtime.InteropServices.Marshal.ReleaseComObject(candidate)
+                End Try
+                offset = i + 1
+            End While
+            Return Nothing
+        End Function
+
+        ' Keep the existing tolerant comparison, but attach physical bounds to each
+        ' source text element BEFORE KC normalization, ellipsis and sharp-S expansion.
+        ' A picture or end-of-cell is a hard boundary, including in the tolerant pass.
+        Private Sub BuildComparison()
+            Dim result As New System.Text.StringBuilder(source.Text.Length)
+            Dim pos As System.Int32 = 0
+            Dim pendingSpace As System.Boolean = False
+            Dim spaceStart As System.Int32 = 0
+            While pos < source.Text.Length
+                Dim element As System.String = System.Globalization.StringInfo.GetNextTextElement(source.Text, pos)
+                Dim consumed As System.Int32 = element.Length
+                If source.Text(pos) = "\"c Then
+                    Dim escaped As System.Text.RegularExpressions.Match = ChatUnicodeEscape.Match(source.Text, pos)
+                    If escaped.Success Then
+                        Dim decoded As System.String = DecodeUnicodeEscape(escaped)
+                        If decoded <> escaped.Value Then
+                            element = decoded
+                            consumed = escaped.Length
+                        End If
+                    End If
+                ElseIf source.Text(pos) = "."c AndAlso pos + 2 < source.Text.Length AndAlso
+                       source.Text(pos + 1) = "."c AndAlso source.Text(pos + 2) = "."c Then
+                    element = Microsoft.VisualBasic.ChrW(&H2026)
+                    consumed = 3
+                End If
+                Dim a As System.Int32 = source.Starts(pos)
+                Dim b As System.Int32 = source.Finishes(pos + consumed - 1)
+                For Each ch As System.Char In element.Normalize(System.Text.NormalizationForm.FormKC)
+                    Dim protectedBoundary As System.Boolean = ch = ThisAddIn.ChatInlineObjectCharacter OrElse
+                        ch = Microsoft.VisualBasic.ChrW(1) OrElse ch = Microsoft.VisualBasic.ChrW(8) OrElse ch = Microsoft.VisualBasic.ChrW(7)
+                    If Not protectedBoundary AndAlso IsDocNoise(ch) Then Continue For
+                    If IsCanonicalSeparator(ch) Then
+                        If Not pendingSpace Then spaceStart = a
+                        pendingSpace = True
+                        Continue For
+                    End If
+                    If pendingSpace Then
+                        result.Append(" "c)
+                        comparisonStarts.Add(spaceStart)
+                        comparisonEnds.Add(a)
+                        pendingSpace = False
+                    End If
+                    Dim value As System.String = If(protectedBoundary, ThisAddIn.ChatInlineObjectCharacter.ToString(), CanonizeDocChar(ch))
+                    result.Append(value)
+                    For Each unit As System.Char In value
+                        comparisonStarts.Add(a)
+                        comparisonEnds.Add(b)
+                    Next
+                Next
+                pos += consumed
+            End While
+            comparison = result.ToString()
+        End Sub
+    End Class
+
+    Private ReadOnly ChatUnicodeEscape As New System.Text.RegularExpressions.Regex("\G\\u([0-9A-Fa-f]{4,6})", System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+
+    Friend Function ContainsChatObjectMark(text As System.String) As System.Boolean
+        Return text IsNot Nothing AndAlso (text.IndexOf(ThisAddIn.ChatInlineObjectCharacter) >= 0 OrElse text.IndexOf(Microsoft.VisualBasic.ChrW(1)) >= 0 OrElse text.IndexOf(Microsoft.VisualBasic.ChrW(8)) >= 0)
+    End Function
+
+    Private Function IsCanonicalSeparator(ch As System.Char) As System.Boolean
+        Select Case Microsoft.VisualBasic.AscW(ch)
+            Case &H2010, &H2011, &H2013, &H2014, &HAD, 45
+                Return True
+        End Select
+        Return System.Char.IsWhiteSpace(ch)
+    End Function
+
     ''' <summary>
     ''' Searches for a long text fragment in the specified Word selection using
     ''' multiple fallback strategies. Updates the selection to the found text.
@@ -615,17 +767,7 @@ Public Module WordSearchHelper
             Dim ch As Char = src(i)
             If IsDocNoise(ch) Then Continue For
 
-            Dim code As Integer = AscW(ch)
-            ' Detect whitespace and hyphen variants
-            Dim isHyphenOrWs As Boolean = System.Char.IsWhiteSpace(ch) OrElse code = &HA0
-            If Not isHyphenOrWs Then
-                Select Case code
-                    Case &H2010, &H2011, &H2013, &H2014, &HAD, 45 ' Hyphens, en/em dash, soft hyphen
-                        isHyphenOrWs = True
-                End Select
-            End If
-
-            If isHyphenOrWs Then
+            If IsCanonicalSeparator(ch) Then
                 pendingSpace = True
             Else
                 ' Emit pending space before next character
@@ -694,16 +836,7 @@ Public Module WordSearchHelper
         For Each ch As Char In src
             If IsDocNoise(ch) Then Continue For
 
-            Dim code As Integer = AscW(ch)
-            Dim isHyphenOrWs As Boolean = System.Char.IsWhiteSpace(ch) OrElse code = &HA0
-            If Not isHyphenOrWs Then
-                Select Case code
-                    Case &H2010, &H2011, &H2013, &H2014, &HAD, 45
-                        isHyphenOrWs = True
-                End Select
-            End If
-
-            If isHyphenOrWs Then
+            If IsCanonicalSeparator(ch) Then
                 pendingSpace = True
             Else
                 If pendingSpace AndAlso collapseWS Then sb.Append(" "c)
@@ -721,10 +854,14 @@ Public Module WordSearchHelper
     ''' <param name="txt">Text to prepare.</param>
     ''' <returns>Prepared text.</returns>
     Private Function PrepareNeedle(ByVal txt As String) As String
-        txt = RX_U.Replace(txt,
-            Function(m) System.Char.ConvertFromUtf32(
-                System.Convert.ToInt32(m.Groups(1).Value, 16)))
+        txt = RX_U.Replace(txt, AddressOf DecodeUnicodeEscape)
         Return RX_ELL.Replace(txt, ChrW(&H2026))
+    End Function
+
+    Private Function DecodeUnicodeEscape(value As System.Text.RegularExpressions.Match) As System.String
+        Dim code As System.Int32 = System.Convert.ToInt32(value.Groups(1).Value, 16)
+        If code > &H10FFFF OrElse (code >= &HD800 AndAlso code <= &HDFFF) Then Return value.Value
+        Return System.Char.ConvertFromUtf32(code)
     End Function
 
     ''' <summary>
@@ -889,8 +1026,7 @@ Public Module WordSearchHelper
     ''' <param name="src">Source text to split.</param>
     ''' <returns>Array of words (empty entries removed).</returns>
     Private Function RawWords(ByVal src As String) As String()
-        src = RX_U.Replace(src, Function(m) _
-            System.Char.ConvertFromUtf32(System.Convert.ToInt32(m.Groups(1).Value, 16)))
+        src = RX_U.Replace(src, AddressOf DecodeUnicodeEscape)
         src = RX_ELL.Replace(src, ChrW(&H2026))
         src = src.Normalize(System.Text.NormalizationForm.FormKC)
         Return src.Split(New Char() {" "c, ChrW(9), ChrW(10), ChrW(13)},

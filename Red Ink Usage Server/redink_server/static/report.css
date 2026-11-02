@@ -1,7 +1,7 @@
 .report-page { background: #edf0f4; padding: 24px; }
 .report-toolbar { max-width: 1250px; margin: 0 auto 20px; display: flex; align-items: center; justify-content: space-between; gap: 20px; font-size: 12px; }
 .report-sheet { max-width: 1250px; margin: auto; background: white; padding: 46px 48px; box-shadow: 0 3px 20px #1c21300a; }
-.report-header { display: flex; align-items: center; justify-content: space-between; gap: 25px; padding-bottom: 30px; border-bottom: 2px solid #c32137; }
+.report-header { display: flex; align-items: center; justify-content: space-between; gap: 25px; padding-bottom: 30px; border-bottom: 2px solid #b91312; }
 .report-brand { display: flex; align-items: center; gap: 12px; }
 .report-brand > span { font-weight: 750; font-size: 22px; letter-spacing: 3px; }
 .report-brand small { display: block; color: #8d95a2; font-size: 10px; font-weight: 400; letter-spacing: .8px; }

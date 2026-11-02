@@ -247,7 +247,7 @@ Public Class frmAIChat
 
     ''' <summary>
     ''' When checked, includes complete active document content in prompt.
-    ''' Extracted in Final view mode (excludes tracked deletions) via GetActiveDocumentText().
+    ''' Reads the final revision projection without changing the Word window.
     ''' Mutually exclusive with chkIncludeSelection in UI logic.
     ''' Persisted to My.Settings.IncludeDocument.
     ''' </summary>
@@ -923,9 +923,10 @@ Public Class frmAIChat
         Dim pinnedSelection As Microsoft.Office.Interop.Word.Range = Nothing
         Dim pinnedSource As System.String = Nothing
         Dim selectionCaptureFailed As System.Boolean = False
+        Dim requestDoc As Microsoft.Office.Interop.Word.Document = Nothing
 
         Try
-            Dim requestDoc As Microsoft.Office.Interop.Word.Document = Globals.ThisAddIn.Application.ActiveDocument
+            requestDoc = Globals.ThisAddIn.Application.ActiveDocument
             If requestDoc IsNot Nothing Then
                 requestTargetDocumentName = requestDoc.Name
                 Try : requestTargetDocumentFullName = requestDoc.FullName : Catch : requestTargetDocumentFullName = "" : End Try
@@ -943,6 +944,7 @@ Public Class frmAIChat
                         selectionCaptureFailed = True
                     End If
                 Catch ex As System.Exception
+                    SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb("WordChat", "Selection capture failed: " & ex.ToString())
                     selectionCaptureFailed = True
                 End Try
             Else
@@ -952,6 +954,7 @@ Public Class frmAIChat
             selectionCaptureFailed = True
         End Try
         If My.Settings.DoCommands AndAlso (chkIncludeselection.Checked OrElse chkIncludeDocText.Checked) AndAlso selectionCaptureFailed Then
+            ReleaseWordRange(pinnedSelection)
             ShowCustomMessageBox("Word could not bind the active main-text selection safely. No request was sent. Select the passage in the document body and retry.")
             Return
         End If
@@ -968,7 +971,11 @@ Public Class frmAIChat
                 hasCurrentSelection = currentSelection IsNot Nothing AndAlso
                     requestTargetSelectionStart >= 0 AndAlso
                     requestTargetSelectionEnd > requestTargetSelectionStart AndAlso
-                    Not System.String.IsNullOrWhiteSpace(currentSelection.Text)
+                    Not System.String.IsNullOrWhiteSpace(If(pinnedSource, ReadChatSource(currentSelection.Range)))
+            Catch ex As ChatSourceContextException
+                ReleaseWordRange(pinnedSelection)
+                ShowCustomMessageBox(ex.Message)
+                Return
             Catch ex As System.Exception
                 hasCurrentSelection = False
             End Try
@@ -976,13 +983,15 @@ Public Class frmAIChat
             If hasCurrentSelection AndAlso My.Settings.DoCommands Then
                 Dim story As Microsoft.Office.Interop.Word.WdStoryType = Globals.ThisAddIn.Application.Selection.StoryType
                 If story = Microsoft.Office.Interop.Word.WdStoryType.wdFootnotesStory OrElse story = Microsoft.Office.Interop.Word.WdStoryType.wdEndnotesStory Then
+                    ReleaseWordRange(pinnedSelection)
                     ShowCustomMessageBox("Select the passage in the main document, not the footnote or endnote body, for Word chat editing.")
                     Return
                 End If
             End If
 
             If Not hasCurrentSelection Then
-                ShowCustomMessageBox("'Include selection' is enabled, but no text is currently selected in the active Word document. Select the text and try again; your chat access preferences have been preserved.")
+                ReleaseWordRange(pinnedSelection)
+                ShowCustomMessageBox("'Include selection' is enabled, but the selection has no current document text. Select the text and try again; your chat access preferences have been preserved.")
                 Return
             End If
         End If
@@ -1097,6 +1106,14 @@ Public Class frmAIChat
                 Return
             End If
 
+            ' Archive preparation above can yield to Word. Keep the document in the
+            ' prompt consistent with the document against which commands will run.
+            If (chkIncludeDocText.Checked OrElse chkIncludeselection.Checked) AndAlso
+               Not IsSameChatWordDocument(requestDoc, appGuard.ActiveDocument) Then
+                ShowCustomMessageBox("The active Word document changed while the request was being prepared. Activate the intended document and send again.")
+                Return
+            End If
+
             ' ──────────────────────────────────────────────────────────────
             ' STEP 3b: Guard Against Oversized Documents (Include Document)
             ' ──────────────────────────────────────────────────────────────
@@ -1132,7 +1149,7 @@ Public Class frmAIChat
             If chkIncludeDocText.Checked Then
                 ' "Include document": the full document is always included (handled via docText above).
                 ' In addition, include the selection and the current cursor position (if available).
-                selectionText = GetCurrentSelectionText(pinnedSelection)
+                selectionText = GetCurrentSelectionText(pinnedSelection, pinnedSource)
 
                 If pinnedSelection Is Nothing AndAlso sel IsNot Nothing AndAlso sel.Start = sel.End Then
                     selectionText = GetCursorContext(CursorPositionCount)
@@ -1141,7 +1158,7 @@ Public Class frmAIChat
                 ' "Include selection": include only the selection, nothing more.
                 ' If there is no actual selection (collapsed cursor), include nothing.
                 If pinnedSelection IsNot Nothing OrElse (sel IsNot Nothing AndAlso sel.Start <> sel.End) Then
-                    selectionText = GetCurrentSelectionText(pinnedSelection)
+                    selectionText = GetCurrentSelectionText(pinnedSelection, pinnedSource)
                 End If
             End If
 
@@ -1152,13 +1169,19 @@ Public Class frmAIChat
                     IncludeName:=True,
                     IncludeNone:=False,
                     ExceptCurrent:=True,
-                    SilentAndGetAll:=True)
+                    SilentAndGetAll:=True,
+                    ReadRangeText:=AddressOf ReadOnlyChatSource)
             End If
 
             ' ──────────────────────────────────────────────────────────────
             ' STEP 5: Construct Full User Prompt
             ' ──────────────────────────────────────────────────────────────
             Dim fullPrompt As New StringBuilder()
+
+            If requestAllowsCommands AndAlso
+               (docText.IndexOf(ThisAddIn.ChatInlineObjectCharacter) >= 0 OrElse selectionText.IndexOf(ThisAddIn.ChatInlineObjectCharacter) >= 0) Then
+                SystemPrompt &= " U+FFFC (the object replacement character) marks a protected inline Word object. Use separate exact text anchors on either side. Keep the object out of all search and replacement text."
+            End If
 
             ' Add active document content if present
             If Not String.IsNullOrEmpty(docText) Then
@@ -1168,12 +1191,13 @@ Public Class frmAIChat
                 ' Word does not expose these generated numbers via Content.Text, so we supply them
                 ' separately (numbered elements only; bullets are excluded by the builder).
                 Try
-                    Dim activeNumbering As String = ThisAddIn.BuildParagraphNumberingContext(Globals.ThisAddIn.Application.ActiveDocument.Content)
+                    Dim activeNumbering As String = ThisAddIn.BuildParagraphNumberingContext(Globals.ThisAddIn.Application.ActiveDocument.Content, ReadRangeText:=AddressOf ReadOnlyChatSource)
                     If Not String.IsNullOrEmpty(activeNumbering) Then
                         fullPrompt.AppendLine($"The following is read-only automatic numbering information for the document '{Globals.ThisAddIn.Application.ActiveDocument.Name}' (it is not part of the editable text shown above; the references to TEXTTOPROCESS below mean this document):")
                         fullPrompt.AppendLine(activeNumbering)
                     End If
-                Catch
+                Catch ex As System.Exception
+                    SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb("WordChat", "Optional numbering context omitted: " & ex.ToString())
                 End Try
             End If
 
@@ -1215,13 +1239,14 @@ Public Class frmAIChat
                         If seenDocs.Contains(key) Then Continue For
                         seenDocs.Add(key)
 
-                        Dim otherNumbering As String = ThisAddIn.BuildParagraphNumberingContext(d.Content)
+                        Dim otherNumbering As String = ThisAddIn.BuildParagraphNumberingContext(d.Content, ReadRangeText:=AddressOf ReadOnlyChatSource)
                         If Not String.IsNullOrEmpty(otherNumbering) Then
                             fullPrompt.AppendLine($"The following is read-only automatic numbering information for the open document '{d.Name}' (it is not part of the editable text; the references to TEXTTOPROCESS below mean this document):")
                             fullPrompt.AppendLine(otherNumbering)
                         End If
                     Next
-                Catch
+                Catch ex As System.Exception
+                    SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb("WordChat", "Optional numbering context omitted: " & ex.ToString())
                 End Try
             End If
 
@@ -1697,6 +1722,9 @@ Public Class frmAIChat
             ' Add to in-memory history
             If publishModelReply Then _chatHistory.Add(("assistant", aiResponsePlain.TrimEnd()))
 
+        Catch ex As ChatSourceContextException
+            errorOccurred = True
+            errorMessage = ex.Message
         Catch ex As System.Exception
             ' Capture error without performing async work inside catch block
             SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb(
@@ -1791,7 +1819,7 @@ Public Class frmAIChat
     ''' position of user focus within the extracted context window.
     ''' 
     ''' If BubblesExtract succeeds, appends any comments/replies found in the context range.
-    ''' All exceptions are silently caught to ensure function never throws.
+    ''' An unreadable revision projection aborts the request.
     ''' </remarks>
     Private Function GetCursorContext(charCount As Integer) As String
         Try
@@ -1799,7 +1827,7 @@ Public Class frmAIChat
             Dim sel As Microsoft.Office.Interop.Word.Selection = activeDoc.Application.Selection
 
             ' If actual selection exists (not just cursor position), return empty
-            If Not String.IsNullOrEmpty(sel.Text) AndAlso sel.Start <> sel.End Then
+            If sel.Start <> sel.End Then
                 Return ""
             End If
 
@@ -1824,13 +1852,7 @@ Public Class frmAIChat
             Dim contextText As String = textBefore & "[cursor is here]" & textAfter
 
             ' Attempt to extract comments/bubbles from entire context range
-            Dim bubbles As String = ""
-            Try
-                Dim fullContextRange As Microsoft.Office.Interop.Word.Range = activeDoc.Range(contextStart, contextEnd)
-                bubbles = ThisAddIn.BubblesExtract(fullContextRange, True) ' Silent=True (no error dialogs)
-            Catch
-                ' Silently ignore errors; keep contextText without bubbles
-            End Try
+            Dim bubbles As System.String = ReadChatBubbles(activeDoc.Range(contextStart, contextEnd))
 
             ' Append bubbles if extracted successfully
             If Not String.IsNullOrEmpty(bubbles) Then
@@ -1839,11 +1861,12 @@ Public Class frmAIChat
 
             Return contextText
 
-        Catch ex As ChatNoteContextException
+        Catch ex As ChatSourceContextException
             Throw
-        Catch ex As Exception
-            ' Silently handle any errors; return empty string
-            Return ""
+        Catch ex As System.Exception
+            ' The document text is still available when optional cursor context cannot be located.
+            SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb("WordChat", "Optional cursor context omitted: " & ex.ToString())
+            Return System.String.Empty
         End Try
     End Function
 
@@ -2763,179 +2786,34 @@ Public Class frmAIChat
     ' =========================================================================
 
     ''' <summary>
-    ''' Extracts complete text content from active Word document.
-    ''' Temporarily switches to Final view mode to exclude tracked deletions.
-    ''' Optionally appends comments/bubbles if BubblesExtract succeeds.
+    ''' Reads the current final text and optional comment context without changing the revision view.
     ''' </summary>
-    ''' <returns>Document text with optional comments, or empty string on error</returns>
-    ''' <remarks>
-    ''' View management:
-    ''' - Saves original RevisionsView and ShowRevisionsAndComments settings
-    ''' - Temporarily sets to wdRevisionsViewFinal with ShowRevisionsAndComments = False
-    ''' - Restores original settings in Finally block
-    ''' 
-    ''' This ensures LLM sees only accepted text, not deleted content or markup.
-    ''' Comments/bubbles appended as separate block if extraction succeeds (Silent=True).
-    ''' All exceptions caught and return empty string.
-    ''' </remarks>
-    Private Function GetActiveDocumentText() As String
-        Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
-        Try
-            doc = Globals.ThisAddIn.Application.ActiveDocument
-        Catch
-            doc = Nothing
-        End Try
-
-        If doc Is Nothing Then Return ""
-
-        ' Try to temporarily switch the active window to "Final" view so tracked
-        ' deletions are excluded. This is best-effort only: if the view switch
-        ' fails (protected view, incompatible view mode, active window changed,
-        ' etc.) we MUST still return the document text rather than silently
-        ' dropping the entire document, otherwise "Include document" would send
-        ' no content and the model would see only the cursor context.
-        Dim wordApp As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
-        Dim targetWindow As Word.Window = Nothing
-        Dim viewSwitched As Boolean = False
-        Dim originalRevisionsView As Word.WdRevisionsView = Microsoft.Office.Interop.Word.WdRevisionsView.wdRevisionsViewFinal
-        Dim originalShowRevisions As Boolean = False
-
-        Try
-            targetWindow = wordApp.ActiveWindow
-            originalRevisionsView = targetWindow.View.RevisionsView
-            originalShowRevisions = targetWindow.View.ShowRevisionsAndComments
-
-            With targetWindow.View
-                .RevisionsView = Microsoft.Office.Interop.Word.WdRevisionsView.wdRevisionsViewFinal
-                .ShowRevisionsAndComments = False
-            End With
-            viewSwitched = True
-        Catch
-            ' Best-effort only; continue and read the text regardless.
-            viewSwitched = False
-        End Try
-
-        Try
-            ' Extract document text (with view switched this excludes deleted content;
-            ' without the switch it still returns the full document content).
-            Dim baseText As String = ""
-            Try
-                baseText = ReadChatSource(doc.Content)
-            Catch ex As ChatNoteContextException
-                Throw
-            Catch
-                baseText = ""
-            End Try
-
-            ' Attempt to extract comments/bubbles
-            Dim bubbles As String = ""
-            Try
-                bubbles = ThisAddIn.BubblesExtract(doc.Content, True) ' Silent=True
-            Catch
-                ' Silently ignore errors; keep baseText only
-            End Try
-
-            ' Append bubbles if available
-            If Not String.IsNullOrEmpty(bubbles) Then
-                Return baseText & vbCr & vbCr & bubbles
-            End If
-
-            Return baseText
-
-        Finally
-            ' Restore original view settings on the SAME window we changed, only if we changed it.
-            If viewSwitched AndAlso targetWindow IsNot Nothing Then
-                Try
-                    With targetWindow.View
-                        .RevisionsView = originalRevisionsView
-                        .ShowRevisionsAndComments = originalShowRevisions
-                    End With
-                Catch
-                    ' Best-effort restore; the window may no longer be valid
-                End Try
-            End If
-        End Try
+    Private Function GetActiveDocumentText() As System.String
+        Dim sourceRange As Microsoft.Office.Interop.Word.Range = Globals.ThisAddIn.Application.ActiveDocument.Content
+        Dim baseText As System.String = ReadChatSource(sourceRange)
+        Dim bubbles As System.String = ReadChatBubbles(sourceRange)
+        Return If(System.String.IsNullOrEmpty(bubbles), baseText, baseText & vbCr & vbCr & bubbles)
     End Function
 
-    ''' <summary>
-    ''' Extracts text from current Word selection.
-    ''' Temporarily switches to Final view mode to exclude tracked deletions.
-    ''' Optionally appends comments/bubbles if BubblesExtract succeeds.
-    ''' </summary>
-    ''' <returns>Selection text with optional comments, or empty string if no selection or error</returns>
-    ''' <remarks>
-    ''' Behavior:
-    ''' - If selection is empty/null: returns empty text without changing scope preferences
-    ''' - If selection exists: extracts text in Final view mode (no deletions)
-    ''' - Attempts to extract comments/bubbles from selection range
-    ''' - Appends bubbles inline (space-separated) if available
-    ''' 
-    ''' View management identical to GetActiveDocumentText (save/restore pattern).
-    ''' All exceptions caught and return empty string.
-    ''' </remarks>
-    Private Function GetCurrentSelectionText(Optional pinned As Microsoft.Office.Interop.Word.Range = Nothing) As String
+    Private Function GetCurrentSelectionText(pinned As Microsoft.Office.Interop.Word.Range, pinnedSource As System.String) As System.String
+        Dim sourceRange As Microsoft.Office.Interop.Word.Range = If(pinned, Globals.ThisAddIn.Application.Selection.Range)
+        If sourceRange.Start >= sourceRange.End Then Return System.String.Empty
+
+        Dim baseText As System.String = If(pinnedSource, ReadChatSource(sourceRange))
+        If pinned IsNot Nothing AndAlso baseText.EndsWith(vbCr, System.StringComparison.Ordinal) Then
+            baseText = baseText.Substring(0, baseText.Length - 1)
+        End If
+
+        Dim bubbles As System.String = ReadChatBubbles(sourceRange)
+        Return If(System.String.IsNullOrEmpty(bubbles), baseText, baseText & " " & bubbles)
+    End Function
+
+    Private Function ReadChatBubbles(sourceRange As Microsoft.Office.Interop.Word.Range) As System.String
         Try
-            Dim activeDoc As Microsoft.Office.Interop.Word.Document = Globals.ThisAddIn.Application.ActiveDocument
-            Dim wordApp As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
-            Dim sel As Microsoft.Office.Interop.Word.Selection = activeDoc.Application.Selection
-
-            ' Validate selection exists
-            If pinned Is Nothing AndAlso (sel Is Nothing OrElse System.String.IsNullOrEmpty(sel.Text)) Then
-                Return ""
-            Else
-                ' Capture the specific window we modify so the Finally restore targets the SAME
-                ' window even if the active window changes meanwhile.
-                Dim targetWindow As Word.Window = wordApp.ActiveWindow
-
-                ' Save current view settings
-                Dim originalRevisionsView As Word.WdRevisionsView = targetWindow.View.RevisionsView
-                Dim originalShowRevisions As Boolean = targetWindow.View.ShowRevisionsAndComments
-
-                Try
-                    ' Temporarily show only final text
-                    With targetWindow.View
-                        .RevisionsView = Microsoft.Office.Interop.Word.WdRevisionsView.wdRevisionsViewFinal
-                        .ShowRevisionsAndComments = False
-                    End With
-
-                    ' Extract selection text
-                    Dim sourceRange As Microsoft.Office.Interop.Word.Range = If(pinned, sel.Range)
-                    Dim baseText As String = If(pinned Is Nothing, ReadChatSource(sourceRange), ThisAddIn.ReadChatNoteProjection(sourceRange).Text)
-                    If pinned IsNot Nothing AndAlso baseText.EndsWith(vbCr, System.StringComparison.Ordinal) Then baseText = baseText.Substring(0, baseText.Length - 1)
-
-                    ' Attempt to extract comments/bubbles from selection
-                    Dim bubbles As String = ""
-                    Try
-                        bubbles = ThisAddIn.BubblesExtract(sourceRange, True) ' Silent=True
-                    Catch
-                        ' Silently ignore errors
-                    End Try
-
-                    ' Append bubbles inline if available
-                    If Not String.IsNullOrEmpty(bubbles) Then
-                        Return baseText & " " & bubbles
-                    End If
-
-                    Return baseText
-
-                Finally
-                    ' Restore original view settings on the SAME window we changed
-                    Try
-                        With targetWindow.View
-                            .RevisionsView = originalRevisionsView
-                            .ShowRevisionsAndComments = originalShowRevisions
-                        End With
-                    Catch
-                        ' Best-effort restore; the window may no longer be valid
-                    End Try
-                End Try
-            End If
-        Catch ex As ChatNoteContextException
-            Throw
+            Return ThisAddIn.BubblesExtract(sourceRange, Silent:=True, ReadRangeText:=AddressOf ReadOnlyChatSource)
         Catch ex As System.Exception
-            If pinned IsNot Nothing Then Throw New ChatNoteContextException(ex)
-            ' Preserve read-only legacy chat behaviour
-            Return ""
+            SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb("WordChat", "Optional comment context omitted: " & ex.ToString())
+            Return System.String.Empty
         End Try
     End Function
 
@@ -3358,7 +3236,7 @@ Public Class frmAIChat
             Else
                 scope = doc.StoryRanges(Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory)
             End If
-            If onlySelection AndAlso scope.End > scope.Start AndAlso doc.Range(scope.End - 1, scope.End).Text = vbCr Then
+            If onlySelection AndAlso scope.End > scope.Start AndAlso ThisAddIn.GetChatVisibleText(doc.Range(scope.End - 1, scope.End)) = vbCr Then
                 ' A model can echo the structural CR for the WHOLE selected block.
                 ' Normalize only this proved case; never TrimEnd a multi-paragraph payload.
                 Dim fullSource As System.String = ThisAddIn.ReadChatNoteProjection(scope).Text
@@ -3389,7 +3267,7 @@ Public Class frmAIChat
                     End If
                 Next
             ElseIf checkOverlap Then
-                originalVisibleText = Globals.ThisAddIn.GetVisibleText(scope)
+                originalVisibleText = ThisAddIn.GetChatVisibleText(scope)
             End If
             If Not checkOverlap Then Return System.String.Empty
             If System.String.IsNullOrEmpty(originalVisibleText) Then Return System.String.Empty
@@ -3462,25 +3340,32 @@ Public Class frmAIChat
         Return False
     End Function
 
-    ' Preserve the historical fast text/bubble path for ordinary context. A projection
-    ' failure for editable text must never silently turn into an unprotected snapshot.
-    Private NotInheritable Class ChatNoteContextException
+    Private NotInheritable Class ChatSourceContextException
         Inherits System.InvalidOperationException
         Friend Sub New(cause As System.Exception)
-            MyBase.New("Word could not read the native note references safely. Select a smaller main-text passage and retry.", cause)
+            MyBase.New("Word could not read the current document text safely. No request was sent. Select a smaller passage and retry.", cause)
+            SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb("WordChat", "Source projection failed: " & cause.ToString())
         End Sub
     End Class
 
     Private Function ReadChatSource(r As Microsoft.Office.Interop.Word.Range) As System.String
-        If My.Settings.DoCommands AndAlso r.StoryType = Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory AndAlso HasNativeNote(r) Then
-            Try
+        Try
+            If My.Settings.DoCommands AndAlso r.StoryType = Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory AndAlso HasNativeNote(r) Then
                 Return ThisAddIn.ReadChatNoteProjection(r).Text
-            Catch ex As System.Exception
-                SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb("WordChat", "Note context unavailable: " & ex.ToString())
-                Throw New ChatNoteContextException(ex)
-            End Try
-        End If
-        Return r.Text
+            End If
+            Return ThisAddIn.GetChatVisibleText(r)
+        Catch ex As System.Exception
+            Throw New ChatSourceContextException(ex)
+        End Try
+    End Function
+
+    ' Auxiliary text never needs the editable note tokens.
+    Private Shared Function ReadOnlyChatSource(r As Microsoft.Office.Interop.Word.Range) As System.String
+        Try
+            Return ThisAddIn.GetChatVisibleText(r)
+        Catch ex As System.Exception
+            Throw New ChatSourceContextException(ex)
+        End Try
     End Function
 
     Private Function IsPlainChatReplacement(value As System.String) As System.Boolean
@@ -3497,6 +3382,10 @@ Public Class frmAIChat
     Private Function ValidateNoteSyntax(pc As ParsedCommand) As System.String
         Dim oldValue As System.String = If(pc.Argument1, System.String.Empty)
         Dim newValue As System.String = If(pc.Argument2, System.String.Empty)
+        If WordSearchHelper.ContainsChatObjectMark(oldValue) OrElse WordSearchHelper.ContainsChatObjectMark(newValue) OrElse
+           (pc.TableRows IsNot Nothing AndAlso pc.TableRows.Exists(Function(row) row.Exists(AddressOf WordSearchHelper.ContainsChatObjectMark))) Then
+            Return "An inline Word object is a text boundary. Use separate text-only anchors on each side of the object."
+        End If
         If pc.TableRows IsNot Nothing AndAlso pc.TableRows.Exists(Function(row) row.Exists(Function(cell) HasNoteSyntax(cell))) Then
             Return "Native note tokens cannot be inserted into table cells."
         End If
@@ -3555,7 +3444,7 @@ Public Class frmAIChat
         ' Re-planning into smaller disjoint commands remains possible for such blocks.
         If source.IndexOf(Microsoft.VisualBasic.ChrW(7)) >= 0 OrElse pc.Argument2.IndexOf(Microsoft.VisualBasic.ChrW(7)) >= 0 OrElse
            source.EndsWith(vbCr, System.StringComparison.Ordinal) OrElse candidate.Fields.Count > 0 OrElse
-           candidate.InlineShapes.Count > 0 OrElse IsInsideToc(candidate, doc) Then Return Nothing
+           ThisAddIn.HasChatInlineObject(candidate) OrElse IsInsideToc(candidate, doc) Then Return Nothing
         If Not RangeMatchesFormatSpec(candidate, pc.MatchFormatSpec) Then Return Nothing
         Return candidate
     End Function
@@ -3602,6 +3491,46 @@ Public Class frmAIChat
 
     ' Per submitted command batch; used for host-issued receipts, not model statements.
     Private _verifiedChatBlocksInBatch As System.Int32
+
+    ' Word may retain a deleted prefix/suffix and may expand UI selections near
+    ' objects. Give the Markdown renderer only the newly written, contiguous text.
+    Private Sub ConvertChatMarkdown(doc As Microsoft.Office.Interop.Word.Document, first As System.Int32,
+                                    finish As System.Int32, expected As System.String)
+        Dim enclosure As Microsoft.Office.Interop.Word.Range = doc.Content
+        Try
+            enclosure.SetRange(first, finish)
+            Dim map As ThisAddIn.ChatNoteProjection = ThisAddIn.ReadChatNoteProjection(enclosure)
+            If map.Starts.Count = 0 OrElse Not System.String.Equals(map.Text, expected, System.StringComparison.Ordinal) Then
+                Throw New System.InvalidOperationException("Word could not verify the inserted Markdown source.")
+            End If
+            enclosure.SetRange(map.Starts(0), map.Finishes(map.Finishes.Count - 1))
+            If Not IsContinuousChatText(enclosure) OrElse HasNativeNote(enclosure) OrElse ThisAddIn.HasChatInlineObject(enclosure) Then
+                Throw New System.InvalidOperationException("The inserted Markdown source spans protected Word content.")
+            End If
+            Dim selected As Microsoft.Office.Interop.Word.Selection = doc.Application.Selection
+            If Not IsSameChatWordDocument(selected.Document, doc) OrElse selected.StoryType <> enclosure.StoryType Then
+                Throw New System.InvalidOperationException("The active Word document or story changed before Markdown conversion.")
+            End If
+            selected.SetRange(enclosure.Start, enclosure.End)
+            If selected.Start <> enclosure.Start OrElse selected.End <> enclosure.End OrElse
+               Not System.String.Equals(selected.Text, expected, System.StringComparison.Ordinal) Then
+                Throw New System.InvalidOperationException("Word could not select the exact inserted Markdown source.")
+            End If
+            ThisAddIn.ConvertMarkdownToWord()
+        Finally
+            ReleaseWordRange(enclosure)
+        End Try
+    End Sub
+
+    Private Shared Function IsContinuousChatText(target As Microsoft.Office.Interop.Word.Range) As System.Boolean
+        Dim map As ThisAddIn.ChatNoteProjection = ThisAddIn.ReadChatNoteProjection(target)
+        Dim nextPosition As System.Int32 = target.Start
+        For i As System.Int32 = 0 To map.Starts.Count - 1
+            If map.Starts(i) > nextPosition Then Return False
+            nextPosition = map.Finishes(i)
+        Next
+        Return nextPosition = target.End
+    End Function
 
     Private Function ApplyVerifiedChatBlock(target As Microsoft.Office.Interop.Word.Range, source As System.String,
                                             desired As System.String, trace As System.Text.StringBuilder,
@@ -4974,6 +4903,7 @@ Public Class frmAIChat
     ' A failed surgical edit may already have applied some tracked changes. Preserve that
     ' uncertainty at the chat-command boundary instead of blindly executing a later edit.
     Private _lastReplaceMayHavePartialChanges As System.Boolean = False
+    Private _chatInsertWriteAttempted As System.Boolean
     Private _lastReplaceFailureMessage As System.String = System.String.Empty
 
     ''' <summary>Start position of the last document action performed by chat commands.</summary>
@@ -5547,6 +5477,7 @@ Public Class frmAIChat
                 scopeEnd = doc.Content.End
             End If
 
+            Dim snapshot As WordSearchHelper.ChatTextSearch = WordSearchHelper.CreateChatSearch(doc.Range(scopeStart, scopeEnd))
             Dim occurrenceOrdinal As Integer = 0
             Dim nextSearchStart As Integer = scopeStart
 
@@ -5558,7 +5489,7 @@ Public Class frmAIChat
                     Exit Do
                 End Try
 
-                If Not Globals.ThisAddIn.FindLongTextInChunks(targetText, sel, True) Then Exit Do
+                If Not WordSearchHelper.FindChatSelection(targetText, sel, snapshot) Then Exit Do
                 If sel.Start < nextSearchStart OrElse sel.Start >= scopeEnd OrElse sel.End > scopeEnd Then Exit Do
 
                 Dim foundStart As Integer = sel.Start
@@ -6019,12 +5950,13 @@ Public Class frmAIChat
             End If
 
             Dim nextSearchStart As Integer = scopeStart
+            Dim snapshot As WordSearchHelper.ChatTextSearch = WordSearchHelper.CreateChatSearch(doc.Range(scopeStart, scopeEnd))
             Dim eligibleOrdinal As Integer = 0
             Dim formattedCount As Integer = 0
 
             Do While nextSearchStart < scopeEnd
                 selection.SetRange(nextSearchStart, scopeEnd)
-                If Not Globals.ThisAddIn.FindLongTextInChunks(searchText, selection, True) Then Exit Do
+                If Not WordSearchHelper.FindChatSelection(searchText, selection, snapshot) Then Exit Do
                 If selection.Start < nextSearchStart OrElse selection.Start >= scopeEnd OrElse selection.End > scopeEnd Then Exit Do
 
                 Dim candidateRange As Microsoft.Office.Interop.Word.Range = selection.Range.Duplicate
@@ -6282,6 +6214,7 @@ Public Class frmAIChat
             End If
 
             Dim commandSuccess As Boolean = True
+            _chatInsertWriteAttempted = False
             Dim commandDescription As String = ""
             Dim actionSerialBeforeCommand As Integer = _lastActionSerial
 
@@ -6454,13 +6387,13 @@ Public Class frmAIChat
                 End If
             End If
 
-            If System.String.Equals(pc.Command, "replace", System.StringComparison.OrdinalIgnoreCase) AndAlso
-               Not commandSuccess AndAlso _lastReplaceMayHavePartialChanges Then
+            If Not commandSuccess AndAlso (_chatInsertWriteAttempted OrElse
+               (System.String.Equals(pc.Command, "replace", System.StringComparison.OrdinalIgnoreCase) AndAlso _lastReplaceMayHavePartialChanges)) Then
                 Dim commandsNotExecuted As System.Int32 = commands.Count - commandOrdinal
                 If commandsNotExecuted > 0 Then
-                    FailedCommandsList.Add($"Stopped {commandsNotExecuted} subsequent Word command(s) because the previous replacement may have left partial tracked changes. Review the affected passage before submitting a new batch.")
+                    FailedCommandsList.Add($"Stopped {commandsNotExecuted} subsequent Word command(s) because the previous edit may have left partial tracked changes. Review the affected passage before submitting a new batch.")
                 End If
-                Debug.WriteLine($"ExecuteAnyCommands: stopped after incomplete replacement at command {commandOrdinal}/{commands.Count}")
+                Debug.WriteLine($"ExecuteAnyCommands: stopped after incomplete edit at command {commandOrdinal}/{commands.Count}")
                 Exit For
             End If
 
@@ -6940,6 +6873,7 @@ Public Class frmAIChat
         Dim nextSearchStart As Integer = scopeStart
 
         Try
+            Dim snapshot As WordSearchHelper.ChatTextSearch = WordSearchHelper.CreateChatSearch(doc.Range(scopeStart, scopeEnd))
             Do While nextSearchStart < scopeEnd
                 Try
                     sel.SetRange(nextSearchStart, scopeEnd)
@@ -6948,7 +6882,7 @@ Public Class frmAIChat
                     Exit Do
                 End Try
 
-                If Not Globals.ThisAddIn.FindLongTextInChunks(searchTerm, sel) Then Exit Do
+                If Not WordSearchHelper.FindChatSelection(searchTerm, sel, snapshot) Then Exit Do
                 If sel.Start < nextSearchStart OrElse sel.Start >= scopeEnd OrElse sel.Start >= sel.End OrElse sel.End > scopeEnd Then Exit Do
 
                 Dim anchorStart As Integer = sel.Start
@@ -7068,11 +7002,12 @@ Public Class frmAIChat
             Dim stuckCounter As Integer = 0
             Dim maxStuckLimit As Integer = 2
             Dim eligibleOrdinal As Integer = 0
+            Dim snapshot As WordSearchHelper.ChatTextSearch = WordSearchHelper.CreateChatSearch(doc.Application.Selection.Range)
             Dim highlightedCount As Integer = 0
 
             ' Find and highlight selected instances. With no selector this preserves the
             ' original behavior of highlighting every occurrence.
-            Do While Globals.ThisAddIn.FindLongTextInChunks(searchTerm, doc.Application.Selection, True) = True
+            Do While WordSearchHelper.FindChatSelection(searchTerm, doc.Application.Selection, snapshot) = True
 
                 If doc.Application.Selection Is Nothing Then Exit Do
 
@@ -7291,7 +7226,7 @@ Public Class frmAIChat
                     Return False
                 End If
                 searchEnd = savedSelectionEnd
-                If doc.Range(searchEnd - 1, searchEnd).Text = vbCr Then
+                If ThisAddIn.GetChatVisibleText(doc.Range(searchEnd - 1, searchEnd)) = vbCr Then
                     searchEnd -= 1
                     If searchEnd <= savedSelectionStart Then Return False
                     doc.Application.Selection.SetRange(savedSelectionStart, searchEnd)
@@ -7334,25 +7269,38 @@ Public Class frmAIChat
             Dim maxIterations As Integer = 5000
             Dim iterationCount As Integer = 0
             Dim lastFoundEnd As Integer = -1
-            Dim requestedSearchStart As Integer = If(OnlySelection, savedSelectionStart, doc.Application.Selection.Start)
+            Dim requestedSearchStart As Integer = If(OnlySelection, savedSelectionStart, doc.Content.Start)
+            Dim initialArea As Microsoft.Office.Interop.Word.Range = doc.Range(requestedSearchStart, searchEnd)
+            Dim snapshot As WordSearchHelper.ChatTextSearch
+            Try
+                snapshot = WordSearchHelper.CreateChatSearch(initialArea)
+            Finally
+                ReleaseWordRange(initialArea)
+            End Try
+            Dim useRangeScan As System.Boolean = OnlySelection OrElse snapshot IsNot Nothing
 
             Debug.WriteLine("ExecuteReplaceCommand: PASS 1 - scanning for matches...")
 
             Do
                 LogReplaceDiag($"PASS1 before Find: nextIteration={iterationCount + 1}; searchEnd={searchEnd}; requestedSearchStart={requestedSearchStart}; lastFoundEnd={lastFoundEnd}; {DescribeSelectionState(doc.Application.Selection)}")
 
-                If OnlySelection AndAlso requestedSearchStart >= searchEnd Then Exit Do
+                If requestedSearchStart >= searchEnd Then Exit Do
                 Dim boundedStart As System.Int32 = -1
                 Dim boundedEnd As System.Int32 = -1
                 Dim findReturned As Boolean = False
                 searchTraceAttempts += 1
                 Dim findTraceClock As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
                 Try
-                    If OnlySelection Then
+                    If useRangeScan Then
                         Dim area As Microsoft.Office.Interop.Word.Range = doc.Range(requestedSearchStart, searchEnd)
                         Dim scopedSearchHit As Microsoft.Office.Interop.Word.Range = Nothing
                         Try
-                            findReturned = WordSearchHelper.FindLongTextAnchoredFastRange(area, oldText, scopedSearchHit, viewOverride:=view)
+                            If snapshot Is Nothing Then
+                                findReturned = WordSearchHelper.FindLongTextAnchoredFastRange(area, oldText, scopedSearchHit, viewOverride:=view)
+                            Else
+                                scopedSearchHit = snapshot.FindRange(area, oldText)
+                                findReturned = scopedSearchHit IsNot Nothing
+                            End If
                             If findReturned Then
                                 If scopedSearchHit Is Nothing OrElse scopedSearchHit.Start < requestedSearchStart OrElse scopedSearchHit.End > searchEnd OrElse scopedSearchHit.End <= scopedSearchHit.Start Then Throw New System.InvalidOperationException("Search returned a hit outside the pinned range.")
                                 boundedStart = scopedSearchHit.Start
@@ -7416,8 +7364,8 @@ Public Class frmAIChat
                 End If
 
                 If Not IsSameChatWordDocument(doc.Application.ActiveDocument, doc) Then Throw New System.InvalidOperationException("The active document changed during the replacement scan.")
-                Dim selStart As Integer = If(OnlySelection, boundedStart, doc.Application.Selection.Start)
-                Dim selEnd As Integer = If(OnlySelection, boundedEnd, doc.Application.Selection.End)
+                Dim selStart As Integer = If(useRangeScan, boundedStart, doc.Application.Selection.Start)
+                Dim selEnd As Integer = If(useRangeScan, boundedEnd, doc.Application.Selection.End)
                 Debug.WriteLine($"ExecuteReplaceCommand: PASS1 iteration {iterationCount}, found at [{selStart},{selEnd}] (requestedSearchStart={requestedSearchStart})")
                 LogReplaceDiag($"PASS1 iteration={iterationCount}; found=[{selStart},{selEnd}]; requestedSearchStart={requestedSearchStart}; lastFoundEnd={lastFoundEnd}")
 
@@ -7434,8 +7382,8 @@ Public Class frmAIChat
 
                 ' Word.Find may match text retained only in tracked deletions. Check the
                 ' current visible source before counting occurrences or planning any edit.
-                Dim visibleMatchText As System.String = Globals.ThisAddIn.GetVisibleText(doc.Range(selStart, selEnd))
-                If Not WordSearchHelper.IsEquivalentSearchText(visibleMatchText, oldText) Then
+                Dim visibleMatchText As System.String = ThisAddIn.GetChatVisibleText(doc.Range(selStart, selEnd))
+                If WordSearchHelper.ContainsChatObjectMark(visibleMatchText) OrElse Not WordSearchHelper.IsEquivalentSearchText(visibleMatchText, oldText) Then
                     LogReplaceDiag($"PASS1 rejecting non-current visible match [{selStart},{selEnd}]")
                     Dim nextVisibleSearch As System.Int32 = System.Math.Max(selEnd, requestedSearchStart + 1)
                     If nextVisibleSearch >= searchEnd Then Exit Do
@@ -7544,7 +7492,7 @@ Public Class frmAIChat
 
                 ' A range-bound scan never borrows the UI caret or expands a collapsed
                 ' selection. The next eligible start is exactly the verified hit end.
-                If OnlySelection Then
+                If useRangeScan Then
                     requestedSearchStart = selEnd
                     If requestedSearchStart >= searchEnd Then Exit Do
                     Continue Do
@@ -7656,10 +7604,24 @@ Public Class frmAIChat
             ' ─────────────────────────────────────────────────────────────────────
             ' Canonical Word.Find intentionally ignores some control characters. Do
             ' not let a fuzzy/legacy hit route a native note into Selection.Text.
+            Dim markdownReplacement As System.Boolean = chkConvertMarkdown.Checked AndAlso newText.Length > 0 AndAlso Not IsPlainChatReplacement(newText)
             For Each hit In selectedMatchPositions
-                If HasNativeNote(doc.Range(hit.Start, hit.End)) Then
-                    _lastReplaceFailureMessage = "This replacement crosses a native note without a verified anchor. No text was written by this command."
-                    searchTraceOutcome = "unbound-native-note"
+                Dim checkedHit As Microsoft.Office.Interop.Word.Range = doc.Range(hit.Start, hit.End)
+                Dim protectedHit As System.Boolean
+                Try
+                    protectedHit = HasNativeNote(checkedHit) OrElse ThisAddIn.HasChatInlineObject(checkedHit)
+                    If markdownReplacement AndAlso Not IsContinuousChatText(checkedHit) Then
+                        _lastReplaceFailureMessage = "The Markdown replacement spans hidden text, a field boundary, or a retained deletion. Use smaller text-only replacements."
+                        searchTraceOutcome = "noncontiguous-markdown-range"
+                        doc.Application.Selection.SetRange(savedSelectionStart, savedSelectionEnd)
+                        Return False
+                    End If
+                Finally
+                    ReleaseWordRange(checkedHit)
+                End Try
+                If protectedHit Then
+                    _lastReplaceFailureMessage = "This replacement crosses a native note or inline object. Use separate text-only anchors on either side."
+                    searchTraceOutcome = "protected-object"
                     doc.Application.Selection.SetRange(savedSelectionStart, savedSelectionEnd)
                     Return False
                 End If
@@ -7683,8 +7645,10 @@ Public Class frmAIChat
                     Dim currentMatchIsValid As System.Boolean = False
                     Try
                         currentMatchRange = doc.Range(mStart, mEnd)
-                        currentMatchIsValid = Not HasNativeNote(currentMatchRange) AndAlso WordSearchHelper.IsEquivalentSearchText(
-                            Globals.ThisAddIn.GetVisibleText(currentMatchRange), oldText)
+                        Dim currentText As System.String = ThisAddIn.GetChatVisibleText(currentMatchRange)
+                        currentMatchIsValid = currentMatchRange.Start = mStart AndAlso currentMatchRange.End = mEnd AndAlso
+                            Not ThisAddIn.HasChatInlineObject(currentMatchRange) AndAlso Not HasNativeNote(currentMatchRange) AndAlso
+                            Not WordSearchHelper.ContainsChatObjectMark(currentText) AndAlso WordSearchHelper.IsEquivalentSearchText(currentText, oldText)
                     Catch ex As System.Exception
                         LogReplaceDiag($"PASS2 source revalidation failed at [{mStart},{mEnd}]: {ex.GetType().Name}: {ex.Message}")
                     Finally
@@ -7745,19 +7709,13 @@ Public Class frmAIChat
 
                     Dim replacementAttemptStarted As System.Boolean = False
                     Try
-                        ' Select the matched text using stored positions
-                        Debug.WriteLine($"ExecuteReplaceCommand: calling SetRange({mStart},{mEnd})")
-                        doc.Application.Selection.SetRange(mStart, mEnd)
-                        Debug.WriteLine($"ExecuteReplaceCommand: SetRange OK, selection=[{doc.Application.Selection.Start},{doc.Application.Selection.End}]")
-
-                        If doc.Application.Selection.Start <> mStart OrElse doc.Application.Selection.End <> mEnd OrElse
-                           HasNativeNote(doc.Application.Selection.Range) Then
-                            Throw New System.InvalidOperationException("Word selected a different range or a protected note reference.")
-                        End If
                         Dim plainTarget As Microsoft.Office.Interop.Word.Range = doc.Range(mStart, mEnd)
+                        If plainTarget.Start <> mStart OrElse plainTarget.End <> mEnd OrElse HasNativeNote(plainTarget) OrElse ThisAddIn.HasChatInlineObject(plainTarget) Then
+                            Throw New System.InvalidOperationException("The replacement range includes a protected native object or changed bounds.")
+                        End If
                         Dim needRenderer As System.Boolean = chkConvertMarkdown.Checked AndAlso adjustedNewText.Length > 0 AndAlso Not IsPlainChatReplacement(adjustedNewText)
-                        If Not needRenderer AndAlso plainTarget.Fields.Count = 0 AndAlso plainTarget.InlineShapes.Count = 0 AndAlso Not ThisAddIn.ContainsChatWordStructure(Globals.ThisAddIn.GetVisibleText(plainTarget)) AndAlso Not ThisAddIn.ContainsChatWordStructure(adjustedNewText) Then
-                            Dim exactOriginal As System.String = Globals.ThisAddIn.GetVisibleText(plainTarget)
+                        If Not needRenderer AndAlso plainTarget.Fields.Count = 0 AndAlso Not ThisAddIn.ContainsChatWordStructure(ThisAddIn.GetChatVisibleText(plainTarget)) AndAlso Not ThisAddIn.ContainsChatWordStructure(adjustedNewText) Then
+                            Dim exactOriginal As System.String = ThisAddIn.GetChatVisibleText(plainTarget)
                             Dim exactNew As System.String = If(chkConvertMarkdown.Checked, NormalizeWordReplacementPlanText(adjustedNewText), ThisAddIn.PrepareChatPlainTarget(exactOriginal, adjustedNewText))
                             If Not ApplyVerifiedChatBlock(plainTarget, exactOriginal, exactNew, searchTrace, replacementAttemptStarted) Then
                                 _lastReplaceMayHavePartialChanges = replacementAttemptStarted OrElse replaceCount > 0
@@ -7765,19 +7723,28 @@ Public Class frmAIChat
                                 Exit For
                             End If
                         ElseIf chkConvertMarkdown.Checked AndAlso newText.Length > 0 Then
-                            ' Old replacement path so Markdown can be converted afterwards.
+                            ' The renderer writes the entire selection. A hidden or deleted
+                            ' interior gap must remain outside every physical write.
+                            If Not IsContinuousChatText(plainTarget) Then
+                                Throw New System.InvalidOperationException("Markdown replacement crosses hidden text or an existing deletion. Use smaller text-only replacements.")
+                            End If
+                            doc.Application.Selection.SetRange(mStart, mEnd)
+                            If doc.Application.Selection.Start <> mStart OrElse doc.Application.Selection.End <> mEnd OrElse
+                               HasNativeNote(doc.Application.Selection.Range) OrElse ThisAddIn.HasChatInlineObject(doc.Application.Selection.Range) Then
+                                Throw New System.InvalidOperationException("Word could not select the exact text for Markdown conversion.")
+                            End If
                             Debug.WriteLine($"ExecuteReplaceCommand: assigning Selection.Text = '{adjustedNewText}'")
+                            Dim beforeMarkdownWrite As System.Int32 = doc.Content.End
                             replacementAttemptStarted = True
                             doc.Application.Selection.Text = adjustedNewText
                             Debug.WriteLine($"ExecuteReplaceCommand: Selection.Text assigned OK, selection=[{doc.Application.Selection.Start},{doc.Application.Selection.End}]")
 
-                            Dim actionEnd As Integer = System.Math.Min(mStart + newText.Length, doc.Content.End)
+                            Dim actionEnd As Integer = mEnd + (doc.Content.End - beforeMarkdownWrite)
                             RememberLastActionRange(mStart, actionEnd)
 
                             Try
-                                If HasNativeNote(doc.Application.Selection.Range) Then Throw New System.InvalidOperationException("The Markdown rendering selection contains a native note reference.")
                                 Debug.WriteLine("ExecuteReplaceCommand: applying ConvertMarkdownToWord")
-                                Globals.ThisAddIn.ConvertMarkdownToWord()
+                                ConvertChatMarkdown(doc, mStart, actionEnd, adjustedNewText)
                                 Debug.WriteLine("ExecuteReplaceCommand: ConvertMarkdownToWord OK")
                             Catch ex As System.Exception
                                 Debug.WriteLine($"ExecuteReplaceCommand: ConvertMarkdownToWord failed: {ex.Message}")
@@ -7791,7 +7758,7 @@ Public Class frmAIChat
                             Dim patchRange As Word.Range = doc.Range(mStart, mEnd)
                             ' Use the same explicit revision projection as surgical mapping, not Range.Text
                             ' (which can still contain earlier tracked deletions in Final view).
-                            Dim originalPatchText As String = Globals.ThisAddIn.GetVisibleText(patchRange)
+                            Dim originalPatchText As String = ThisAddIn.GetChatVisibleText(patchRange)
                             Dim preserveTrailingCr As Boolean =
                                 originalPatchText.EndsWith(vbCr, StringComparison.Ordinal) OrElse
                                 originalPatchText.EndsWith(vbLf, StringComparison.Ordinal)
@@ -8039,34 +8006,25 @@ Public Class frmAIChat
 
         Dim leftCharacter As System.String = System.String.Empty
         Dim rightCharacter As System.String = System.String.Empty
-        Dim adjacentRange As Microsoft.Office.Interop.Word.Range = Nothing
-        Try
-            If insertPosition > doc.Content.Start AndAlso
-               joinBefore <> "verbatim" AndAlso
-               Not System.String.IsNullOrEmpty(joinBefore) Then
-                adjacentRange = doc.Range(insertPosition - 1, insertPosition)
-                leftCharacter = If(adjacentRange.Text, System.String.Empty)
-                ReleaseWordRange(adjacentRange)
-                adjacentRange = Nothing
-            End If
-            If insertPosition < doc.Content.End AndAlso
-               joinAfter <> "verbatim" AndAlso
-               Not System.String.IsNullOrEmpty(joinAfter) Then
-                adjacentRange = doc.Range(insertPosition, insertPosition + 1)
-                rightCharacter = If(adjacentRange.Text, System.String.Empty)
-            End If
-        Finally
-            If adjacentRange IsNot Nothing Then ReleaseWordRange(adjacentRange)
-        End Try
+        Dim leftAdjacent As System.Boolean = False
+        Dim rightAdjacent As System.Boolean = False
+        If Not System.String.IsNullOrEmpty(joinBefore) AndAlso joinBefore <> "verbatim" Then
+            leftCharacter = GetChatInsertionNeighbor(doc, insertPosition, True, leftAdjacent)
+        End If
+        If Not System.String.IsNullOrEmpty(joinAfter) AndAlso joinAfter <> "verbatim" Then
+            rightCharacter = GetChatInsertionNeighbor(doc, insertPosition, False, rightAdjacent)
+        End If
 
         ' A soft line break is not a paragraph boundary. If it is exactly adjacent
         ' and a real paragraph is explicitly required, consume ONLY the soft break
         ' in the same Word Range replacement. Other breaks and literal text stay put.
         ' A single mutation also prevents partial insertion/deletion on failure.
         If joinBefore = "paragraph_if_needed" AndAlso leftCharacter = ChrW(11) Then
+            If Not leftAdjacent Then Throw New System.InvalidOperationException("A hidden range separates the insertion from the preceding soft break.")
             replacementStart = insertPosition - 1
         End If
         If joinAfter = "paragraph_if_needed" AndAlso rightCharacter = ChrW(11) Then
+            If Not rightAdjacent Then Throw New System.InvalidOperationException("A hidden range separates the insertion from the following soft break.")
             replacementEnd = insertPosition + 1
         End If
 
@@ -8116,6 +8074,30 @@ Public Class frmAIChat
         Return result
     End Function
 
+    ' Spacing follows the closest final-text character. Widening a write to consume
+    ' a soft break is only safe when it is also the physical neighbor.
+    Private Function GetChatInsertionNeighbor(doc As Microsoft.Office.Interop.Word.Document, position As System.Int32,
+                                              before As System.Boolean, ByRef adjacent As System.Boolean) As System.String
+        Dim limit As System.Int32 = If(before, position - doc.Content.Start, doc.Content.End - position)
+        Dim distance As System.Int32 = 1
+        Dim probe As Microsoft.Office.Interop.Word.Range = doc.Content
+        Try
+            While distance <= limit
+                probe.SetRange(If(before, position - distance, position), If(before, position, position + distance))
+                Dim visible As System.String = ThisAddIn.GetChatVisibleText(probe)
+                If visible.Length > 0 Then
+                    adjacent = distance = 1
+                    Return If(before, visible(visible.Length - 1), visible(0)).ToString()
+                End If
+                If distance = limit Then Exit While
+                distance = CInt(System.Math.Min(CLng(limit), 2L * distance))
+            End While
+            Return System.String.Empty
+        Finally
+            ReleaseWordRange(probe)
+        End Try
+    End Function
+
     Private Function IsWordInsertionParagraphBoundary(value As System.Char) As Boolean
         Return value = ChrW(13) OrElse value = ChrW(10) OrElse value = ChrW(7)
     End Function
@@ -8151,7 +8133,7 @@ Public Class frmAIChat
     ''' - Position tracking to detect stuck state
     ''' - TOC detection via TocEndIfInside (skips to end of TOC)
     ''' - Document end boundary guards (End-1 for insertion)
-    ''' - Fallback to Selection.Text if Range creation fails
+    ''' - Verify physical range and avoid replay of an uncertain Word write
     ''' </remarks>
     Private Function ExecuteInsertBeforeAfterCommand(
         searchText As System.String,
@@ -8177,7 +8159,7 @@ Public Class frmAIChat
 
             Dim workrange As Microsoft.Office.Interop.Word.Range
             If OnlySelection Then
-                If doc.Application.Selection Is Nothing OrElse doc.Application.Selection.Range.Text = "" Then
+                If doc.Application.Selection Is Nothing OrElse doc.Application.Selection.Start = doc.Application.Selection.End Then
                     Return False
                 Else
                     workrange = doc.Application.Selection.Range
@@ -8214,7 +8196,7 @@ Public Class frmAIChat
                     Dim iterationCount As Integer = 0
                     Dim lastProcessedPosition As Integer = -1
 
-                    Do While Globals.ThisAddIn.FindLongTextInChunks(currentSearchText, doc.Application.Selection, True)
+                    Do While WordSearchHelper.FindChatSelection(currentSearchText, doc.Application.Selection)
                         If doc.Application.Selection Is Nothing Then Exit Do
 
                         System.Windows.Forms.Application.DoEvents()
@@ -8240,6 +8222,10 @@ Public Class frmAIChat
                         Dim foundRange As Microsoft.Office.Interop.Word.Range = Nothing
                         Try
                             foundRange = doc.Application.Selection.Range.Duplicate
+                            If Not IsSameChatWordDocument(foundRange.Document, doc) OrElse
+                               foundRange.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory OrElse
+                               ThisAddIn.HasChatInlineObject(foundRange) OrElse
+                               Not WordSearchHelper.IsEquivalentSearchText(ThisAddIn.GetChatVisibleText(foundRange), currentSearchText) Then Return False
 
                             Dim tocEnd As Integer = TocEndIfInside(foundRange, doc)
                             If tocEnd > 0 Then
@@ -8290,57 +8276,44 @@ Public Class frmAIChat
                                     replacementStart, replacementEnd)
                                 If OnlySelection AndAlso (replacementStart < selectionStart OrElse replacementEnd > selectionEnd) Then Return False
                                 Dim beforeInsertDocEnd As System.Int32 = doc.Content.End
-                                Dim netInsertedLength As Integer = actualText.Length - (replacementEnd - replacementStart)
-                                Dim insertionSucceeded As Boolean = False
                                 Dim insertRange As Microsoft.Office.Interop.Word.Range = Nothing
+                                Dim selectionFallback As Microsoft.Office.Interop.Word.Selection = Nothing
                                 Try
-                                    insertRange = doc.Range(replacementStart, replacementEnd)
-                                    ' Do not assign Font/Style here. A collapsed Word Range inherits
-                                    ' the native formatting at the insertion point; explicit deviations
-                                    ' are applied separately through the JSON format operation.
-                                    insertRange.Text = actualText
-                                    insertionSucceeded = True
-                                Catch rangeEx As System.Exception
-                                    System.Diagnostics.Debug.WriteLine($"Range insertion failed at {insertPosition}: {rangeEx.Message}; trying Selection fallback")
                                     Try
-                                        doc.Application.Selection.SetRange(replacementStart, replacementEnd)
-                                        doc.Application.Selection.Text = actualText
-                                        insertionSucceeded = True
-                                    Catch altEx As System.Exception
-                                        System.Diagnostics.Debug.WriteLine($"Alternative insertion failed: {altEx.Message}")
+                                        insertRange = doc.Range(replacementStart, replacementEnd)
+                                    Catch rangeEx As System.Runtime.InteropServices.COMException
+                                        ' Recover only before a write was attempted. A Word setter
+                                        ' can commit an insertion before returning a COM error.
+                                        SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb("WordChat", "Range lookup failed; verifying insertion selection: " & rangeEx.Message)
+                                        selectionFallback = doc.Application.Selection
+                                        selectionFallback.SetRange(replacementStart, replacementEnd)
+                                        insertRange = selectionFallback.Range
                                     End Try
+                                    If insertRange.Start <> replacementStart OrElse insertRange.End <> replacementEnd OrElse
+                                       Not IsSameChatWordDocument(insertRange.Document, doc) OrElse insertRange.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory OrElse
+                                       ThisAddIn.HasChatInlineObject(insertRange) Then Throw New System.InvalidOperationException("Word changed the insertion range at a protected object.")
+                                    _chatInsertWriteAttempted = True
+                                    If selectionFallback Is Nothing Then
+                                        insertRange.Text = actualText
+                                    Else
+                                        selectionFallback.Text = actualText
+                                    End If
                                 Finally
-                                    If insertRange IsNot Nothing Then ReleaseWordRange(insertRange)
+                                    ReleaseWordRange(insertRange)
                                 End Try
 
-                                If insertionSucceeded Then
-                                    insertedAny = True
-                                    insertedCount += 1
-                                    RememberLastActionRange(replacementStart, System.Math.Min(replacementStart + actualText.Length, doc.Content.End))
-
-                                    If chkConvertMarkdown.Checked AndAlso actualText.Length > 0 Then
-                                        Try
-                                            Dim conversionStart As Integer = replacementStart
-                                            Dim conversionEnd As Integer = System.Math.Min(replacementStart + actualText.Length, doc.Content.End)
-                                            doc.Range(conversionStart, conversionEnd).Select()
-                                            Globals.ThisAddIn.ConvertMarkdownToWord()
-                                        Catch
-                                            ' Best effort; insertion itself already succeeded.
-                                        End Try
-                                    End If
-
-                                    If OnlySelection Then selectionEnd += doc.Content.End - beforeInsertDocEnd
-
-                                    If InsertBefore Then
-                                        continuePosition = insertPosition + netInsertedLength + (foundEnd - foundStart)
-                                    Else
-                                        continuePosition = insertPosition + netInsertedLength
-                                    End If
-
-                                    If HasReachedSelectedMatchLimit(insertedCount, matchSpec, System.Int32.MaxValue) Then Exit Do
-                                Else
-                                    continuePosition = System.Math.Max(foundEnd, lastProcessedPosition + 1)
+                                insertedAny = True
+                                insertedCount += 1
+                                Dim insertedEnd As System.Int32 = replacementEnd + (doc.Content.End - beforeInsertDocEnd)
+                                RememberLastActionRange(replacementStart, insertedEnd)
+                                If chkConvertMarkdown.Checked AndAlso actualText.Length > 0 Then
+                                    ConvertChatMarkdown(doc, replacementStart, insertedEnd, actualText)
                                 End If
+                                Dim physicalShift As System.Int32 = doc.Content.End - beforeInsertDocEnd
+                                If OnlySelection Then selectionEnd += physicalShift
+                                continuePosition = If(InsertBefore, foundEnd, replacementEnd) + physicalShift
+
+                                If HasReachedSelectedMatchLimit(insertedCount, matchSpec, System.Int32.MaxValue) Then Exit Do
                             Else
                                 continuePosition = System.Math.Max(foundEnd, lastProcessedPosition + 1)
                             End If
@@ -8445,12 +8418,21 @@ Public Class frmAIChat
                                                command.MatchSpec.Occurrence.Value, 0)
                 Dim uniquePosition As Integer = -1
                 Try
+                    Dim snapshot As WordSearchHelper.ChatTextSearch = WordSearchHelper.CreateChatSearch(searchRange)
                     Do While searchRange.Start < limitEnd
-                        Dim matchFound As System.Boolean = searchRange.Find.Execute(
-                            FindText:=command.Argument1, MatchCase:=False,
-                            MatchWholeWord:=False, Forward:=True,
-                            Wrap:=Microsoft.Office.Interop.Word.WdFindWrap.wdFindStop)
-                        If Not matchFound Then Exit Do
+                        If snapshot Is Nothing Then
+                            If Not searchRange.Find.Execute(FindText:=command.Argument1, MatchCase:=False,
+                                MatchWholeWord:=False, Forward:=True,
+                                Wrap:=Microsoft.Office.Interop.Word.WdFindWrap.wdFindStop) Then Exit Do
+                        Else
+                            Dim hit As Microsoft.Office.Interop.Word.Range = snapshot.FindRange(searchRange, command.Argument1, literalOnly:=True)
+                            If hit Is Nothing Then Exit Do
+                            Try
+                                searchRange.SetRange(hit.Start, hit.End)
+                            Finally
+                                ReleaseWordRange(hit)
+                            End Try
+                        End If
                         found += 1
                         If found > 10000 Then Return False
                         If requested = 0 OrElse found = requested Then
@@ -8539,12 +8521,16 @@ Public Class frmAIChat
                 If replacementStart <> insertStart OrElse replacementEnd <> insertStart Then
                     selection.SetRange(replacementStart, replacementEnd)
                 End If
+                If selection.Start <> replacementStart OrElse selection.End <> replacementEnd OrElse ThisAddIn.HasChatInlineObject(selection.Range) Then Return False
+                Dim beforeInsertDocEnd As System.Int32 = doc.Content.End
+                _chatInsertWriteAttempted = True
                 selection.Text = actualText
 
-                RememberLastActionRange(replacementStart, System.Math.Min(replacementStart + actualText.Length, doc.Content.End))
+                Dim insertedEnd As System.Int32 = replacementEnd + (doc.Content.End - beforeInsertDocEnd)
+                RememberLastActionRange(replacementStart, insertedEnd)
 
-                If chkConvertMarkdown.Checked Then
-                    Globals.ThisAddIn.ConvertMarkdownToWord()
+                If chkConvertMarkdown.Checked AndAlso actualText.Length > 0 Then
+                    ConvertChatMarkdown(doc, replacementStart, insertedEnd, actualText)
                 End If
             End Using
 
@@ -9313,7 +9299,7 @@ Partial Public Class frmAIChat
         End If
 
         ' Silent suppresses per-file error boxes; AskUser lets GetFileContentEx handle the OCR prompt itself.
-        Dim result = Await Globals.ThisAddIn.GetFileContentEx(filePath, True, False, askUser)
+        Dim result = Await Globals.ThisAddIn.GetFileContentEx(filePath, True, False, askUser, LegacyWordRangeReader:=AddressOf ReadOnlyChatSource)
         Return (result.Content, result.PdfMayBeIncomplete)
     End Function
 

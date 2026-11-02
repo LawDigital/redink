@@ -175,7 +175,7 @@ Namespace SharedLibrary
                     context.StyleModel = LoadStyleModel(wordDirectory)
                     context.NumberingModel = LoadNumberingModel(wordDirectory)
 
-                    Dim mainDocument As System.Xml.XmlDocument = LoadXmlDocument(documentXmlPath)
+                    Dim mainDocument As System.Xml.XmlDocument = LoadFinalStoryDocument(documentXmlPath, context)
                     Dim mainNamespaceManager As System.Xml.XmlNamespaceManager = CreateNamespaceManager(mainDocument)
                     Dim bodyNode As System.Xml.XmlNode = mainDocument.SelectSingleNode("//w:body", mainNamespaceManager)
 
@@ -304,6 +304,28 @@ Namespace SharedLibrary
                 Return document
             End Function
 
+            ' Apply final visibility to the in-memory story tree before numbering, bookmarks,
+            ' fields, hyperlinks, margin boxes, tables and the plain/Markdown renderers inspect it.
+            Private Shared Function LoadFinalStoryDocument(filePath As System.String,
+                                                           context As ExtractionContext) As System.Xml.XmlDocument
+                Dim document As System.Xml.XmlDocument = LoadXmlDocument(filePath)
+                Dim namespaces As System.Xml.XmlNamespaceManager = CreateNamespaceManager(document)
+                Dim removed As System.Xml.XmlNodeList = document.SelectNodes(
+                    "//w:del | //w:moveFrom | //w:delText | //w:delInstrText | //w:tr[w:trPr/w:del] | //w:tc[w:tcPr/w:cellDel]", namespaces)
+                Const noteReferences As System.String = ".//w:footnoteReference | .//w:endnoteReference"
+                For index As System.Int32 = removed.Count - 1 To 0 Step -1
+                    Dim node As System.Xml.XmlNode = removed(index)
+                    For Each reference As System.Xml.XmlNode In node.SelectNodes(noteReferences, namespaces)
+                        context.RemovedNoteReferences.Add(reference.LocalName & ":" & GetWordAttributeValue(reference, "id"))
+                    Next
+                    node.ParentNode.RemoveChild(node)
+                Next
+                For Each reference As System.Xml.XmlNode In document.SelectNodes(noteReferences, namespaces)
+                    context.VisibleNoteReferences.Add(reference.LocalName & ":" & GetWordAttributeValue(reference, "id"))
+                Next
+                Return document
+            End Function
+
             Private Shared Function CreateNamespaceManager(document As System.Xml.XmlDocument) As System.Xml.XmlNamespaceManager
                 Dim namespaceManager As New System.Xml.XmlNamespaceManager(document.NameTable)
                 namespaceManager.AddNamespace("w", SB_WordNs)
@@ -402,6 +424,8 @@ Namespace SharedLibrary
             End Class
 
             Private NotInheritable Class ExtractionContext
+                Public ReadOnly RemovedNoteReferences As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
+                Public ReadOnly VisibleNoteReferences As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
                 Public Sub New()
                     Me.WordDirectory = System.String.Empty
                     Me.NumberingModel = New NumberingModel()
@@ -1351,7 +1375,7 @@ Namespace SharedLibrary
                             )
                             blocks.Add(tableBlock)
 
-                        Case "sdt", "customXml", "ins", "moveTo", "moveFrom"
+                        Case "sdt", "customXml", "ins", "moveTo"
                             Dim contentNode As System.Xml.XmlNode = childNode.SelectSingleNode("w:sdtContent", namespaceManager)
                             If contentNode Is Nothing Then
                                 contentNode = childNode
@@ -1436,7 +1460,7 @@ Namespace SharedLibrary
                                         )
                                         cell.Blocks.Add(nestedBlock)
 
-                                    Case "sdt", "customXml", "ins", "moveTo", "moveFrom"
+                                    Case "sdt", "customXml", "ins", "moveTo"
                                         Dim contentNode As System.Xml.XmlNode = childNode.SelectSingleNode("w:sdtContent", namespaceManager)
                                         If contentNode Is Nothing Then
                                             contentNode = childNode
@@ -1564,7 +1588,7 @@ Namespace SharedLibrary
                     System.Array.Sort(files, System.StringComparer.OrdinalIgnoreCase)
 
                     For Each filePath As System.String In files
-                        Dim document As System.Xml.XmlDocument = LoadXmlDocument(filePath)
+                        Dim document As System.Xml.XmlDocument = LoadFinalStoryDocument(filePath, context)
                         Dim namespaceManager As System.Xml.XmlNamespaceManager = CreateNamespaceManager(document)
                         Dim root As System.Xml.XmlNode = document.DocumentElement
                         If root Is Nothing Then
@@ -1617,7 +1641,7 @@ Namespace SharedLibrary
                 End If
 
                 Try
-                    Dim document As System.Xml.XmlDocument = LoadXmlDocument(filePath)
+                    Dim document As System.Xml.XmlDocument = LoadFinalStoryDocument(filePath, context)
                     Dim namespaceManager As System.Xml.XmlNamespaceManager = CreateNamespaceManager(document)
                     Dim noteNodes As System.Xml.XmlNodeList = document.SelectNodes("//w:" & noteElementLocalName, namespaceManager)
 
@@ -1628,7 +1652,9 @@ Namespace SharedLibrary
 
                     For Each noteNode As System.Xml.XmlNode In noteNodes
                         Dim noteId As System.String = GetWordAttributeValue(noteNode, "id")
-                        If noteId = "0" OrElse noteId = "-1" Then
+                        Dim referenceKey As System.String = noteElementLocalName & "Reference:" & noteId
+                        If noteId = "0" OrElse noteId = "-1" OrElse
+                           (context.RemovedNoteReferences.Contains(referenceKey) AndAlso Not context.VisibleNoteReferences.Contains(referenceKey)) Then
                             Continue For
                         End If
 
@@ -1771,11 +1797,11 @@ Namespace SharedLibrary
                                 End If
                             End If
 
-                        Case "sdt", "sdtContent", "smartTag", "customXml", "ins", "moveTo", "moveFrom"
+                        Case "sdt", "sdtContent", "smartTag", "customXml", "ins", "moveTo"
                             ProcessInlineChildren(childNode, namespaceManager, parseContext)
 
-                        Case "del"
-                            ' Deleted text is intentionally not emitted.
+                        Case "del", "moveFrom"
+                            ' Removed during final-story projection.
 
                         Case Else
                             ProcessInlineChildren(childNode, namespaceManager, parseContext)
@@ -1827,7 +1853,7 @@ Namespace SharedLibrary
                                 parseContext.FieldStack.Peek().Instruction.Append(runChild.InnerText)
                             End If
 
-                        Case "t", "delText"
+                        Case "t"
                             AppendInlineText(parseContext, runChild.InnerText)
 
                         Case "tab", "ptab"
@@ -1982,7 +2008,7 @@ Namespace SharedLibrary
                     End If
 
                     Select Case childNode.LocalName
-                        Case "t", "delText"
+                        Case "t"
                             builder.Append(childNode.InnerText)
                         Case "tab", "ptab"
                             builder.Append(vbTab)

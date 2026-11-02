@@ -22,15 +22,26 @@ class OperationsContractTests(unittest.TestCase):
         with self.assertRaisesRegex(StartupError, 'Windows'):
             manage_autostart(ROOT, 'enable')
 
-    def test_privileged_operations_are_csrf_and_localhost_only(self):
+    def test_privileged_operations_require_authentication_and_csrf_without_localhost_gate(self):
         source = (ROOT / 'redink_server/web.py').read_text(encoding='utf-8')
-        for endpoint in ("@app.post('/api/settings/shutdown')", "@app.post('/api/settings/autostart')"):
-            self.assertIn(endpoint, source)
-        for action in ('def server_shutdown():', 'def autostart_change():'):
+        for action in ('def server_shutdown():', 'def autostart_change():',
+                       'def open_config_folder():'):
             body = source.split(action, 1)[1].split('\n    @app.', 1)[0]
             self.assertIn('check_csrf()', body)
-            self.assertIn('is_loopback_request(request.remote_addr)', body)
+            self.assertNotIn('is_loopback_request(request.remote_addr)', body)
+            head = source[:source.index('def ' + action.split('def ')[1])]
+            self.assertTrue(head.rstrip().endswith('@admin_required'), action)
+        status = source.split('def autostart_status():', 1)[1].split('\n    @app.', 1)[0]
+        self.assertNotIn('is_loopback_request(request.remote_addr)', status)
         self.assertIn("app.extensions.get('redink_shutdown')", source)
+
+    def test_passwordless_login_still_requires_actual_loopback_and_binding(self):
+        source = (ROOT / 'redink_server/web.py').read_text(encoding='utf-8')
+        login_guard = source.split('def local_passwordless_allowed():', 1)[1].split('\n\n', 1)[0]
+        self.assertIn('is_loopback_request(request.remote_addr)', login_guard)
+        self.assertIn('settings.host in (', login_guard)
+        policy = source.split('def set_passwordless_api():', 1)[1].split('\n    @app.', 1)[0]
+        self.assertIn("if requested['enabled'] and settings.host not in", policy)
 
     def test_urls_are_complete_and_copyable_without_hardcoded_tokens(self):
         js = (ROOT / 'redink_server/static/app.js').read_text(encoding='utf-8')

@@ -449,6 +449,8 @@ Namespace SharedLibrary
                 End Function, "Red Ink RTF")
         End Function
 
+        Public Delegate Function WordRangeTextReader(source As Microsoft.Office.Interop.Word.Range) As System.String
+
         ''' <summary>
         ''' Reads a Word document via Office interop and returns the document's text content.
         ''' </summary>
@@ -458,6 +460,11 @@ Namespace SharedLibrary
         ''' </param>
         ''' <returns>The extracted text, or an error string / empty string depending on <paramref name="ReturnErrorInsteadOfEmpty"/>.</returns>
         Public Shared Function ReadWordDocument(ByVal docPath As String, Optional ReturnErrorInsteadOfEmpty As Boolean = True, Optional ByRef readError As System.String = Nothing) As String
+            Return ReadWordDocument(docPath, ReturnErrorInsteadOfEmpty, readError, Nothing)
+        End Function
+
+        Public Shared Function ReadWordDocument(docPath As System.String, ReturnErrorInsteadOfEmpty As System.Boolean,
+                                                ByRef readError As System.String, ReadRangeText As WordRangeTextReader) As System.String
             readError = System.String.Empty
             Dim app As Microsoft.Office.Interop.Word.Application = Nothing
             Dim doc As Document = Nothing
@@ -478,7 +485,7 @@ Namespace SharedLibrary
                 doc = app.Documents.Open(fileName, [ReadOnly]:=True, Visible:=False)
 
                 ' Extract the content text
-                Dim text As String = doc.Content.Text
+                Dim text As System.String = If(ReadRangeText Is Nothing, doc.Content.Text, ReadRangeText.Invoke(doc.Content))
 
                 ' Close the document without saving changes
                 doc.Close(SaveChanges:=False)
