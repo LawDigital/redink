@@ -10979,7 +10979,7 @@
         "Name" = "8:Microsoft Visual Studio"
         "ProductName" = "8:Red Ink for Outlook (Preview)"
         "ProductCode" = "8:{0F2A5190-AED9-4A60-B497-0EF04DFD542E}"
-        "PackageCode" = "8:{0D3CCE33-DD4B-49E8-887C-A82913FA025B}"
+        "PackageCode" = "8:{42D3AC1F-8A00-4EDB-AC9E-BD09841BE855}"
         "UpgradeCode" = "8:{3FF21BD8-0E2D-4561-B224-D40A4C6049ED}"
         "AspNetVersion" = "8:4.0.30319.0"
         "RestartWWWService" = "11:FALSE"

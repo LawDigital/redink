@@ -54,7 +54,8 @@ Partial Public Class ThisAddIn
                                            Optional CancellationToken As System.Threading.CancellationToken = Nothing,
                                          Optional OcrCleanupMode As OcrMarkdownCleanupMode = OcrMarkdownCleanupMode.None,
                                          Optional OcrBatchPages As System.Int32 = -1,
-                                         Optional MarkdownPreparation As PdfMarkdownPreparationOptions = Nothing) As System.Threading.Tasks.Task(Of FileReadResult)
+                                         Optional MarkdownPreparation As PdfMarkdownPreparationOptions = Nothing,
+                                         Optional LegacyWordRangeReader As Global.SharedLibrary.SharedLibrary.SharedMethods.WordRangeTextReader = Nothing) As System.Threading.Tasks.Task(Of FileReadResult)
 
         Dim result As New FileReadResult()
         Dim filePath As String = ""
@@ -88,6 +89,7 @@ Partial Public Class ThisAddIn
                 CancellationToken.ThrowIfCancellationRequested()
                 Dim ext As String = IO.Path.GetExtension(filePath).ToLowerInvariant()
                 Dim FromFile As String = ""
+                Dim wordReadError As System.String = Nothing
 
                 Select Case ext
                     Case ".txt", ".ini", ".csv", ".log", ".json", ".xml", ".html", ".htm",
@@ -98,12 +100,12 @@ Partial Public Class ThisAddIn
                         FromFile = ReadRtfAsText(filePath)
                     Case ".doc"
                         If INI_AllowLegacyDocFiles Then
-                            FromFile = ReadWordDocument(filePath)
+                            FromFile = ReadWordDocument(filePath, ReturnErrorInsteadOfEmpty:=True, readError:=wordReadError, ReadRangeText:=LegacyWordRangeReader)
                         Else
                             FromFile = "Error: File type not supported (disabled for security)."
                         End If
                     Case ".docx"
-                        FromFile = ReadDocxSandboxed(filePath, ReturnMarkdown)
+                        FromFile = ReadDocxSandboxed(filePath, ReturnMarkdown, wordReadError)
                     Case ".xlsx"
                         FromFile = ReadXlsxSandboxed(filePath, Silent, AskWorksheetSelection)
                         If String.Equals(FromFile, XlsxSelectionCancelledMarker, StringComparison.Ordinal) Then
@@ -159,6 +161,10 @@ Partial Public Class ThisAddIn
                         End If
                 End Select
 
+                If LegacyWordRangeReader IsNot Nothing AndAlso Not System.String.IsNullOrEmpty(wordReadError) Then
+                    Global.SharedLibrary.SharedLibrary.RiCrashLogger.Breadcrumb("WordChat", "Word context file could not be read: " & wordReadError)
+                    Return result
+                End If
                 If FromFile.StartsWith("Error") AndAlso Len(FromFile) < 100 AndAlso Not Silent Then
                     ShowCustomMessageBox(FromFile)
                     result.Content = ""

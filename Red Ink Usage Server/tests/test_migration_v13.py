@@ -39,11 +39,11 @@ class AutomaticMigrationTests(unittest.TestCase):
             con.execute('PRAGMA user_version=2')
         store = Store(self.settings, clock=self.clock)  # no explicit upgrade step
         with store.connect() as con:
-            self.assertEqual(con.execute('PRAGMA user_version').fetchone()[0], 3)
+            self.assertEqual(con.execute('PRAGMA user_version').fetchone()[0], CURRENT_SCHEMA_VERSION)
             self.assertEqual(con.execute('SELECT value FROM server_meta WHERE key=\'last_ingest_utc\'').fetchone()[0], '2026-09-15T00:00:00Z')
             self.assertEqual(con.execute('SELECT report_id FROM report_snapshots').fetchone()[0], 'RI-old')
             self.assertEqual(con.execute('PRAGMA foreign_key_check').fetchall(), [])
-        backups = list((self.root/'backups').glob('usage-before-schema-v2-to-v3-*.sqlite3'))
+        backups = list((self.root/'backups').glob('usage-before-schema-v2-to-v4-*.sqlite3'))
         self.assertEqual(len(backups), 1)
         with closing(sqlite3.connect(backups[0])) as con, con:
             self.assertEqual(con.execute('PRAGMA user_version').fetchone()[0], 2)
@@ -80,7 +80,7 @@ class AutomaticMigrationTests(unittest.TestCase):
         store = Store(self.settings, clock=self.clock)
         with store.connect() as con:
             self.assertEqual(con.execute('SELECT value FROM server_meta WHERE key=\'k\'').fetchone()[0], 'v')
-        self.assertEqual(len(list((self.root/'backups').glob('usage-before-schema-v0-to-v3-*.sqlite3'))), 1)
+        self.assertEqual(len(list((self.root/'backups').glob('usage-before-schema-v0-to-v4-*.sqlite3'))), 1)
 
     def test_future_schema_never_downgrades(self):
         db = self.root/'usage.sqlite3'
@@ -111,7 +111,7 @@ class AutomaticMigrationTests(unittest.TestCase):
             self.assertEqual(con.execute('PRAGMA user_version').fetchone()[0], 2)
             self.assertEqual(con.execute('SELECT value FROM server_meta WHERE key=\'existing\'').fetchone()[0], 'safe')
             self.assertFalse(con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='host_usage'").fetchone())
-        self.assertEqual(len(list((self.root/'backups').glob('usage-before-schema-v2-to-v3-*.sqlite3'))), 1)
+        self.assertEqual(len(list((self.root/'backups').glob('usage-before-schema-v2-to-v4-*.sqlite3'))), 1)
 
 
 if __name__ == '__main__':

@@ -11036,7 +11036,7 @@
         "Name" = "8:Microsoft Visual Studio"
         "ProductName" = "8:Red Ink for Word"
         "ProductCode" = "8:{FEE95513-508B-4D81-9156-8EEE93F1AC6F}"
-        "PackageCode" = "8:{FFA56836-772A-40BF-8B50-ADA303F5037C}"
+        "PackageCode" = "8:{2B3433E9-58CD-4898-B026-2665E7C58009}"
         "UpgradeCode" = "8:{52F7F33F-6755-4AD4-BDD5-5A15E2B9303D}"
         "AspNetVersion" = "8:4.0.30319.0"
         "RestartWWWService" = "11:FALSE"

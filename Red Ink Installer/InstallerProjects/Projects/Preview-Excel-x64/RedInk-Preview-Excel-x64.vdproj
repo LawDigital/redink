@@ -10426,7 +10426,7 @@
         "Name" = "8:Microsoft Visual Studio"
         "ProductName" = "8:Red Ink for Excel (Preview)"
         "ProductCode" = "8:{E323FA8B-DDD6-400A-831D-3E26A7DFE755}"
-        "PackageCode" = "8:{3F2894E9-CA00-4C7F-8580-84D51F87F619}"
+        "PackageCode" = "8:{63BBA39E-8403-46CC-BA9E-F595FE8F7F87}"
         "UpgradeCode" = "8:{C2D31931-C219-420A-A421-F83793E23853}"
         "AspNetVersion" = "8:4.0.30319.0"
         "RestartWWWService" = "11:FALSE"

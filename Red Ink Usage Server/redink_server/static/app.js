@@ -138,7 +138,9 @@
       const count = Math.max(0, record.users || 0);
       const height = count / maximum * 102;
       const bar = document.createElementNS(svg.namespaceURI, "rect");
-      for (const [name, value] of Object.entries({x: 52+i*unit, y: 120-height, width: Math.max(8, unit-9), height: Math.max(0,height), rx: 3, fill: record.month === month ? "#cf2e2e" : "#5b2f30"})) bar.setAttribute(name, value);
+      for (const [name, value] of Object.entries({x: 52+i*unit, y: 120-height, width: Math.max(8, unit-9), height: Math.max(0,height), rx: 3})) bar.setAttribute(name, value);
+      bar.classList.add("monthly-bar");
+      if (record.month === month) bar.classList.add("current");
       svg.append(bar);
       const valueLabel = document.createElementNS(svg.namespaceURI, "text");
       valueLabel.textContent = String(count);
@@ -174,7 +176,7 @@
   }
 
   function renderRanking(id, records, key, transform = (value) => value) {
-    const box = byId(id);
+    const box = typeof id === "string" ? byId(id) : id;
     box.replaceChildren();
     const rows = Array.isArray(records) ? records : [];
     if (!rows.length) {
@@ -284,6 +286,41 @@
     target.setAttribute("aria-label", days.map(exactText).join("; "));
   }
 
+  function renderObservedAddinVersions(versionInfo, records) {
+    const box = byId("log-versions-detailed");
+    box.replaceChildren();
+    const versions = Array.isArray(records) ? records : [];
+    const totals = new Map((versionInfo.users_by_addin || [])
+      .filter(r => Object.prototype.hasOwnProperty.call(hostNames, r.host))
+      .map(r => [r.host, r.count]));
+    // Keep all Office host headings when the server returned an all-host view;
+    // the selected-host view intentionally contains only its one host.
+    if (!totals.size && versions.length) {
+      for (const host of Object.keys(hostNames)) {
+        const count = versions.filter(r => r.host === host).reduce((sum,r) => sum + (r.count || 0), 0);
+        if (count) totals.set(host, count);
+      }
+    }
+    for (const host of Object.keys(hostNames)) {
+      if (!totals.has(host)) continue;
+      const section = element("section", "version-addin-group");
+      section.setAttribute("aria-label", `${hostNames[host]} add-in versions`);
+      const heading = element("div", "version-addin-header");
+      heading.append(element("h3", "version-addin-title", hostNames[host]),
+        element("span", "version-addin-count",
+          `${formatNumber(totals.get(host))} distinct ${totals.get(host) === 1 ? "user" : "users"}`));
+      section.append(heading);
+      const list = element("div", "rank-list");
+      const group = versions.filter(r => r.host === host && r.version);
+      if (group.length) renderRanking(list, group, "version");
+      else list.append(element("p", "version-empty", "No versions observed in this window."));
+      section.append(list);
+      box.append(section);
+    }
+    if (!box.children.length)
+      box.append(element("p", "empty-state", "No add-in versions observed in this window."));
+  }
+
   function renderLogDetails(data) {
     const sourceRows = Array.isArray(data.source_status) ? data.source_status : [];
     text("log-invocations",formatNumber(data.invocations));
@@ -308,7 +345,11 @@
     renderRanking("log-detail-tools", (data.tool_details||[]).slice(0,40).map(r=>({...r,feature:r.kind+" · "+r.feature})), "feature");
     renderRanking("log-legacy",data.legacy_markers || [],"feature");
     renderRanking("log-agent-functions",data.agents || [],"feature");
-    renderRanking("log-versions-detailed",(data.versions||[]).filter(r=>r.version).slice(0,15),"version");
+    const versionInfo=data.version_summary || {};
+    text("log-version-note",`Observed ${versionInfo.from_date || "?"} to ${versionInfo.to_date || "?"} (client-local): one latest version per log user and Office add-in. Counts are distinct users, not events or billable licences; missing logs may undercount.`);
+    text("log-version-host-totals",(versionInfo.users_by_addin || []).map(r =>
+      `${hostNames[r.host] || r.host}: ${formatNumber(r.count)} distinct users`).join(" · ") || "No versions observed in this window.");
+    renderObservedAddinVersions(versionInfo, data.versions);
     const hosts=byId("log-hosts-detailed");
     hosts.replaceChildren();
     for(const h of data.hosts || []) {
@@ -354,7 +395,7 @@
     const controller=new AbortController();
     logController=controller;
     const timeout=setTimeout(()=>controller.abort(),20000);
-    const query=new URLSearchParams({period:byId("log-range").value,host:byId("log-host").value});
+    const query=new URLSearchParams({period:byId("log-range").value,host:byId("log-host").value,version_period:byId("log-version-range").value});
     byId("download-log-analysis").href="/api/log-analysis.csv?"+query;
     try {
       const response=await fetch("/api/log-analysis?"+query,{credentials:"same-origin",cache:"no-store",signal:controller.signal,headers:{Accept:"application/json"}});
@@ -821,6 +862,7 @@
   byId("refresh").addEventListener("click", () => { refresh(); refreshLogs(); });
   byId("log-range").addEventListener("change", refreshLogs);
   byId("log-host").addEventListener("change", refreshLogs);
+  byId("log-version-range").addEventListener("change", refreshLogs);
   byId("log-show-more").addEventListener("click", () => {showAllLogFunctions = !showAllLogFunctions; if(lastLogData) renderLogDetails(lastLogData);});
   window.addEventListener("hashchange", changeView);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) {refresh(); refreshLogs(); refreshUserStats();} });
