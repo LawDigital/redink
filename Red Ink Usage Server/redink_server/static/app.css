@@ -86,3 +86,16 @@ button:disabled{cursor:progress;opacity:.75}
 .history-chart .monthly-bar{fill:#cf2e2e}
 .history-chart .monthly-bar.current{fill:#ff5555}
 .history-panel .legend i{background:#cf2e2e}
+
+
+/* Additional independent internal static websites; native Settings typography. */
+.websites-list{display:grid;gap:14px;margin:12px 0}
+.website-card{border:1px solid var(--line);border-radius:10px;padding:14px;min-width:0}
+.website-card legend{padding:0 8px;color:var(--brand-red);font-weight:700}
+.website-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr));gap:10px 16px}
+.website-grid input[type=checkbox]{width:20px;min-height:20px;accent-color:var(--brand-red)}
+.website-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+
+.website-status{align-self:center;color:var(--muted);font-size:.85rem;max-width:100%;overflow-wrap:anywhere}
+
+.website-url{display:block;overflow-wrap:anywhere;margin-top:10px;font-size:.84rem;color:var(--muted)}

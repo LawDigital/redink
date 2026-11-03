@@ -1907,7 +1907,9 @@ Partial Public Class ThisAddIn
                                     recoveryScopeKey:=recoveryScopeKey,
                                     allowRetryScopeRebinding:=True,
                                     retryCorrelationArguments:=tc.Arguments,
-                                    retryCorrelationAllowedArgumentNames:=GetToolParameterSchemas(toolConfig).Keys)
+                                    retryCorrelationAllowedArgumentNames:=GetToolParameterSchemas(toolConfig).Keys,
+                                    retryCorrelationRequiredArgumentNames:=GetToolRequiredParameters(toolConfig),
+                                    retryCorrelationDisallowsAdditionalArguments:=ToolSchemaDisallowsAdditionalProperties(toolConfig))
                             End If
 
                             context.PendingContinuationGuardPrompt =
@@ -2570,18 +2572,21 @@ Partial Public Class ThisAddIn
                                 ' declared outputs into the Word host's preferred writable root before the
                                 ' bounded delta is evaluated. The path remains legacy telemetry only; no
                                 ' opaque identity or Final state is inferred from it.
-                                legacyNormalizedExcludedPaths =
-                                    WordNormalizeDeclaredLegacyOutputsToPreferredRoot(
-                                        tc.ToolName,
-                                        toolResponse.Response,
-                                        context.SequencingState)
+                                If toolResponse.HostPublishedOutputPaths Is Nothing Then
+                                    legacyNormalizedExcludedPaths =
+                                        WordNormalizeDeclaredLegacyOutputsToPreferredRoot(
+                                            tc.ToolName,
+                                            toolResponse.Response,
+                                            context.SequencingState)
+                                End If
 
                                 SharedLibrary.Agents.ArtifactDelivery.RegisterLegacyCompatibilityFileDelta(
                                     context.SequencingState,
                                     tc.ToolName,
                                     legacyCompatibilityRoots,
                                     legacyCompatibilitySnapshot,
-                                    excludedPaths:=legacyNormalizedExcludedPaths)
+                                    excludedPaths:=legacyNormalizedExcludedPaths,
+                                    hostPublishedOutputPaths:=toolResponse.HostPublishedOutputPaths)
                             End If
                         End If
                         If toolResponse IsNot Nothing AndAlso
@@ -2882,7 +2887,7 @@ Partial Public Class ThisAddIn
                                 context.SequencingState.NoteToolFailure(
                                     tc.ToolName,
                                     "repeated_identical_tool_execution",
-                                    "The same successful tool execution repeated without progress and the host circuit breaker terminated the run.",
+                                    "The same tool call returned the same outcome repeatedly without progress and the host circuit breaker terminated the run.",
                                     terminal:=True,
                                     recoveryScopeKey:=recoveryScopeKey)
                                 context.SequencingState.FinalResponseOrigin = "host_generated"
@@ -3669,7 +3674,8 @@ Partial Public Class ThisAddIn
                                         SharedLibrary.Agents.ToolCallSequencing.BuildRequiredMemoryGroundingRepairPrompt(context.SequencingState),
                                         SharedLibrary.Agents.ToolCallSequencing.BuildActiveToolingRepairPrompt(
                                             context.SequencingState,
-                                            turnValidation.InvalidReason))
+                                            turnValidation.InvalidReason,
+                                            turnValidation))
                                 If SharedLibrary.Agents.ToolCallSequencing.TryBeginFooterOnlyRepair(
                                     context.SequencingState, currentResponse, turnValidation.InvalidReason) Then
                                     context.PendingContinuationGuardPrompt = SharedLibrary.Agents.ToolCallSequencing.BuildFooterOnlyRepairPrompt()
@@ -3688,7 +3694,7 @@ Partial Public Class ThisAddIn
                                         "Your previous turn was rejected because it violated the active-tooling response contract.")
 
                                 context.LogWarn(
-                                    $"Invalid active-tooling turn rejected; {SharedLibrary.Agents.ToolCallSequencing.BuildFinalizationDiagnostic(context.SequencingState, If(turnValidation.InvalidReason, "invalid_turn"))}; repairAttempt={context.PrematureTextRetryCount}/{ToolExecutionContext.MaxContinuationRetries}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}; lastSuccessfulTool={If(context.SequencingState?.LastSuccessfulToolCall, "")}; unresolvedToolFailure={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure, "true", "false")}; host={context.HostKind}")
+                                    $"Invalid active-tooling turn rejected; {SharedLibrary.Agents.ToolCallSequencing.BuildFinalizationDiagnostic(context.SequencingState, If(turnValidation.InvalidReason, "invalid_turn"), turnValidation)}; repairAttempt={context.PrematureTextRetryCount}/{ToolExecutionContext.MaxContinuationRetries}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}; lastSuccessfulTool={If(context.SequencingState?.LastSuccessfulToolCall, "")}; unresolvedToolFailure={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure, "true", "false")}; host={context.HostKind}")
 
                                 Continue While
                             End If
@@ -3713,7 +3719,7 @@ Partial Public Class ThisAddIn
                             End If
 
                             context.LogWarn(
-                                $"Active-tooling repair exhausted; returning host-generated blocked message. {SharedLibrary.Agents.ToolCallSequencing.BuildFinalizationDiagnostic(context.SequencingState, If(turnValidation.InvalidReason, "invalid_turn"))}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}; unresolvedToolFailure={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure, "true", "false")}; host={context.HostKind}")
+                                $"Active-tooling repair exhausted; returning host-generated blocked message. {SharedLibrary.Agents.ToolCallSequencing.BuildFinalizationDiagnostic(context.SequencingState, If(turnValidation.InvalidReason, "invalid_turn"), turnValidation)}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}; unresolvedToolFailure={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure, "true", "false")}; host={context.HostKind}")
 
                             Exit While
                     End Select

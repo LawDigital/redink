@@ -22,6 +22,15 @@ from .config import ConfigError, _KNOWN, DEFAULT_TOML, load_settings, private_wr
 _LOCK = threading.RLock()
 
 
+def read_configuration_text(path: Path) -> str:
+    """Read TOML without universal-newline translation.
+
+    The exact text is needed to preserve Windows CRLF and to restore the
+    original bytes if validation or a live listener transition fails.
+    """
+    return path.read_bytes().decode('utf-8')
+
+
 def encrypt_secret(credentials: dict, value: str) -> str:
     return Fernet(credentials['configuration_encryption_key'].encode('ascii')).encrypt(value.encode('utf-8')).decode('ascii')
 
@@ -49,22 +58,43 @@ def value_toml(value):
         return json.dumps(value, ensure_ascii=False)
     if isinstance(value, list) and all(isinstance(item, str) for item in value):
         return '[' + ', '.join(value_toml(item) for item in value) + ']'
+    if isinstance(value, list) and all(isinstance(item, dict) for item in value):
+        required = {'name', 'enabled', 'host', 'port', 'path', 'directory', 'https', 'spa_fallback'}
+        if any(set(item) != required for item in value):
+            raise ConfigError('Website entries are incomplete or contain unknown fields.')
+        # Explicit keys and scalar types are validated again by load_settings;
+        # this serializer never emits arbitrary TOML tokens from user values.
+        return '[' + ', '.join('{ ' + ', '.join(key + ' = ' + value_toml(item[key]) for key in (
+            'name', 'enabled', 'host', 'port', 'path', 'directory', 'https', 'spa_fallback')) + ' }'
+            for item in value) + ']'
     raise ConfigError('Unsupported value type in configuration editor.')
 
 
 def replace_values(original: str, updates: dict) -> str:
-    """Retain existing comments and section order; change only named values."""
+    """Retain comments, section order, and original line endings.
+
+    Windows TOML files normally use CRLF. Text-mode reads transparently
+    convert those to LF, which silently corrupts byte-exact rollback.
+    """
     lines = original.splitlines(keepends=True)
+    first_ending = re.search(r'\r\n|\n|\r', original)
+    newline = first_ending.group(0) if first_ending else '\n'
     done = set()
     current = None
     output = []
+
+    def append_entry(key, value):
+        if output and not output[-1].endswith(('\r', '\n')):
+            output.append(newline)
+        output.append(f'{key} = {value_toml(value)}{newline}')
+
     for line in lines:
         header = re.match(r'^\s*\[([A-Za-z0-9_]+)\]\s*(?:#.*)?$', line.rstrip('\r\n'))
         if header:
             if current:
                 for key, value in updates.get(current, {}).items():
                     if (current, key) not in done:
-                        output.append(f'{key} = {value_toml(value)}\n')
+                        append_entry(key, value)
                         done.add((current, key))
             current = header.group(1)
             output.append(line)
@@ -74,28 +104,34 @@ def replace_values(original: str, updates: dict) -> str:
             key = match.group(2)
             if (current, key) in done:
                 raise ConfigError('Duplicate configuration key: ' + current + '.' + key)
-            output.append(f'{match.group(1)}{key}{match.group(3)}{value_toml(updates[current][key])}\n')
+            # Keep the line's exact separator, including no final newline.
+            ending = ('\r\n' if line.endswith('\r\n') else
+                      '\n' if line.endswith('\n') else
+                      '\r' if line.endswith('\r') else '')
+            output.append(f'{match.group(1)}{key}{match.group(3)}{value_toml(updates[current][key])}{ending}')
             done.add((current, key))
         else:
             output.append(line)
     if current:
         for key, value in updates.get(current, {}).items():
             if (current, key) not in done:
-                output.append(f'{key} = {value_toml(value)}\n')
+                append_entry(key, value)
                 done.add((current, key))
     for section, items in updates.items():
         if any((section, key) not in done for key in items):
-            output.append(f'\n[{section}]\n')
+            if output and not output[-1].endswith(('\r', '\n')):
+                output.append(newline)
+            output.append(f'{newline}[{section}]{newline}')
             for key, value in items.items():
                 if (section, key) not in done:
-                    output.append(f'{key} = {value_toml(value)}\n')
+                    append_entry(key, value)
     result = ''.join(output)
     tomllib.loads(result)
     return result
 
 
 def configuration_document(settings) -> dict:
-    values = tomllib.loads((settings.data_dir / 'server.toml').read_text(encoding='utf-8'))
+    values = tomllib.loads(read_configuration_text(settings.data_dir / 'server.toml'))
     defaults = tomllib.loads(DEFAULT_TOML)
     # Older installations did not have every section/key. Present all keys,
     # while preserving the existing TOML text until explicitly edited.
@@ -123,7 +159,7 @@ def update_configuration(settings, updates: dict):
             raise ConfigError('Use the separate authenticated sign-in policy control.')
     path = settings.data_dir / 'server.toml'
     with _LOCK:
-        old = path.read_text(encoding='utf-8')
+        old = read_configuration_text(path)
         new = replace_values(old, updates)
         temporary = path.parent / ('.settings-' + secrets.token_hex(8) + '.tmp')
         private_write(temporary, new)
@@ -140,7 +176,7 @@ def update_configuration(settings, updates: dict):
             temporary.unlink(missing_ok=True)
     # The API decides whether a running listener needs to be rebound. This
     # lower-level editor never promises that a network change is already live.
-    restart_required = bool(set(updates) & {'server', 'tls', 'collection'})
+    restart_required = bool(set(updates) & {'server', 'tls', 'collection', 'websites'})
     return {'saved': True, 'restart_required': restart_required}
 
 
@@ -169,7 +205,7 @@ def update_passwordless(settings, enabled: bool):
     value = encrypt_secret(settings.credentials, 'localhost-only-v1') if enabled else ''
     with _LOCK:
         path = settings.data_dir / 'server.toml'
-        old = path.read_text(encoding='utf-8')
+        old = read_configuration_text(path)
         new = replace_values(old, {'authentication': {'passwordless_mode': value}})
         tmp = path.parent / ('.auth-' + secrets.token_hex(8) + '.tmp')
         private_write(tmp, new)

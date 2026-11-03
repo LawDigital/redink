@@ -1727,7 +1727,7 @@ Namespace SharedLibrary
             ' Determine if a setting is a Boolean based on its key
             Dim booleanSettings As New List(Of String) From {
         "DoubleS", "NoEmDash", "Clean", "MarkdownBubbles", "KeepFormat1", "MarkdownConvert", "ReplaceText1", "SimpleMenuOverride",
-        "KeepFormat2", "KeepParaFormatInline", "ReplaceText2", "DoMarkupOutlook", "DoMarkupWord", "SimpleMenuDefault", "UseHostColorOutlook",
+        "KeepFormat2", "KeepParaFormatInline", "ReplaceText2", "DoMarkupOutlook", "DoMarkupWord", "WordCommentSelectionTracking", "SimpleMenuDefault", "UseHostColorOutlook",
         "APIDebug", "Crashlog", "AutoPilotAutoStart", "AutoPilotSchedulerLocalChat", "ISearch_Approve", "ISearch", "Lib", "ContextMenu", "NoLocalConfig", "SecondAPI", "APIEncrypted", "APIEncrypted_2",
         "OAuth2", "OAuth2_2", "PromptLib", "Ignore", "ToolingLogWindow", "ToolingDryRun", "ToolResponseCompactOnlyAfterEmpty", "ForceDrawioLocal", "AllowLegacyDocFiles", "JsRunDisable", "BrowserToolsDisable", "PlayWrightUseLocalCache", "EnablePrivacyForSearch",
         "DictionarySegmentPrompt", "UpdateIni", "UpdateIniAllowRemote", "UpdateIniNoSignature", "UpdateIniSilentLog", "NoHelperDownload", "LicenseCounterAnon", "KnowledgeStoreUseLLMIndex", "KnowledgeStoreBackgroundIndexing", "SemanticArchiveBackgroundIndexingEnabled", "SemanticArchiveBackgroundIndexing", "SemanticArchivePermissionMaintenanceEnabled"
@@ -1856,6 +1856,8 @@ Namespace SharedLibrary
                     Return context.INI_DoMarkupOutlook.ToString()
                 Case "DoMarkupWord"
                     Return context.INI_DoMarkupWord.ToString()
+                Case "WordCommentSelectionTracking"
+                    Return context.INI_WordCommentSelectionTracking.ToString()
                 Case "ChunkOCR"
                     Return context.INI_ChunkOCR.ToString()
                 Case "MarkupMethodHelper"
@@ -2330,6 +2332,8 @@ Namespace SharedLibrary
                     context.INI_DoMarkupOutlook = Boolean.Parse(value)
                 Case "DoMarkupWord"
                     context.INI_DoMarkupWord = Boolean.Parse(value)
+                Case "WordCommentSelectionTracking"
+                    context.INI_WordCommentSelectionTracking = System.Boolean.Parse(value)
                 Case "MarkupMethodHelper"
                     context.INI_MarkupMethodHelper = Integer.Parse(value)
                 Case "MarkupMethodWord"
@@ -2882,6 +2886,7 @@ Namespace SharedLibrary
                     {"ReplaceText2Override", context.INI_ReplaceText2Override},
                     {"DoMarkupOutlook", context.INI_DoMarkupOutlook.ToString()},
                     {"DoMarkupWord", context.INI_DoMarkupWord.ToString()},
+                    {"WordCommentSelectionTracking", context.INI_WordCommentSelectionTracking.ToString()},
                     {"MarkupMethodOutlook", context.INI_MarkupMethodOutlook.ToString()},
                     {"MarkupDiffCap", context.INI_MarkupDiffCap.ToString()},
                     {"MarkupRegexCap", context.INI_MarkupRegexCap.ToString()},
@@ -3459,6 +3464,7 @@ Namespace SharedLibrary
                 {"ReplaceText2", DEFAULT_BOOL_REPLACETEXT2},
                 {"DoMarkupOutlook", DEFAULT_BOOL_DOMARKUPOUTLOOK},
                 {"DoMarkupWord", DEFAULT_BOOL_DOMARKUPWORD},
+                {"WordCommentSelectionTracking", DEFAULT_BOOL_WORDCOMMENTSELECTIONTRACKING},
                 {"ContextMenu", DEFAULT_BOOL_CONTEXTMENU},
                 {"ISearch", DEFAULT_BOOL_ISEARCH_ENABLED},
                 {"ToolingLogWindow", DEFAULT_BOOL_TOOLINGLOGWINDOW},
@@ -3743,6 +3749,7 @@ Namespace SharedLibrary
                     {"LogoPathMedium", context.INI_LogoPathMedium},
                     {"LogoPathLarge", context.INI_LogoPathLarge},
                     {"NoHelperDownload", context.INI_NoHelperDownload.ToString()},
+                    {"WordCommentSelectionTracking", context.INI_WordCommentSelectionTracking.ToString()},
                     {"AutoPilot", context.INI_AutoPilot},
                     {"ToolingLogWindow", context.INI_ToolingLogWindow.ToString()},
                     {"ToolingDryRun", context.INI_ToolingDryRun.ToString()},
@@ -4570,6 +4577,7 @@ Namespace SharedLibrary
             variableValues.Add("RestrictedModelAccessCode", context.INI_RestrictedModelAccessCode)
             variableValues.Add("DoMarkupOutlook", context.INI_DoMarkupOutlook)
             variableValues.Add("DoMarkupWord", context.INI_DoMarkupWord)
+            variableValues.Add("WordCommentSelectionTracking", context.INI_WordCommentSelectionTracking)
             variableValues.Add("ChunkOCR", context.INI_ChunkOCR)
             variableValues.Add("M365ClientID", context.INI_M365ClientId)
             variableValues.Add("M365TenantID", context.INI_M365TenantId)
@@ -4907,6 +4915,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("RestrictedModelAccessCode") Then context.INI_RestrictedModelAccessCode = CStr(updatedValues("RestrictedModelAccessCode"))
                 If updatedValues.ContainsKey("DoMarkupOutlook") Then context.INI_DoMarkupOutlook = CBool(updatedValues("DoMarkupOutlook"))
                 If updatedValues.ContainsKey("DoMarkupWord") Then context.INI_DoMarkupWord = CBool(updatedValues("DoMarkupWord"))
+                If updatedValues.ContainsKey("WordCommentSelectionTracking") Then context.INI_WordCommentSelectionTracking = CBool(updatedValues("WordCommentSelectionTracking"))
                 If updatedValues.ContainsKey("ChunkOCR") Then context.INI_ChunkOCR = CInt(updatedValues("ChunkOCR"))
                 If updatedValues.ContainsKey("SP_Translate") Then context.SP_Translate = CStr(updatedValues("SP_Translate"))
                 If updatedValues.ContainsKey("SP_Translate_Multi") Then context.SP_Translate_Multi = CStr(updatedValues("SP_Translate_Multi"))

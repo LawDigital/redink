@@ -662,6 +662,21 @@ Namespace Agents
                 If unexpected IsNot Nothing Then
                     retainDiagnostics = True
                     SafeLog(logDiag, unexpected.ToString())
+                    ' Diagnostics keep the exception detail. Only a recognized protocol
+                    ' code from the typed client exception may leave this boundary.
+                    Dim clientFailure As RedInkPythonAgentExecutionException = TryCast(unexpected, RedInkPythonAgentExecutionException)
+                    If clientFailure IsNot Nothing Then
+                        Dim phase As System.String = Nothing
+                        Select Case clientFailure.ErrorCode
+                            Case "BROKER_START_FAILED"
+                                phase = "execute_startup"
+                            Case "BROKER_EXITED_WITHOUT_RESPONSE"
+                                phase = "execute"
+                            Case "BROKER_RESPONSE_INVALID"
+                                phase = "validation"
+                        End Select
+                        If phase IsNot Nothing Then Return CreateLocalFailure(clientFailure.ErrorCode, "failed", FriendlyMessage(clientFailure.ErrorCode, "failed"), phase)
+                    End If
                     Dim trustException As RedInkPythonAgentExecutableTrustException = TryCast(unexpected, RedInkPythonAgentExecutableTrustException)
                     If trustException IsNot Nothing Then
                         Return CreateLocalFailure(trustException.Code, "failed", FriendlyMessage(trustException.Code, "failed"))
@@ -1513,7 +1528,8 @@ Namespace Agents
             Return result
         End Function
 
-        Private Shared Function CreateLocalFailure(code As System.String, status As System.String, message As System.String) As PythonExecuteToolCoreResult
+        Private Shared Function CreateLocalFailure(code As System.String, status As System.String, message As System.String,
+                                                   Optional phase As System.String = "initializing") As PythonExecuteToolCoreResult
             Dim diagnosticId As System.Guid = System.Guid.NewGuid()
             Dim payload As New Newtonsoft.Json.Linq.JObject(
             New Newtonsoft.Json.Linq.JProperty("status", status),
@@ -1525,7 +1541,7 @@ Namespace Agents
             New Newtonsoft.Json.Linq.JProperty("output_files", New Newtonsoft.Json.Linq.JArray()),
             New Newtonsoft.Json.Linq.JProperty("error", New Newtonsoft.Json.Linq.JObject(
                 New Newtonsoft.Json.Linq.JProperty("code", code),
-                New Newtonsoft.Json.Linq.JProperty("phase", "initializing"),
+                New Newtonsoft.Json.Linq.JProperty("phase", phase),
                 New Newtonsoft.Json.Linq.JProperty("retryable", False),
                 New Newtonsoft.Json.Linq.JProperty("source", Newtonsoft.Json.Linq.JValue.CreateNull()),
                 New Newtonsoft.Json.Linq.JProperty("host_operation", Newtonsoft.Json.Linq.JValue.CreateNull()),
@@ -1551,8 +1567,12 @@ Namespace Agents
                     Return "Operation was cancelled."
                 Case "SESSION_TIMEOUT", "WORKER_TIMEOUT", "HOST_CALL_TIMEOUT"
                     Return "Python execution timed out."
-                Case "EXECUTABLE_NOT_FOUND"
+                Case "EXECUTABLE_NOT_FOUND", "BROKER_START_FAILED"
                     Return "The secure Python executor is unavailable."
+                Case "BROKER_EXITED_WITHOUT_RESPONSE"
+                    Return "The secure Python executor stopped without a response."
+                Case "BROKER_RESPONSE_INVALID"
+                    Return "The secure Python executor returned an invalid response."
                 Case "EXECUTABLE_HASH_MISMATCH", "EXECUTABLE_SIGNATURE_INVALID", "EXECUTABLE_SIGNER_MISMATCH"
                     Return "The secure Python executor failed authenticity verification."
                 Case "CONFIGURATION_INVALID", "REQUEST_INVALID"

@@ -22,7 +22,7 @@ from werkzeug.security import check_password_hash
 from . import __version__
 from .config import Settings, token_hash, private_write, ConfigError, load_settings
 from .settings_ui import (configuration_document, update_configuration, update_passwordless,
-                          is_passwordless, is_loopback_request, encrypt_secret, decrypt_secret, apply_live_settings, restore_configuration)
+                          is_passwordless, is_loopback_request, encrypt_secret, decrypt_secret, apply_live_settings, restore_configuration, read_configuration_text)
 from .user_analytics import function_users, license_users
 
 from .protocol import ProtocolError, normalize_event, parse_legacy_path
@@ -272,6 +272,77 @@ def create_app(settings: Settings, store: Store | None = None) -> Flask:
         return jsonify(supervisor.status() if supervisor is not None else
                        {'status': 'unmanaged', 'message': 'No production listener supervisor is active.'})
 
+    def save_configuration_updates(data):
+        """Shared save path for the global form and a single website.
+
+        Both follow exactly the same validation, listener rebind and rollback
+        protocol; no separate partially-applied website configuration.
+        """
+        with runtime_settings_lock:
+            supervisor = app.extensions.get('redink_listener')
+            if supervisor is not None and supervisor.is_pending():
+                return jsonify(error='A listener update is in progress. Wait for its result before saving again.'), 409
+            previous_toml = read_configuration_text(settings.data_dir / 'server.toml')
+            result = update_configuration(settings, data)
+            try:
+                fresh = load_settings(settings.data_dir)
+                if fresh.host not in ('127.0.0.1', 'localhost', '::1') and not fresh.tls_enabled and not fresh.allow_insecure_remote:
+                    raise ConfigError('A remote listener requires HTTPS or explicit allow_insecure_remote=true.')
+                if fresh.tls_enabled:
+                    from .tls import validate_tls
+                    validate_tls(fresh)
+            except Exception:
+                restore_configuration(settings.data_dir, previous_toml)
+                raise
+            # Scanner/publishing/billing/retention are live-safe. Security,
+            # binding and TLS changes are committed by the supervisor only
+            # after successful listener preparation; failure rolls back.
+            live_settings, changes = apply_live_settings(settings, fresh, data)
+            network_changed = any(getattr(fresh, field) != getattr(settings, field) for field in (
+                'host', 'port', 'threads', 'trusted_hosts', 'secure_cookies',
+                'allow_insecure_remote', 'tls_enabled', 'tls_certificate',
+                'tls_private_key', 'tls_key_password_env', 'maximum_request_bytes', 'websites'))
+            if network_changed and supervisor is not None:
+                if not supervisor.reconfigure(fresh, previous_toml):
+                    restore_configuration(settings.data_dir, previous_toml)
+                    return jsonify(error='Listener update could not be scheduled; no configuration was changed.'), 409
+                # Safe settings are also applied after a successful rebind.
+                applied_now = []
+                listener_update = 'pending'
+                restart_required = False
+            elif network_changed:
+                # Flask's test client has no active listening socket. Do not
+                # claim the host/port has actually changed in that mode.
+                apply_runtime_settings(live_settings, scan_now='imports' in data)
+                applied_now = changes
+                listener_update = 'unmanaged'
+                restart_required = True
+            else:
+                apply_runtime_settings(fresh, scan_now='imports' in data)
+                applied_now = sorted(set(changes) | set(data.get('collection', {})))
+                listener_update = 'not_needed'
+                restart_required = False
+            active_for_warnings = fresh
+            warnings = []
+            if 'imports' in data:
+                for name, roots in (('LogPath', active_for_warnings.log_paths), ('LicenseCounter', active_for_warnings.counter_paths)):
+                    for root in roots:
+                        if not root.exists():
+                            warnings.append(f'{name} source is not accessible: {root}. The scanner will retry when available.')
+            if 'publishing' in data:
+                folder = active_for_warnings.config_directory
+                if not folder.is_dir():
+                    warnings.append(f'Publishing folder does not exist: {folder}. Create it and place the INI files there.')
+                else:
+                    missing = [name for name in CONFIG_FILES if not (folder / name).is_file()]
+                    if missing:
+                        warnings.append('Publishing folder has no ' + ', '.join(missing) + ' yet.')
+            result.update(restart_required=restart_required, listener_update=listener_update,
+                          applied_now=applied_now, warnings=warnings,
+                          scan_scheduled=bool('imports' in data and not network_changed and app.extensions.get('redink_scanner') is not None),
+                          published_directory=str(active_for_warnings.config_directory))
+            return jsonify(result)
+
     @app.post('/api/settings')
     @admin_required
     def save_settings_api():
@@ -280,70 +351,46 @@ def create_app(settings: Settings, store: Store | None = None) -> Flask:
             data = request.get_json(silent=False)
             if not isinstance(data, dict):
                 raise ConfigError('Expected a JSON object.')
+            return save_configuration_updates(data)
+        except (ConfigError, ValueError, OSError) as exc:
+            return jsonify(error=str(exc)), 400
+
+    @app.post('/api/settings/website')
+    @admin_required
+    def save_single_website_api():
+        check_csrf()
+        try:
+            submitted = request.get_json(silent=False)
+            if not isinstance(submitted, dict) or set(submitted) != {'action', 'original_name', 'site'}:
+                raise ConfigError('Invalid website save request.')
+            action, original, site = submitted['action'], submitted['original_name'], submitted['site']
+            if action not in ('save', 'remove') or not isinstance(original, str) or len(original) > 64:
+                raise ConfigError('Invalid website operation.')
+            if action == 'save' and (not isinstance(site, dict) or set(site) != {
+                    'name', 'enabled', 'host', 'port', 'path', 'directory', 'https', 'spa_fallback'}):
+                raise ConfigError('Website configuration is incomplete.')
+            if action == 'remove' and (site is not None or not original):
+                raise ConfigError('Removal requires an existing website.')
+            # Serialize the merge with other admins' settings saves; never
+            # replace other sites with stale UI data from a different browser.
             with runtime_settings_lock:
-                supervisor = app.extensions.get('redink_listener')
-                if supervisor is not None and supervisor.is_pending():
-                    return jsonify(error='A listener update is in progress. Wait for its result before saving again.'), 409
-                previous_toml = (settings.data_dir / 'server.toml').read_text(encoding='utf-8')
-                result = update_configuration(settings, data)
-                try:
-                    fresh = load_settings(settings.data_dir)
-                    if fresh.host not in ('127.0.0.1', 'localhost', '::1') and not fresh.tls_enabled and not fresh.allow_insecure_remote:
-                        raise ConfigError('A remote listener requires HTTPS or explicit allow_insecure_remote=true.')
-                    if fresh.tls_enabled:
-                        from .tls import validate_tls
-                        validate_tls(fresh)
-                except Exception:
-                    restore_configuration(settings.data_dir, previous_toml)
-                    raise
-                # Scanner/publishing/billing/retention are live-safe. Security,
-                # binding and TLS changes are committed by the supervisor only
-                # after successful listener preparation; failure rolls back.
-                live_settings, changes = apply_live_settings(settings, fresh, data)
-                network_changed = any(getattr(fresh, field) != getattr(settings, field) for field in (
-                    'host', 'port', 'threads', 'trusted_hosts', 'secure_cookies',
-                    'allow_insecure_remote', 'tls_enabled', 'tls_certificate',
-                    'tls_private_key', 'tls_key_password_env', 'maximum_request_bytes'))
-                if network_changed and supervisor is not None:
-                    if not supervisor.reconfigure(fresh, previous_toml):
-                        restore_configuration(settings.data_dir, previous_toml)
-                        return jsonify(error='Listener update could not be scheduled; no configuration was changed.'), 409
-                    # Safe settings are also applied after a successful rebind.
-                    applied_now = []
-                    listener_update = 'pending'
-                    restart_required = False
-                elif network_changed:
-                    # Flask's test client has no active listening socket. Do not
-                    # claim the host/port has actually changed in that mode.
-                    apply_runtime_settings(live_settings, scan_now='imports' in data)
-                    applied_now = changes
-                    listener_update = 'unmanaged'
-                    restart_required = True
+                current = [dict(name=w.name, enabled=w.enabled, host=w.host,
+                                port=w.port, path=w.path, directory=str(w.directory),
+                                https=w.https, spa_fallback=w.spa_fallback)
+                           for w in load_settings(settings.data_dir).websites]
+                matches = [i for i, w in enumerate(current) if w['name'].casefold() == original.casefold()] if original else []
+                if original and len(matches) != 1:
+                    raise ConfigError('Website changed since loading. Reload Settings before saving.')
+                if not original and action == 'save' and any(w['name'].casefold() == site['name'].casefold() for w in current):
+                    raise ConfigError('Website already exists. Reload Settings before saving.')
+                if action == 'remove':
+                    del current[matches[0]]
+                elif matches:
+                    current[matches[0]] = site
                 else:
-                    apply_runtime_settings(fresh, scan_now='imports' in data)
-                    applied_now = sorted(set(changes) | set(data.get('collection', {})))
-                    listener_update = 'not_needed'
-                    restart_required = False
-                active_for_warnings = fresh
-                warnings = []
-                if 'imports' in data:
-                    for name, roots in (('LogPath', active_for_warnings.log_paths), ('LicenseCounter', active_for_warnings.counter_paths)):
-                        for root in roots:
-                            if not root.exists():
-                                warnings.append(f'{name} source is not accessible: {root}. The scanner will retry when available.')
-                if 'publishing' in data:
-                    folder = active_for_warnings.config_directory
-                    if not folder.is_dir():
-                        warnings.append(f'Publishing folder does not exist: {folder}. Create it and place the INI files there.')
-                    else:
-                        missing = [name for name in CONFIG_FILES if not (folder / name).is_file()]
-                        if missing:
-                            warnings.append('Publishing folder has no ' + ', '.join(missing) + ' yet.')
-                result.update(restart_required=restart_required, listener_update=listener_update,
-                              applied_now=applied_now, warnings=warnings,
-                              scan_scheduled=bool('imports' in data and not network_changed and app.extensions.get('redink_scanner') is not None),
-                              published_directory=str(active_for_warnings.config_directory))
-                return jsonify(result)
+                    current.append(site)
+                response = save_configuration_updates({'websites': {'sites': current}})
+                return response
         except (ConfigError, ValueError, OSError) as exc:
             return jsonify(error=str(exc)), 400
 

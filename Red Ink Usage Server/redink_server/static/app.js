@@ -577,6 +577,147 @@
     retention: {cutoff_date:"Earliest client-local date retained (YYYY-MM-DD; empty disables)",
       keep_months:"Rolling retention in calendar months (0 disables)",auto_cleanup:"Automatically delete expired evidence on scheduled scans"},
   };
+  const websiteFields = [
+    ["name","Site name","text"], ["enabled","Enabled","checkbox"],
+    ["host","Bind address","text"], ["port","TCP port","number"],
+    ["path","URL path","text"], ["directory","Local document root on server","text"],
+    ["https","Use existing HTTPS certificate","checkbox"],
+    ["spa_fallback","SPA fallback to index.html","checkbox"],
+  ];
+  function websiteValue(row) {
+    const value = {};
+    for(const [key, ,type] of websiteFields) {
+      const control = row.querySelector('[data-site-field="'+key+'"]');
+      value[key] = type==="checkbox" ? control.checked : type==="number" ? Number(control.value) : control.value.trim();
+      if(type==="number" && (!Number.isSafeInteger(value[key]) || value[key]<1 || value[key]>65535)) throw new Error("Invalid website port.");
+    }
+    return value;
+  }
+  function websiteAddress(site) {
+    const host = (site.host==="0.0.0.0" || site.host==="::" || site.host==="127.0.0.1") ? location.hostname : site.host;
+    const fqdn = host.includes(":") && !host.startsWith("[") ? "["+host+"]" : host;
+    return (site.https?"https":"http")+"://"+fqdn+":"+site.port+site.path+(site.path.endsWith("/")?"":"/");
+  }
+  function siteCache() {
+    return (settingsCache.sections.websites ||= {sites:[]}).sites;
+  }
+  async function awaitWebsiteActivation(outcome, status) {
+    if(outcome.listener_update === "unmanaged") return "Saved · takes effect when the server starts";
+    if(outcome.listener_update !== "pending") return "Saved · active";
+    status.textContent="Saved · activating website…";
+    // During rebinding, the administrative origin can briefly disconnect.
+    // Never treat a failed poll as proof that the new listener has failed.
+    for(let retry=0;retry<40;retry++) {
+      await new Promise(resolve=>setTimeout(resolve,400));
+      try {
+        const state=await apiJson("/api/settings/listener");
+        if(state.status==="active") return "Saved · listener active";
+        if(state.status==="failed") throw new Error("Listener rolled back: "+(state.message || "update failed"));
+      } catch(error) {
+        if(/rolled back|restored/i.test(error.message||"")) throw error;
+      }
+    }
+    return "Saved · listener activation not yet confirmed; check server status";
+  }
+  function renderWebsiteRow(site, isDraft=false) {
+    const list = byId("websites-list");
+    const row = element("fieldset","website-card");
+    row.dataset.savedName = isDraft ? "" : site.name;
+    const heading = element("legend","",site.name||"New website");row.append(heading);
+    const grid = element("div","website-grid");
+    for(const [key,label,type] of websiteFields) {
+      const field = element("div","settings-field");
+      const caption = element("label","",label);const input = element("input");
+      const id="site-"+Math.random().toString(36).slice(2)+"-"+key;
+      caption.htmlFor=id;input.id=id;input.dataset.siteField=key;input.type=type;
+      if(type==="checkbox") input.checked=!!site[key];
+      else input.value=String(site[key]??"");
+      if(key==="directory") input.placeholder="D:\\CompanyApps\\Portal";
+      if(key==="path") input.placeholder="/apps";
+      if(key==="host") input.placeholder="0.0.0.0";
+      if(key==="port") {input.min="1";input.max="65535";}
+      field.append(caption,input);grid.append(field);
+      if(key==="name")input.addEventListener("input",()=>{heading.textContent=input.value||"New website";});
+    }
+    row.append(grid);
+    const urlPreview=element("code","website-url",websiteAddress(site));
+    urlPreview.setAttribute("aria-label","Website URL preview");
+    row.append(urlPreview);
+    function updateUrlPreview() {
+      try {urlPreview.textContent=websiteAddress(websiteValue(row));}
+      catch(_) {urlPreview.textContent="Check the website address and port";}
+    }
+    for(const input of grid.querySelectorAll("input")) {
+      input.addEventListener("input",updateUrlPreview);
+      input.addEventListener("change",updateUrlPreview);
+    }
+    const actions=element("div","website-actions");
+    const status=element("span","website-status",isDraft ? "Not saved" : (site.enabled ? "Configured · checking listener…" : "Saved · disabled"));
+    for(const input of grid.querySelectorAll("input")) {
+      input.addEventListener("input",()=>{status.textContent="Unsaved changes · click Save website";});
+      input.addEventListener("change",()=>{status.textContent="Unsaved changes · click Save website";});
+    }
+    status.setAttribute("role","status");
+    const save=element("button","button","Save website");save.type="button";
+    const remove=element("button","button secondary","Remove website");remove.type="button";
+    const open=element("button","button secondary","Open website");open.type="button";
+    async function persist(action) {
+      save.disabled=true;remove.disabled=true;
+      status.textContent=action==="remove" ? "Removing…" : "Saving website…";
+      try {
+        const next=action==="save" ? websiteValue(row) : null;
+        const oldName=row.dataset.savedName;
+        const result=await apiJson("/api/settings/website",{method:"POST",body:JSON.stringify({action,original_name:oldName,site:next})});
+        const message=await awaitWebsiteActivation(result,status);
+        // Change only this site in the local cache; other draft rows stay intact.
+        const saved=siteCache();
+        const index=oldName ? saved.findIndex(s=>s.name.toLowerCase()===oldName.toLowerCase()) : -1;
+        if(action==="remove") {
+          if(index>=0) saved.splice(index,1);
+          row.remove();
+        } else {
+          if(index>=0) saved[index]=next;
+          else saved.push(next);
+          row.dataset.savedName=next.name;
+          status.textContent=next.enabled ? message : "Saved · disabled";
+        }
+        text("settings-state",action==="remove" ? "Website removed" : message);
+      } catch(error) {
+        status.textContent="Save failed · "+error.message;
+        byId("settings-error").textContent=error.message;
+        byId("settings-error").hidden=false;
+      } finally {save.disabled=false;remove.disabled=false;}
+    }
+    save.addEventListener("click",()=>persist("save"));
+    remove.addEventListener("click",()=>{
+      if(!row.dataset.savedName){row.remove();return;}
+      if(window.confirm("Remove this published website?")) persist("remove");
+    });
+    open.addEventListener("click",()=>{
+      try{window.open(websiteAddress(websiteValue(row)),"_blank","noopener,noreferrer");}
+      catch(error){status.textContent=error.message;}
+    });
+    actions.append(save,open,remove,status);row.append(actions);list.append(row);
+  }
+  async function refreshWebsiteStatuses() {
+    try {
+      const state=await apiJson("/api/settings/listener");
+      for(const row of byId("websites-list").querySelectorAll(".website-card")) {
+        if(!row.dataset.savedName) continue;
+        const label=row.querySelector(".website-status");
+        if(label.textContent.startsWith("Saving")) continue;
+        label.textContent=!row.querySelector('[data-site-field="enabled"]').checked ? "Saved · disabled" :
+          state.status==="active" ? "Configured · listener active" :
+          state.status==="failed" ? state.message : "Configured · "+state.status;
+      }
+    } catch(_) { /* Settings page remains usable if the listener is rebinding. */ }
+  }
+  byId("add-website").addEventListener("click",()=>{
+    const count=byId("websites-list").querySelectorAll(".website-card").length;
+    if(count>=32){text("settings-state","Maximum 32 websites");return;}
+    renderWebsiteRow({name:"New Site "+(count+1),enabled:false,host:"0.0.0.0",port:9443+count,
+                      path:"/",directory:"",https:true,spa_fallback:false},true);
+  });
   let settingsCache = null;
   let lastSettingsFetch = null;
   let selectedLogUser = null;
@@ -606,6 +747,9 @@
       }
       root.append(panel);
     }
+    byId("websites-list").replaceChildren();
+    for(const site of ((sections.websites||{}).sites||[])) renderWebsiteRow(site);
+    refreshWebsiteStatuses();
     byId("passwordless-mode").checked = !!state.passwordless_local_only;
     byId("ingestion-token").value = state.tokens.ingestion || "";
     byId("config-token").value = state.tokens.config || "";
@@ -616,7 +760,7 @@
     updateAddinSnippet();
     updateClientUrls();
     refreshAutostart();
-    text("settings-state", "Settings loaded · import and publishing paths apply on Save");
+    text("settings-state", "Settings loaded · websites each have their own Save website button");
   }
   function updateAddinSnippet() {
     const token = byId("ingestion-token").value || "REPLACE_WITH_INGESTION_TOKEN";

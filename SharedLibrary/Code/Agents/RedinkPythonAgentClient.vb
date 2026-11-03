@@ -60,11 +60,15 @@ Namespace Agents
 
     Public NotInheritable Class RedInkPythonAgentExecutionException
         Inherits RedInkPythonAgentException
+        Friend ReadOnly Property ErrorCode As System.String
+
         Public Sub New(message As System.String)
             MyBase.New(message)
+            ErrorCode = message
         End Sub
         Public Sub New(message As System.String, innerException As System.Exception)
             MyBase.New(message, innerException)
+            ErrorCode = message
         End Sub
     End Class
 
@@ -305,6 +309,8 @@ Namespace Agents
             Dim timeoutCancellation As New System.Threading.CancellationTokenSource(Me.Options.OverallTimeout)
             Dim linked As System.Threading.CancellationTokenSource = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(userCancellation, timeoutCancellation.Token)
             Dim operationCancelled As System.Boolean = False
+            Dim timedOut As System.Boolean = False
+            Dim pending As New System.Collections.Generic.Dictionary(Of System.String, System.Threading.Tasks.Task)(System.StringComparer.OrdinalIgnoreCase)
             Try
                 linked.Token.ThrowIfCancellationRequested()
                 StageRequest(requestDirectory, requestPath, pythonCode, inputFiles, limits, sessionId, nonce, linked.Token)
@@ -320,20 +326,20 @@ Namespace Agents
                     .RedirectStandardOutput = False,
                     .RedirectStandardError = False
                 }
-                    process = System.Diagnostics.Process.Start(startInfo)
+                    Try
+                        process = System.Diagnostics.Process.Start(startInfo)
+                    Catch startError As System.ComponentModel.Win32Exception
+                        Throw New RedInkPythonAgentExecutionException("BROKER_START_FAILED", startError)
+                    End Try
                     If process Is Nothing Then
                         Throw New RedInkPythonAgentExecutionException("BROKER_START_FAILED")
                     End If
                 End Using
 
                 Dim eventOffset As System.Int64 = 0
-                Dim pending As New System.Collections.Generic.Dictionary(Of System.String, System.Threading.Tasks.Task)(System.StringComparer.OrdinalIgnoreCase)
                 Dim lastHeartbeat As System.DateTimeOffset = System.DateTimeOffset.UtcNow
                 Do
-                    If linked.IsCancellationRequested Then
-                        Await RequestCancellationAndKillAsync(process, controlDirectory, sessionId, nonce, If(timeoutCancellation.IsCancellationRequested, "SESSION_TIMEOUT", "HOST_CANCELLED"), pending).ConfigureAwait(False)
-                        Return CreateCallerResult(sessionId, If(timeoutCancellation.IsCancellationRequested, "timeout", "cancelled"), If(timeoutCancellation.IsCancellationRequested, "SESSION_TIMEOUT", "SESSION_CANCELLED"))
-                    End If
+                    linked.Token.ThrowIfCancellationRequested()
                     Dim exited As System.Boolean = False
                     Try
                         exited = process.HasExited
@@ -356,9 +362,21 @@ Namespace Agents
                 If Not System.IO.File.Exists(responsePath) Then
                     Return CreateCallerResult(sessionId, "failed", "BROKER_EXITED_WITHOUT_RESPONSE")
                 End If
-                Return ParseResponse(responsePath, fullRoot, sessionId, nonce, limits)
+                Try
+                    Return ParseResponse(responsePath, fullRoot, sessionId, nonce, limits)
+                Catch ex As System.Exception When TypeOf ex Is RedInkPythonAgentExecutionException OrElse
+                                                   TypeOf ex Is RedInkPythonAgentConfigurationException OrElse
+                                                   TypeOf ex Is Newtonsoft.Json.JsonException OrElse
+                                                   TypeOf ex Is System.FormatException OrElse
+                                                   TypeOf ex Is System.InvalidCastException OrElse
+                                                   TypeOf ex Is System.OverflowException
+                    ' This validation is of the broker's reply, after execution. It is
+                    ' not evidence that the model supplied invalid Python or tool arguments.
+                    Throw New RedInkPythonAgentExecutionException("BROKER_RESPONSE_INVALID", ex)
+                End Try
             Catch ex As System.OperationCanceledException
                 operationCancelled = True
+                timedOut = timeoutCancellation.IsCancellationRequested AndAlso Not userCancellation.IsCancellationRequested
             Finally
                 linked.Dispose()
                 timeoutCancellation.Dispose()
@@ -370,13 +388,15 @@ Namespace Agents
             If operationCancelled Then
                 Try
                     If process IsNot Nothing Then
-                        Await RequestCancellationAndKillAsync(process, controlDirectory, sessionId, nonce, "HOST_CANCELLED", New System.Collections.Generic.Dictionary(Of System.String, System.Threading.Tasks.Task)()).ConfigureAwait(False)
+                        Await RequestCancellationAndKillAsync(process, controlDirectory, sessionId, nonce,
+                            If(timedOut, "SESSION_TIMEOUT", "HOST_CANCELLED"), pending).ConfigureAwait(False)
                     End If
                 Finally
                     If process IsNot Nothing Then
                         process.Dispose()
                     End If
                 End Try
+                If timedOut Then Return CreateCallerResult(sessionId, "timeout", "SESSION_TIMEOUT")
                 Return CreateCallerResult(sessionId, "cancelled", "SESSION_CANCELLED")
             End If
 

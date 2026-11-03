@@ -20,17 +20,28 @@ Option Explicit On
 Option Strict On
 
 Partial Public Class ThisAddIn
+    Private WithEvents _commentSelectionApplication As Microsoft.Office.Interop.Word.Application
     Private _commentSelectionTracker As WordCommentSelectionTracker
+    Private _commentSelectionTrackingDisabled As System.Boolean
     Private _lastCommentBodyWindow As System.Int32
     Private _lastCommentBodyStart As System.Int32 = -1
     Private _lastCommentBodyEnd As System.Int32 = -1
     Private _lastCommentBodyStory As System.Int32 = -1
 
-    Private Sub CommentSelectionStartup() Handles Me.Startup
+    ' Called on the Word UI thread after reading the startup configuration.
+    Private Sub StartCommentSelectionTracking()
+        If _commentSelectionTracker IsNot Nothing OrElse _commentSelectionTrackingDisabled Then Return
+        _commentSelectionTrackingDisabled = Not _context.INI_WordCommentSelectionTracking
+        If _commentSelectionTrackingDisabled Then
+            LogWordCommandDiagnostic("CommentSelection.Startup", "tracking_off")
+            Return
+        End If
         Try
             _commentSelectionTracker = New WordCommentSelectionTracker()
+            _commentSelectionApplication = Application
             WatchActiveCommentWindow()
         Catch ex As System.Exception
+            CommentSelectionShutdown()
             LogWordCommandDiagnostic("CommentSelection.Startup", ex.ToString())
         End Try
     End Sub
@@ -68,10 +79,16 @@ Partial Public Class ThisAddIn
     Private Sub CommentSelectionShutdown() Handles Me.Shutdown, Application.Quit
         Dim tracker As WordCommentSelectionTracker = _commentSelectionTracker
         _commentSelectionTracker = Nothing
-        If tracker IsNot Nothing Then tracker.Dispose()
+        Try
+            _commentSelectionApplication = Nothing
+        Catch ex As System.Exception
+            LogWordCommandDiagnostic("CommentSelection.Shutdown", ex.ToString())
+        Finally
+            If tracker IsNot Nothing Then tracker.Dispose()
+        End Try
     End Sub
 
-    Private Sub CommentSelectionDocumentChanged() Handles Application.DocumentChange
+    Private Sub CommentSelectionDocumentChanged() Handles _commentSelectionApplication.DocumentChange
         _lastCommentBodyWindow = 0
         _lastCommentBodyStart = -1
         _lastCommentBodyEnd = -1
@@ -82,7 +99,7 @@ Partial Public Class ThisAddIn
         End If
     End Sub
 
-    Private Sub CommentSelectionBodyChanged(selection As Microsoft.Office.Interop.Word.Selection) Handles Application.WindowSelectionChange
+    Private Sub CommentSelectionBodyChanged(selection As Microsoft.Office.Interop.Word.Selection) Handles _commentSelectionApplication.WindowSelectionChange
         Try
             If _commentSelectionTracker Is Nothing OrElse selection Is Nothing OrElse
                selection.StoryType = Microsoft.Office.Interop.Word.WdStoryType.wdCommentsStory OrElse
@@ -118,7 +135,10 @@ Partial Public Class ThisAddIn
         Dim doc As Microsoft.Office.Interop.Word.Document = before.Document
         Dim hwnd As New System.IntPtr(before.Hwnd)
         Dim tracker As WordCommentSelectionTracker = _commentSelectionTracker
-        If tracker Is Nothing Then Return WordCommentSelectionTracker.Evidence.Unknown("tracker_unavailable")
+        If tracker Is Nothing Then
+            LogCommentCommandResolution("no_background_tracker; using_word_selection")
+            Return WordCommentSelectionTracker.Evidence.Unknown("tracker_unavailable")
+        End If
         Dim evidence As WordCommentSelectionTracker.Evidence = Await tracker.CaptureAsync(hwnd)
         Await EnsureUIThread()
         Dim after As Microsoft.Office.Interop.Word.Window = GetActiveWordDocumentWindow(Globals.ThisAddIn.Application)
@@ -182,9 +202,16 @@ Partial Public Class ThisAddIn
     ' enumerator is not proof that an item is a child (the reported regression
     ' produced all document comments even for empty reply collections).
     ' All command paths share this catalog: picker, UIA identity and classic story.
-    Private Function ReadCommandCommentCatalog(doc As Microsoft.Office.Interop.Word.Document) As System.Collections.Generic.List(Of CommentChoice)
+    Private Function ReadCommandCommentCatalog(doc As Microsoft.Office.Interop.Word.Document,
+                                               Optional allowedRoots As System.Collections.Generic.IReadOnlyList(Of Microsoft.Office.Interop.Word.Comment) = Nothing) As System.Collections.Generic.List(Of CommentChoice)
         Dim entries As New System.Collections.Generic.List(Of CommentChoice)()
         Dim identityBuckets As New System.Collections.Generic.Dictionary(Of System.String, System.Collections.Generic.List(Of CommentChoice))(System.StringComparer.Ordinal)
+        If allowedRoots IsNot Nothing Then
+            For Each root As Microsoft.Office.Interop.Word.Comment In allowedRoots
+                AddCatalogComment(doc, root, entries, identityBuckets, False)
+            Next
+            Return entries
+        End If
         Dim comments As Microsoft.Office.Interop.Word.Comments = doc.Comments
         Dim count As System.Int32 = comments.Count
         For index As System.Int32 = 1 To count
@@ -340,29 +367,23 @@ Partial Public Class ThisAddIn
 
     Private Function ChooseCommentForCommand(doc As Microsoft.Office.Interop.Word.Document,
                                               actionLabel As System.String,
-                                              Optional allowedComments As System.Collections.Generic.IReadOnlyList(Of Microsoft.Office.Interop.Word.Comment) = Nothing) As Microsoft.Office.Interop.Word.Comment
+                                              Optional allowedComments As System.Collections.Generic.IReadOnlyList(Of Microsoft.Office.Interop.Word.Comment) = Nothing,
+                                              Optional allowDocumentSelection As System.Boolean = False) As Microsoft.Office.Interop.Word.Comment
         Dim choices As New System.Collections.Generic.List(Of CommentChoice)()
         Dim items As New System.Collections.Generic.List(Of Global.SharedLibrary.SharedLibrary.SharedMethods.SelectionItem) From {
             New Global.SharedLibrary.SharedLibrary.SharedMethods.SelectionItem("Choose a comment...", 0)
         }
-        For Each entry As CommentChoice In ReadCommandCommentCatalog(doc)
+        For Each entry As CommentChoice In ReadCommandCommentCatalog(doc, allowedComments)
             If System.String.IsNullOrWhiteSpace(entry.Text) Then Continue For
-            If allowedComments IsNot Nothing Then
-                Dim included As System.Boolean = False
-                For Each allowed As Microsoft.Office.Interop.Word.Comment In allowedComments
-                    If SameCommandComment(allowed, entry.Comment) Then
-                        included = True
-                        Exit For
-                    End If
-                Next
-                If Not included Then Continue For
-            End If
             choices.Add(entry)
             Dim label As System.String = If(entry.IsReply, "Reply", "Comment") & " " &
                 choices.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) & " - " & entry.Author &
                 ": " & CommentChoicePreview(entry.Text, 100) & " | Text: " & CommentChoicePreview(entry.Anchor.Text, 60)
             items.Add(New Global.SharedLibrary.SharedLibrary.SharedMethods.SelectionItem(label, choices.Count))
         Next
+        If allowDocumentSelection Then
+            items.Insert(1, New Global.SharedLibrary.SharedLibrary.SharedMethods.SelectionItem("Use the comments in the selected document text", choices.Count + 1))
+        End If
         If choices.Count = 0 Then
             Throw New WordCommandNoticeException("There is no readable comment in this document. Please select a comment and try again.")
         End If
@@ -374,6 +395,11 @@ Partial Public Class ThisAddIn
             items, 0,
             "Please choose the comment you want Inky to use. Nothing will change until you confirm.",
             "Inky - " & actionLabel)
+        ' Only an explicit choice may retain the caller's captured document selection.
+        If allowDocumentSelection AndAlso picked = choices.Count + 1 Then
+            LogCommentCommandResolution("explicit_picker; confirmed_document_selection")
+            Return Nothing
+        End If
         If picked < 1 OrElse picked > choices.Count Then
             Throw New System.OperationCanceledException("Comment selection cancelled by user.")
         End If

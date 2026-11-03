@@ -171,6 +171,9 @@ Namespace SharedLibrary
                     End If
                 Next
 
+                ' Read this before model and licence validation. Word installs the observer after configuration returns.
+                context.INI_WordCommentSelectionTracking = ParseBoolean(configDict, "WordCommentSelectionTracking", DEFAULT_BOOL_WORDCOMMENTSELECTIONTRACKING)
+
                 ' Assign and validate configuration values.
                 context.INI_APIKey = If(configDict.ContainsKey("APIKey"), configDict("APIKey"), "")
                 context.INI_Endpoint = If(configDict.ContainsKey("Endpoint"), configDict("Endpoint"), "")

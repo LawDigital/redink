@@ -86,6 +86,8 @@ Namespace Agents
     "(3) NEVER claim 'complete' while still announcing future work. " &
     "(4) During active tooling, final prose MUST end with exactly one valid TASK_STATUS footer whose status is either 'complete' or 'blocked'. " &
     "(5) If the user's request covers multiple items, you may emit 'complete' only after all required items have actually been processed via tool calls and the full final result is ready. " &
+    "For requests naming several topics or source categories, check actual evidence for each before declaring complete. One result may cover several categories. Continue if required coverage is missing. If it remains unavailable despite reasonable attempts, report the gap and use blocked. " &
+    "When a new or modified file is the requested output, use the relevant producer and declare its output through the available artifact contract. Inline text alone cannot complete an explicitly requested file change. Distinguish that from drafting text in the reply or editing a live host document in place. " &
     "(6) If the task is not yet complete and more tool work is required or possible, emit the next required tool call instead of final prose. " &
     "(7) If required Memory grounding is active and the final answer relies only on a retrieved subset of listed Memory entries, include ""memoryGroundingScope"":""subset"" inside the TASK_STATUS JSON footer. " &
     "(8) NEVER pair 'blocked' with prose that announces a future fallback action (""I will try to..."", ""instead I'll...""). Either invoke the fallback now via a tool call, or declare blocked WITHOUT announcing further work. " &

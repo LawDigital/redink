@@ -1,0 +1,12 @@
+"use strict";
+const assert=require("assert"),fs=require("fs"),path=require("path");
+const root=path.join(__dirname,"..");
+const js=fs.readFileSync(path.join(root,"redink_server/static/app.js"),"utf8");
+const html=fs.readFileSync(path.join(root,"redink_server/templates/index.html"),"utf8");
+assert(js.includes('"/api/settings/website"'),"Each site must use a dedicated authenticated save endpoint");
+assert(js.includes('original_name:oldName,site:next'),"Updates must identify the saved site");
+assert(js.includes('save.addEventListener("click",()=>persist("save"))'));
+assert(!js.includes('changes.websites={sites:websites}'),"General Save must not silently save website drafts");
+assert(html.includes('Save website</strong>'),"UI must explain the separate save action");
+assert(html.includes('Usage Server port'),"Shared-port behavior must be documented in Settings");
+console.log("Shared-port / per-site settings UI contract: PASS");

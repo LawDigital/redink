@@ -126,6 +126,7 @@ Namespace SharedLibrary
             Property INI_RestrictedModelAccessCode As String
             Property INI_DoMarkupOutlook As Boolean
             Property INI_DoMarkupWord As Boolean
+            Property INI_WordCommentSelectionTracking As System.Boolean
             Property INI_ChunkOCR As Integer
             Property INI_RoastMe As Boolean
             Property INI_SimpleMenuOverride As Boolean
@@ -554,6 +555,7 @@ Namespace SharedLibrary
         Public Property INI_RestrictedModelAccessCode As String Implements ISharedContext.INI_RestrictedModelAccessCode
         Public Property INI_DoMarkupOutlook As Boolean Implements ISharedContext.INI_DoMarkupOutlook
         Public Property INI_DoMarkupWord As Boolean Implements ISharedContext.INI_DoMarkupWord
+        Public Property INI_WordCommentSelectionTracking As System.Boolean Implements ISharedContext.INI_WordCommentSelectionTracking
         Public Property INI_ChunkOCR As Integer Implements ISharedContext.INI_ChunkOCR
         Public Property INI_RoastMe As Boolean Implements ISharedContext.INI_RoastMe
         Public Property INI_SimpleMenuOverride As Boolean Implements ISharedContext.INI_SimpleMenuOverride
