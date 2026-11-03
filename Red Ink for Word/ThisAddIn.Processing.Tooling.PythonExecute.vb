@@ -287,10 +287,11 @@ Partial Public Class ThisAddIn
         End If
 
         Dim publishedArtifactPaths As New System.Collections.Generic.List(Of System.String)()
+        response.HostPublishedOutputPaths = publishedArtifactPaths
         Dim artifactPublisher As System.Action(Of Agents.RedInkPythonAgentOutput) =
             Sub(output As Agents.RedInkPythonAgentOutput)
                 Dim publishedPath As System.String = PublishPythonAgentOutputChecked(output)
-                publishedArtifactPaths.Add(publishedPath)
+                publishedArtifactPaths.Add(System.IO.Path.GetFullPath(publishedPath))
             End Sub
 
         ' Pre-execution guard: reject an unchanged deterministic resubmission before starting the worker, so a

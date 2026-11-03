@@ -587,6 +587,7 @@ Namespace SharedLibrary
         Public Const DEFAULT_BOOL_REPLACETEXT2 As Boolean = True
         Public Const DEFAULT_BOOL_DOMARKUPOUTLOOK As Boolean = True
         Public Const DEFAULT_BOOL_DOMARKUPWORD As Boolean = True
+        Public Const DEFAULT_BOOL_WORDCOMMENTSELECTIONTRACKING As System.Boolean = True
         Public Const DEFAULT_BOOL_CONTEXTMENU As Boolean = True
 
         Public Const DEFAULT_BOOL_ISEARCH_ENABLED As Boolean = True

@@ -1419,7 +1419,8 @@ Namespace Agents
             sourceTool As String,
             roots As System.Collections.Generic.IEnumerable(Of String),
             beforeSnapshot As System.Collections.Generic.IDictionary(Of String, String),
-            Optional excludedPaths As System.Collections.Generic.IEnumerable(Of String) = Nothing)
+            Optional excludedPaths As System.Collections.Generic.IEnumerable(Of String) = Nothing,
+            Optional hostPublishedOutputPaths As System.Collections.Generic.IReadOnlyCollection(Of System.String) = Nothing)
 
             If Not IsLegacyCompatibilityAllowed(runState, sourceTool) OrElse roots Is Nothing Then
                 Return
@@ -1439,6 +1440,14 @@ Namespace Agents
                 Next
             End If
 
+            ' If the producer tracked its publications, changes from input staging or
+            ' concurrent activity in these same roots cannot be attributed to it.
+            Dim published As System.Collections.Generic.HashSet(Of System.String) = Nothing
+            If hostPublishedOutputPaths IsNot Nothing Then
+                If hostPublishedOutputPaths.Count = 0 Then Return
+                published = New System.Collections.Generic.HashSet(Of System.String)(hostPublishedOutputPaths, System.StringComparer.OrdinalIgnoreCase)
+            End If
+
             Dim seen As New System.Collections.Generic.HashSet(Of String)(
                 System.StringComparer.OrdinalIgnoreCase)
 
@@ -1456,6 +1465,7 @@ Namespace Agents
 
                         Try
                             Dim fullPath As String = System.IO.Path.GetFullPath(filePath)
+                            If published IsNot Nothing AndAlso Not published.Contains(fullPath) Then Continue For
                             If Not seen.Add(fullPath) Then Continue For
                             If excluded.Contains(fullPath) Then Continue For
                             If Not System.IO.File.Exists(fullPath) Then Continue For

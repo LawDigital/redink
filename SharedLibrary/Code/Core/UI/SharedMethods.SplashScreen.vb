@@ -36,6 +36,22 @@ Namespace SharedLibrary
 
             Inherits Form
 
+            Protected Overrides ReadOnly Property ShowWithoutActivation As System.Boolean
+                Get
+                    Return True
+                End Get
+            End Property
+
+            Protected Overrides Sub WndProc(ByRef m As System.Windows.Forms.Message)
+                Const WM_MOUSEACTIVATE As System.Int32 = &H21
+                Const MA_NOACTIVATE As System.Int32 = 3
+                If m.Msg = WM_MOUSEACTIVATE Then
+                    m.Result = New System.IntPtr(MA_NOACTIVATE)
+                    Return
+                End If
+                MyBase.WndProc(m)
+            End Sub
+
             ''' <summary>
             ''' Label used to display the current splash message.
             ''' </summary>
@@ -66,6 +82,7 @@ Namespace SharedLibrary
                 ' Set the form properties
                 Me.Text = $"{SharedMethods.AN}"
                 Me.FormBorderStyle = FormBorderStyle.None
+                Me.ShowInTaskbar = False
                 Me.StartPosition = FormStartPosition.CenterScreen
                 Me.BackColor = ColorTranslator.FromWin32(&H8000000F)
 

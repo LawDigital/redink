@@ -246,8 +246,10 @@ def main(argv=None):
                 app.extensions['redink_scanner'] = scanner
 
                 def listener_factory(next_settings):
-                    return (create_https_server(next_settings, app) if next_settings.tls_enabled
-                            else create_http_server(next_settings, app))
+                    # All public site ports share the same supervised lifecycle
+                    # and rollback semantics as the original collector listener.
+                    from .static_websites import create_all_listeners
+                    return create_all_listeners(next_settings, app)
 
                 def apply_runtime(next_settings):
                     apply = app.extensions['redink_apply_settings']

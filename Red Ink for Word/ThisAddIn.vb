@@ -13,7 +13,7 @@
 '   agent, UI, transcription, and command behavior to the other ThisAddIn.* files.
 ' =============================================================================
 '
-' 2.11.2026
+' 3.11.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -72,7 +72,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.021126" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.031126" & SharedMethods.VersionQualifier
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
     Public Const AN5 As String = "RI" ' for bubble comments 
@@ -859,6 +859,7 @@ Partial Public Class ThisAddIn
 
     Public Sub InitializeAddInFeatures(Optional startupTimings As System.Collections.Generic.List(Of String) = Nothing)
         MeasureWordStartupStep("InitializeConfig", Sub() InitializeConfig(True, True), startupTimings)
+        MeasureWordStartupStep("CommentSelection.start", AddressOf StartCommentSelectionTracking, startupTimings)
         MeasureWordStartupStep("ModelAndAgentWarmup.schedule", Sub() QueueModelAndAgentResourceWarmup(), startupTimings)
 
         ' Reconcile the persisted CrashLog switch with the INI parameter. Any change

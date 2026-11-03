@@ -1527,6 +1527,9 @@ Partial Public Class ThisAddIn
             Dim commentSelectionDetected As System.Boolean = False
             Dim replyNeedsCommentChoice As System.Boolean = False
             Dim replyUsesBodySelection As System.Boolean = False
+            ' Without focus evidence, keep a confirmed choice available for an unresolved card.
+            Dim confirmReplyTarget As System.Boolean = _commentSelectionTracker Is Nothing
+            Dim replyChoicesAtCaret As System.Collections.Generic.List(Of Microsoft.Office.Interop.Word.Comment) = Nothing
             Dim replyDocument As Microsoft.Office.Interop.Word.Document = selection.Document
             Dim replyOrigin As Microsoft.Office.Interop.Word.Range = selection.Range.Duplicate
             Dim commentEvidence As WordCommentSelectionTracker.Evidence = initialCommentEvidence
@@ -1543,9 +1546,8 @@ Partial Public Class ThisAddIn
                 commentSelectionDetected = (commentEvidence IsNot Nothing AndAlso commentEvidence.IsComment) OrElse
                     replyOrigin.StoryType = Microsoft.Office.Interop.Word.WdStoryType.wdCommentsStory OrElse
                     CBool(selection.Information(Microsoft.Office.Interop.Word.WdInformation.wdInCommentPane))
-                If commentSelectionDetected Then
-                    replyNeedsCommentChoice = replyDocument.Comments.Count > 0
-                Else
+                If commentSelectionDetected OrElse confirmReplyTarget Then replyNeedsCommentChoice = replyDocument.Comments.Count > 0
+                If Not commentSelectionDetected Then
                     ' A main-text selection can include ONE or MANY comments. Never
                     ' ask for one comment when the user selected several anchors.
                     Dim anchored As System.Collections.Generic.List(Of Microsoft.Office.Interop.Word.Comment) =
@@ -1557,12 +1559,18 @@ Partial Public Class ThisAddIn
                     ElseIf anchored.Count > 0 Then
                         replyUsesBodySelection = True
                     End If
+                    If _commentSelectionTrackingDisabled AndAlso anchored.Count > 0 Then
+                        ' An explicit opt-out makes the document selection authoritative here.
+                        ' A point shared by several anchors cannot identify an individual thread.
+                        If anchored.Count = 1 Then activePushbackComment = anchored(0)
+                        replyNeedsCommentChoice = replyOrigin.Start = replyOrigin.End AndAlso anchored.Count > 1
+                        If replyNeedsCommentChoice Then replyChoicesAtCaret = anchored
+                    End If
                 End If
             Catch ex As System.Exception
                 LogWordCommandDiagnostic("Freestyle.CommentSelection", ex.ToString())
                 ' Failure is not evidence that a different comment was selected.
-                ' Only an explicit comment UI context may offer the safe picker.
-                replyNeedsCommentChoice = commentSelectionDetected AndAlso replyDocument.Comments.Count > 0
+                replyNeedsCommentChoice = confirmReplyTarget OrElse (commentSelectionDetected AndAlso replyDocument.Comments.Count > 0)
                 replyUsesBodySelection = False
             End Try
             Dim replyTargetCommentIndex As System.Int32 = 0
@@ -1705,6 +1713,9 @@ SkipPromptInput:
                     .PersistedState = freestylePromptUiState,
                     .RestorePersistedState = False
                 }
+                If confirmReplyTarget AndAlso replyNeedsCommentChoice Then
+                    promptOptions.ContextStatusText = "Reply uses a selected Word comment or asks you to choose the target"
+                End If
 
                 ' =============================================================
                 ' OUTPUT MODES
@@ -3903,18 +3914,29 @@ SkipPromptInput:
                 Dim requestedPrefix As System.String = If(
                     OtherPrompt.StartsWith(PushbackPrefix, StringComparison.OrdinalIgnoreCase),
                     PushbackPrefix, PushbackPrefix2)
+                ' Pin a single captured thread only after Reply is chosen. Nonempty text
+                ' remains ordinary input for every other Freestyle mode.
+                If replyUsesBodySelection AndAlso activePushbackComment IsNot Nothing Then
+                    cursorOnComment = True
+                    replyUsesBodySelection = False
+                End If
+                If Not IsSameProcessingDocument(replyDocument, application.ActiveDocument) Then
+                    Throw New WordCommandNoticeException("The active document changed. Please select the comment again and retry.")
+                End If
                 If replyNeedsCommentChoice OrElse (commentSelectionDetected AndAlso Not cursorOnComment) Then
-                    If Not IsSameProcessingDocument(replyDocument, application.ActiveDocument) Then
-                        Throw New WordCommandNoticeException("The active document changed. Please select the comment again and retry.")
-                    End If
                     Dim selectedCommentRange As Microsoft.Office.Interop.Word.Range = Nothing
                     Dim explicitlySelected As System.Boolean = False
                     cursorOnComment = TryResolveSelectedComment(selection, replyOrigin, activePushbackComment,
                         selectedCommentRange, explicitlySelected, commentEvidence)
                     If Not cursorOnComment Then
-                        activePushbackComment = ChooseCommentForCommand(replyDocument, "Reply to comments")
+                        ' Evidence of a card supersedes a previously captured document caret.
+                        If explicitlySelected Then replyChoicesAtCaret = Nothing
+                        activePushbackComment = ChooseCommentForCommand(replyDocument, "Reply to comments",
+                            allowedComments:=replyChoicesAtCaret,
+                            allowDocumentSelection:=Not explicitlySelected AndAlso confirmReplyTarget AndAlso replyUsesBodySelection)
                         cursorOnComment = activePushbackComment IsNot Nothing
                     End If
+                    If cursorOnComment Then replyUsesBodySelection = False
                 End If
                 If Not cursorOnComment AndAlso Not replyUsesBodySelection Then
                     ShowCustomMessageBox("Select a comment or text containing at least one comment to use Reply.", "Inky")
@@ -4454,8 +4476,11 @@ SkipPromptInput:
                         Return
                     End If
                 ElseIf replyUsesBodySelection Then
-                    If Not TryRestorePushbackBodySelection(replyDocument, replyOrigin) Then
-                        ShowCustomMessageBox("The selected comments are no longer available. Please select the text again.", "Inky")
+                    If Not TryRestorePushbackBodySelection(replyDocument, replyOrigin, replyChoicesAtCaret) Then
+                        Dim notice As System.String = If(replyChoicesAtCaret Is Nothing,
+                            "The selected comments are no longer available. Please select the text again.",
+                            "Word could not limit the reply to the comments at the cursor. Choose one comment or select the text to include, then try again.")
+                        ShowCustomMessageBox(notice, "Inky")
                         Return
                     End If
                 End If
@@ -4493,7 +4518,8 @@ SkipPromptInput:
     ' </summary>
     Private Function TryRestorePushbackBodySelection(
         doc As Microsoft.Office.Interop.Word.Document,
-        original As Microsoft.Office.Interop.Word.Range) As System.Boolean
+        original As Microsoft.Office.Interop.Word.Range,
+        confirmedAtCaret As System.Collections.Generic.IReadOnlyList(Of Microsoft.Office.Interop.Word.Comment)) As System.Boolean
 
         Try
             If original Is Nothing OrElse Not IsSameProcessingDocument(doc, original.Document) OrElse
@@ -4523,6 +4549,20 @@ SkipPromptInput:
                     End If
                 End If
                 target.SetRange(first, last)
+            End If
+            If confirmedAtCaret IsNot Nothing Then
+                ' Expansion to the union of the anchors can reach neighbouring threads.
+                ' Match the extraction range, including a point comment on its right boundary.
+                Dim included As System.Int32 = 0
+                For Each candidate As Microsoft.Office.Interop.Word.Comment In doc.Comments
+                    Dim scope As Microsoft.Office.Interop.Word.Range = candidate.Scope
+                    Dim overlaps As System.Boolean = scope.Start < target.End AndAlso target.Start < scope.End
+                    Dim contained As System.Boolean = scope.Start >= target.Start AndAlso scope.End <= target.End
+                    If Not (overlaps OrElse contained) Then Continue For
+                    If Not System.Linq.Enumerable.Any(confirmedAtCaret, Function(expected) SameCommandComment(expected, candidate)) Then Return False
+                    included += 1
+                Next
+                If included <> confirmedAtCaret.Count Then Return False
             End If
             doc.Activate()
             target.Select()

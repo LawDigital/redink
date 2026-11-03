@@ -366,6 +366,8 @@ Namespace SharedLibrary
             Private lastRemainingSeconds As System.Int32
             Private requestedFormWidth As System.Int32
             Private requestedFormHeight As System.Int32
+            Private foregroundBeforeShow As System.IntPtr
+            Private returnHost As System.IntPtr
             Private exitRequested As System.Boolean
             Private disposalLogged As System.Boolean
 
@@ -413,8 +415,35 @@ Namespace SharedLibrary
             End Sub
 
             Protected Overrides Sub SetVisibleCore(value As System.Boolean)
-                If value AndAlso controller.IsClosing Then Return
+                If value Then
+                    If controller.IsClosing Then Return
+                    If Not Me.Visible Then
+                        Dim foreground As System.IntPtr = NativeMethods.GetForegroundWindow()
+                        foregroundBeforeShow = If(SharedMethods.IsWindowInCurrentProcess(foreground), foreground, System.IntPtr.Zero)
+                        returnHost = If(SharedMethods.CanReceiveHostForeground(foregroundBeforeShow), foregroundBeforeShow, System.IntPtr.Zero)
+                    End If
+                End If
                 MyBase.SetVisibleCore(value)
+            End Sub
+
+            Protected Overrides ReadOnly Property ShowWithoutActivation As System.Boolean
+                Get
+                    ' Keep immediate Esc input for a foreground request. If the user is
+                    ' already working elsewhere, display the countdown without taking focus.
+                    Dim foreground As System.IntPtr = NativeMethods.GetForegroundWindow()
+                    If foregroundBeforeShow <> System.IntPtr.Zero AndAlso foreground = foregroundBeforeShow Then Return False
+                    ' Focus may have changed between capture and the actual show. An initially
+                    ' passive splash must not return to a stale document when clicked later.
+                    If Not Me.IsHandleCreated OrElse foreground <> Me.Handle Then returnHost = System.IntPtr.Zero
+                    Return True
+                End Get
+            End Property
+
+            Protected Overrides Sub OnDeactivate(e As System.EventArgs)
+                ' Once the user or another window has taken focus, the old document
+                ' is no longer a valid return target, even if the splash is clicked later.
+                returnHost = System.IntPtr.Zero
+                MyBase.OnDeactivate(e)
             End Sub
 
             Private Sub OnUiTick(sender As System.Object, e As System.EventArgs)
@@ -485,6 +514,13 @@ Namespace SharedLibrary
                 ' the controller already and must not cancel the request.
                 If Not controller.IsClosing Then controller.RequestUserCancellation()
                 MyBase.OnFormClosing(e)
+                If e.Cancel OrElse e.CloseReason <> System.Windows.Forms.CloseReason.UserClosing OrElse
+                   Not Me.IsHandleCreated OrElse Not SharedMethods.CanReceiveHostForeground(returnHost) Then Return
+                ' Hand back only the foreground this view still owns, before the HWND is destroyed.
+                If NativeMethods.GetForegroundWindow() = Me.Handle Then
+                    Dim restored As System.Boolean = NativeMethods.SetForegroundWindow(returnHost)
+                    controller.LogLifecycle(If(restored, "FOREGROUND_RETURNED", "FOREGROUND_RETURN_DENIED"))
+                End If
             End Sub
 
             Private Sub ApplyMessageLayout(messageText As System.String, allowShrink As System.Boolean)

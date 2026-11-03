@@ -308,17 +308,16 @@ Partial Public Class ThisAddIn
             Catch ex As System.IO.IOException
                 Return
             End Try
-            Await MaybeSendAutoPilotPromptCoachingAsync(ct, immediateOnly:=True).ConfigureAwait(False)
+            ' Deliver previously reviewed advice when due; foreground work can interrupt
+            ' every analysis pass before it reaches the final daily delivery check.
+            Await MaybeSendAutoPilotPromptCoachingAsync(ct).ConfigureAwait(False)
             For Each job As Newtonsoft.Json.Linq.JObject In GetAutoPilotPromptCoachingJobs()
                 ct.ThrowIfCancellationRequested()
                 If Not IsAutoPilotLogDiagnosticsMailIdle() Then Throw New System.OperationCanceledException(ct)
                 Dim status As System.String = job.Value(Of System.String)("status")
                 If status <> "awaiting_log" AndAlso status <> "pending" Then Continue For
                 Dim path As System.String = GetAutoPilotPromptCoachingPath("jobs", job.Value(Of System.String)("runId"), ".json")
-                If Not IsAutoPilotPromptCoachingEnabledForUser(job.Value(Of System.String)("sender")) Then
-                    FinishAutoPilotPromptCoachingJob(job, "suppressed")
-                    Continue For
-                End If
+                If Not ApplyAutoPilotPromptCoachingPreference(job) Then Continue For
                 If job.Value(Of System.Int32)("failedAttempts") >= AP_PromptCoachingMaxAttempts Then Continue For
                 Try
                     SyncLock _apPromptCoachingFsSync
@@ -327,6 +326,8 @@ Partial Public Class ThisAddIn
                     End SyncLock
                     Await AnalyseAutoPilotPromptCoachingJobAsync(job, ct).ConfigureAwait(False)
                 Catch ex As System.OperationCanceledException When ct.IsCancellationRequested OrElse Not IsAutoPilotLogDiagnosticsMailIdle()
+                    ApDashboardLog("AutoPilot log diagnostics [coaching-paused]: run " & job.Value(Of System.String)("runId") &
+                        "; foreground work or shutdown; saved parts=" & job.Value(Of System.Int32)("nextPart").ToString(System.Globalization.CultureInfo.InvariantCulture), "info")
                     Throw
                 Catch ex As System.Exception
                     ct.ThrowIfCancellationRequested()
@@ -337,8 +338,9 @@ Partial Public Class ThisAddIn
                         If job.Value(Of System.Int32)("failedAttempts") >= AP_PromptCoachingMaxAttempts Then job("status") = "exhausted"
                         WriteAutoPilotPromptCoachingJson(path, job)
                     End SyncLock
-                    LogAutoPilotLogDiagnosticsStatus("coaching-analysis", "run " & job.Value(Of System.String)("runId") & " analysis failed (" &
-                        job.Value(Of System.Int32)("failedAttempts").ToString(System.Globalization.CultureInfo.InvariantCulture) & "/2); no recommendation was inferred: " & ex.GetType().Name)
+                    ApDashboardLog("AutoPilot log diagnostics [coaching-analysis]: run " & job.Value(Of System.String)("runId") &
+                        "; status=" & job.Value(Of System.String)("status") & "; failed attempts=" &
+                        job.Value(Of System.Int32)("failedAttempts").ToString(System.Globalization.CultureInfo.InvariantCulture) & "/2; error=" & ex.GetType().Name, "warn")
                 End Try
                 ' Immediate mode submits only after the analysis and outside the model gate.
                 ' Daily mode waits until the idle backlog pass finishes, consolidating the day.
@@ -355,6 +357,18 @@ Partial Public Class ThisAddIn
             localCts.Dispose()
             System.Threading.Interlocked.Exchange(_apPromptCoachingRunning, 0)
         End Try
+    End Function
+
+    Private Function ApplyAutoPilotPromptCoachingPreference(job As Newtonsoft.Json.Linq.JObject,
+                                                            Optional preference As Newtonsoft.Json.Linq.JObject = Nothing) As System.Boolean
+        If preference Is Nothing Then preference = GetAutoPilotPromptCoachingPreferenceStatus(job.Value(Of System.String)("sender"))
+        If preference.Value(Of System.Boolean)("effectiveEnabled") Then Return True
+        ' An unreadable preference or paused global switch withholds processing.
+        ' Only a verified user exclusion may discard the pending job's evidence.
+        If preference.Value(Of System.String)("preference") = "disabled" OrElse preference.Value(Of System.String)("reason") = "opt_in_required" Then
+            FinishAutoPilotPromptCoachingJob(job, "suppressed")
+        End If
+        Return False
     End Function
 
     Private Sub FinishAutoPilotPromptCoachingJob(job As Newtonsoft.Json.Linq.JObject, status As System.String)
@@ -380,6 +394,10 @@ Partial Public Class ThisAddIn
                 LogAutoPilotLogDiagnosticsStatus("coaching-cleanup", "a completed recommendation input could not yet be removed; its terminal state remains durable.")
             End Try
         End SyncLock
+        If status <> "expired" Then
+            ApDashboardLog("AutoPilot log diagnostics [coaching-result]: run " & job.Value(Of System.String)("runId") &
+                "; status=" & status & "; completed parts=" & job.Value(Of System.Int32)("nextPart").ToString(System.Globalization.CultureInfo.InvariantCulture), "info")
+        End If
     End Sub
 
     Private Async Function AnalyseAutoPilotPromptCoachingJobAsync(job As Newtonsoft.Json.Linq.JObject, ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task
@@ -439,10 +457,13 @@ Partial Public Class ThisAddIn
         If job("analysisSchema") Is Nothing OrElse job.Value(Of System.Int32)("analysisSchema") <> Global.SharedLibrary.Agents.PromptCoachingAdvice.CurrentSchema Then
             ' Resume old pending work with its intact input, never mix enum-only
             ' candidates with the new evidence-bound, independently reviewed contract.
+            If job.Value(Of System.Int32)("nextPart") > 0 OrElse job("candidates") IsNot Nothing Then
+                ApDashboardLog("AutoPilot log diagnostics [coaching-policy]: run " & job.Value(Of System.String)("runId") &
+                    "; restarting legacy partial analysis with the current policy.", "info")
+            End If
             job("nextPart") = 0
             job.Remove("candidates")
             job.Remove("language")
-            LogAutoPilotLogDiagnosticsStatus("coaching-policy", "Pending analysis uses the contextual advice policy; any legacy partial classifications were discarded.")
         End If
         job("analysisSchema") = Global.SharedLibrary.Agents.PromptCoachingAdvice.CurrentSchema
         job("analysisInputLimit") = configuredLimit
@@ -459,17 +480,20 @@ Partial Public Class ThisAddIn
         For index As System.Int32 = startPart To chunks.Count - 1
             ct.ThrowIfCancellationRequested()
             If Not IsAutoPilotLogDiagnosticsMailIdle() Then Throw New System.OperationCanceledException(ct)
-            If Not IsAutoPilotPromptCoachingEnabledForUser(job.Value(Of System.String)("sender")) Then
-                FinishAutoPilotPromptCoachingJob(job, "suppressed")
-                Return
-            End If
+            If Not ApplyAutoPilotPromptCoachingPreference(job) Then Return
             Dim allowEffects As System.Boolean = chunks.Count = 1 AndAlso job.Value(Of System.Boolean)("completedByHost")
             Dim partPrompt As System.String = promptPrefix & "Log part " & (index + 1).ToString(System.Globalization.CultureInfo.InvariantCulture) & "/" &
                 chunks.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) & ". Observed effects permitted: " & If(allowEffects, "yes", "no (incomplete or split evidence)") &
                 System.Environment.NewLine & "<UNTRUSTED_RUNTIME_LOG>" & System.Environment.NewLine & chunks(index) & System.Environment.NewLine & "</UNTRUSTED_RUNTIME_LOG>"
+            Dim partLabel As System.String = (index + 1).ToString(System.Globalization.CultureInfo.InvariantCulture) & "/" & chunks.Count.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            If index = startPart Then
+                ApDashboardLog("AutoPilot log diagnostics [coaching-assessment]: run " & job.Value(Of System.String)("runId") &
+                    "; requesting analysis from part " & partLabel, "info")
+            End If
             Dim raw As System.String = Await RequestAutoPilotPromptCoachingModelAsync(partPrompt, ct).ConfigureAwait(False)
             Dim parsed As Global.SharedLibrary.Agents.PromptCoachingAdvice.Result = Global.SharedLibrary.Agents.PromptCoachingAdvice.Parse(raw, original, chunks(index), allowEffects)
-            If parsed.Recommendations.Count > 0 Then
+            Dim eligible As System.Int32 = parsed.Recommendations.Count
+            If eligible > 0 Then
                 ' The second call is only made for strong candidates, uses the same
                 ' evidence, and cannot manufacture replacement prose or add recipients.
                 Dim reviewPrompt As System.String = partPrompt & System.Environment.NewLine &
@@ -501,6 +525,9 @@ Partial Public Class ThisAddIn
                 job("candidates") = candidates
                 WriteAutoPilotPromptCoachingJson(GetAutoPilotPromptCoachingPath("jobs", job.Value(Of System.String)("runId"), ".json"), job)
             End SyncLock
+            ApDashboardLog("AutoPilot log diagnostics [coaching-part]: run " & job.Value(Of System.String)("runId") &
+                "; saved part " & partLabel & "; eligible for review=" & eligible.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                "; approved=" & parsed.Recommendations.Count.ToString(System.Globalization.CultureInfo.InvariantCulture), "info")
         Next
         ct.ThrowIfCancellationRequested()
         Dim ordered As New System.Collections.Generic.List(Of Global.SharedLibrary.Agents.PromptCoachingAdvice.Recommendation)(byTopic.Values)
