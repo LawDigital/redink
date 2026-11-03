@@ -65,6 +65,16 @@ maximum_files_per_scan = 10000
 # Empty means the default config-files directory in the data directory.
 source_directory = ""
 
+[websites]
+# Optional independent read-only static websites, managed in Settings.
+# Each entry: name, enabled, host, port, path, directory, https, spa_fallback.
+# Sites can share a host/port if their URL paths differ. A site can also
+# share [server].port when its bind host and TLS mode match; choose a prefix
+# other than / or the protected administrator/collector namespaces.
+# Example (add using Settings):
+# sites = [{ name = "Apps", enabled = true, host = "0.0.0.0", port = 9443, path = "/apps", directory = "D:/CompanyApps", https = true, spa_fallback = false }]
+sites = []
+
 [authentication]
 # Protected ciphertext, changed exclusively from the authenticated Settings page.
 passwordless_mode = ""
@@ -134,6 +144,18 @@ def initialize(data_dir: Path) -> dict:
 
 
 @dataclass(frozen=True)
+class StaticWebsite:
+    name: str
+    enabled: bool
+    host: str
+    port: int
+    path: str
+    directory: Path
+    https: bool
+    spa_fallback: bool = False
+
+
+@dataclass(frozen=True)
 class Settings:
     data_dir: Path
     credentials: dict = field(repr=False)
@@ -163,6 +185,7 @@ class Settings:
     cutoff_date: str = ""
     keep_months: int = 0
     auto_cleanup: bool = False
+    websites: tuple[StaticWebsite, ...] = ()
 
     @property
     def database_path(self) -> Path:
@@ -182,6 +205,7 @@ _KNOWN = {
     "publishing": {"source_directory"},
     "authentication": {"passwordless_mode"},
     "retention": {"cutoff_date", "keep_months", "auto_cleanup"},
+    "websites": {"sites"},
 }
 
 
@@ -278,4 +302,90 @@ def load_settings(data_dir: Path) -> Settings:
     if not isinstance(currency, str) or len(currency) != 3 or not currency.isascii() or not currency.isalpha():
         raise ConfigError("currency must be a three-letter currency label.")
     values["currency"] = currency.upper()
+    values["websites"] = validate_websites(values.pop("sites", []), data_dir, values)
     return Settings(data_dir=data_dir, credentials=credentials, **values)
+
+
+_WEBSITE_FIELDS = {"name", "enabled", "host", "port", "path", "directory", "https", "spa_fallback"}
+
+# Top-level namespaces used by the administrator, collector and configuration API.
+# Shared-port static sites must never intercept these protected routes.
+RESERVED_SERVER_URL_ROOTS = frozenset({
+    "api", "admin", "collect", "config", "healthz", "login", "logout",
+    "reports", "static",
+})
+
+
+def validate_websites(raw, data_dir: Path, options: dict) -> tuple[StaticWebsite, ...]:
+    """Validate all static site definitions; never expose the private server data root."""
+    if not isinstance(raw, list) or len(raw) > 32:
+        raise ConfigError("websites.sites must be a list of at most 32 sites.")
+    sites = []
+    names = set()
+    bindings = {}
+    private_root = data_dir.resolve()
+    for ordinal, item in enumerate(raw, start=1):
+        if not isinstance(item, dict) or set(item) != _WEBSITE_FIELDS:
+            raise ConfigError(f"Website {ordinal} requires exactly: {', '.join(sorted(_WEBSITE_FIELDS))}.")
+        name, host, prefix, directory = (item[key] for key in ("name", "host", "path", "directory"))
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}", name):
+            raise ConfigError(f"Website {ordinal}: name must be a short printable identifier.")
+        if name.casefold() in names:
+            raise ConfigError("Website names must be unique.")
+        names.add(name.casefold())
+        if any(type(item[key]) is not bool for key in ("enabled", "https", "spa_fallback")):
+            raise ConfigError(f"Website {name}: enabled, https and spa_fallback must be true or false.")
+        if not isinstance(host, str) or not host or len(host) > 253 or not re.fullmatch(r"[A-Za-z0-9.:_-]+", host):
+            raise ConfigError(f"Website {name}: host is not a valid bind host.")
+        port = item["port"]
+        if type(port) is not int or not 1 <= port <= 65535:
+            raise ConfigError(f"Website {name}: port must be an integer between 1 and 65535.")
+        if not isinstance(prefix, str) or len(prefix) > 256 or not prefix.startswith("/") or "//" in prefix or "\\" in prefix or "?" in prefix or "#" in prefix or "%" in prefix or any(p in (".", "..") or p.startswith(".") for p in prefix.split("/") if p):
+            raise ConfigError(f"Website {name}: URL path must be an absolute clean path.")
+        prefix = prefix.rstrip("/") or "/"
+        if not isinstance(directory, str) or not directory.strip() or "\x00" in directory or len(directory) > 4096:
+            raise ConfigError(f"Website {name}: directory must be a nonempty local path.")
+        source = Path(directory).expanduser()
+        if not source.is_absolute():
+            raise ConfigError(f"Website {name}: directory must be an absolute path on the server.")
+        resolved = source.resolve()
+        # Neither a path inside the private data dir nor an ancestor of it
+        # may be served. This includes the database, secrets, TLS and config.
+        if resolved == private_root or resolved in private_root.parents or private_root in resolved.parents:
+            raise ConfigError(f"Website {name}: directory overlaps protected Usage Server data.")
+        package_root = Path(__file__).resolve().parent
+        if resolved == package_root or resolved in package_root.parents:
+            raise ConfigError(f"Website {name}: directory must not expose the Usage Server application code.")
+        if item["enabled"]:
+            if not resolved.is_dir():
+                raise ConfigError(f"Website {name}: directory does not exist or is inaccessible: {resolved}.")
+            if item["https"] and not options.get("tls_enabled", False):
+                raise ConfigError(f"Website {name}: HTTPS requires the main [tls] section to be enabled.")
+            if not item["https"] and host not in ("localhost", "127.0.0.1", "::1") and not options.get("allow_insecure_remote", False):
+                raise ConfigError(f"Website {name}: remote HTTP needs server.allow_insecure_remote=true; use HTTPS instead.")
+            if port == options.get("port", 8765):
+                # Sharing means one WSGI listener, not two sockets on one port.
+                # An independent bind host or a different protocol would either
+                # fail to bind or change which clients can see the website.
+                if host.casefold() != str(options.get("host", "127.0.0.1")).casefold():
+                    raise ConfigError(f"Website {name}: sharing the Usage Server port requires the same bind address.")
+                if item["https"] != bool(options.get("tls_enabled", False)):
+                    raise ConfigError(f"Website {name}: sharing the Usage Server port requires the same HTTP/HTTPS mode.")
+                if prefix == "/" or prefix.split("/", 2)[1].casefold() in RESERVED_SERVER_URL_ROOTS:
+                    raise ConfigError(f"Website {name}: URL path {prefix} conflicts with reserved Usage Server routes.")
+            key = (host, port)
+            for (previous_host, previous_port) in bindings:
+                same_loopback = {host.lower(), previous_host.lower()} <= {"localhost", "127.0.0.1", "::1"}
+                wildcard = host in ("0.0.0.0", "::") or previous_host in ("0.0.0.0", "::")
+                if previous_port == port and host != previous_host and (same_loopback or wildcard):
+                    raise ConfigError(f"Website {name}: port {port} has overlapping bind addresses.")
+            binding = bindings.setdefault(key, {"https": item["https"], "paths": set()})
+            if binding["https"] != item["https"]:
+                raise ConfigError(f"Website {name}: sites on one port must agree on HTTP versus HTTPS.")
+            if prefix in binding["paths"]:
+                raise ConfigError(f"Website {name}: duplicate URL prefix {prefix} on port {port}.")
+            binding["paths"].add(prefix)
+        sites.append(StaticWebsite(name=name, enabled=item["enabled"], host=host, port=port,
+                                   path=prefix, directory=resolved, https=item["https"],
+                                   spa_fallback=item["spa_fallback"]))
+    return tuple(sites)

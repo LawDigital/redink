@@ -748,6 +748,13 @@
                     "description": "Enable this if Word should automatically show a markup for predefined text-changing functions such as corrections or abbreviations. Example: True. [DoMarkupWord]"
                 },
                 {
+                    "key": "WordCommentSelectionTracking",
+                    "label": "Track comment selection in Word",
+                    "type": "boolean",
+                    "default": "True",
+                    "description": "Track the selected comment card while Word is open. When off, comment commands use the selection Word reports. A single matching comment in the document text is used automatically. Apply Comment To Para also checks the paragraph if the cursor or selected text misses the comment. Restart Word after changing this setting. [WordCommentSelectionTracking]"
+                },
+                {
                     "key": "MarkupMethodHelper",
                     "label": "Helper Method (1-3)",
                     "type": "integer",

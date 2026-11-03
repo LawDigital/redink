@@ -932,7 +932,7 @@ Namespace Agents
 
         Private Shared Function IsInfrastructureCode(code As System.String) As System.Boolean
             Select Case code
-                Case "INTERNAL_BROKER_ERROR", "BROKER_START_FAILED", "BROKER_EXITED_WITHOUT_RESPONSE", "BROKER_HEARTBEAT_LOST"
+                Case "INTERNAL_BROKER_ERROR", "BROKER_START_FAILED", "BROKER_EXITED_WITHOUT_RESPONSE", "BROKER_HEARTBEAT_LOST", "BROKER_RESPONSE_INVALID"
                     Return True
                 Case Else
                     Return False

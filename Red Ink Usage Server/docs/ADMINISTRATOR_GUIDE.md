@@ -1,6 +1,6 @@
 # Red Ink Usage Server — Administrator Guide
 
-**Edition:** 31 October 2026 · **Applies to:** Red Ink Usage Server 1.4 and later, including version 1.4.2  
+**Edition:** 31 October 2026 · **Applies to:** Red Ink Usage Server 1.4 and later, including version 1.4.8  
 **Audience:** IT administrators, deployment managers, licence/reporting administrators and privacy officers  
 **Scope:** installation, deployment, configuration, monthly licence counting, `LogPath` analytics, security, monitoring, retention and recovery  
 **This guide does not require knowledge of Python, VB.NET, SQL or application source code.**
@@ -154,6 +154,74 @@ These are **examples**; copy the actual addresses from Settings. Use a hostname 
 ### Token rotation
 
 **Rotate ingestion token** changes the `LicenseCounterPath` credentials. **Rotate configuration token** changes all INI and `.sig` download URLs. Each newly generated token invalidates its predecessor immediately. Rotate one role at a time, capture the replacement link, update relevant clients and verify both collection and downloading. Do not rotate during an unattended rollout without a distribution plan. The collector token is not an administrator password and does not authenticate the content of a claimed licence identity.
+
+### Additional static websites for internal applications
+
+An authenticated administrator can add independent **static websites** under
+**Settings → Additional static websites**. Create an approved folder on the
+server and place `index.html`, `index.htm`, CSS, JavaScript, images, fonts,
+manifests and other public application assets there. For each website set:
+
+| Setting | Meaning |
+|---|---|
+| Site name | Unique display name for administration |
+| Enabled | Disabled sites do not bind ports |
+| Bind address | `0.0.0.0` for all server IPv4 interfaces, or `127.0.0.1` for loopback only |
+| TCP port | Dedicated site port, or the Usage Server port when its bind address and HTTPS mode match and the URL prefix is not reserved |
+| URL path | `/`, `/apps`, `/hr`, etc.; multiple sites may use one host/port with distinct paths |
+| Local document root | Absolute server-side path, e.g. `D:\CompanyApps\Portal` |
+| Use existing HTTPS certificate | Reuses the certificate and key from `[tls]`, including its renewal procedure |
+| SPA fallback | Optional `index.html` response for client-side routes without file extensions |
+
+Click **Save website** inside the website card to validate and activate that website. The main **Save configuration** button changes only general Usage Server settings.
+A port conflict, reserved path or invalid directory prevents the transition and rolls back
+to the previous listener/configuration. No new `init` command is required.
+Directory requests use `index.html` or `index.htm`; otherwise no directory
+listing is exposed. File downloads are supported, but Python/PHP/ASP or other
+server-side application scripts are **not executed**. The static site does not
+require the Usage Server's sign-in and does not take ownership of its API routes.
+**Security limitation of shared-origin hosting:** HTML and JavaScript on the
+same hostname **and port** as the Admin UI execute in the same browser origin.
+For an administrator who is signed in, such script can access that origin's
+authenticated API. Only deploy fully trusted, internally reviewed app code on
+the shared administrative origin. A separate TCP port or a distinct hostname
+provides a different browser origin, and is recommended for less-trusted apps.
+
+For the simplest deployment, use the Usage Server's own HTTPS port and bind address with a distinct prefix such as `/apps`; then the administrator stays at `/`, the collector at `/collect/...`, and the app at `/apps/` without a second firewall rule. The root `/` and namespaces `/api`, `/admin`, `/collect`, `/config`, `/login`, `/logout`, `/healthz`, `/reports`, and `/static` cannot be assigned to shared-port websites. Multiple company sites may share the main port using distinct URL prefixes.
+
+For example, with port **9443**, path **`/apps`**, HTTPS enabled and the main
+server DNS name `vi-inky01.int.vischer.com`, the website can be reached at
+`https://vi-inky01.int.vischer.com:9443/apps/`. Applications hosted under a
+prefix such as `/apps` must use relative asset URLs or be built with this
+prefix as their base path; absolute `/assets/...` links otherwise address the
+root of the port rather than `/apps/assets/...`. Every additional port requires
+its own inbound firewall permission for the authorised internal client
+networks. The certificate must also be trusted by clients and valid for the
+hostname they use. A site bound to `127.0.0.1` is not reachable remotely.
+
+**Access control:** These websites are deliberately unauthenticated. Anyone
+who can reach an enabled site's TCP port can request its published static
+files. Only publish company-approved intranet content; configure the Windows
+and network firewalls accordingly, or use a separately authenticated proxy.
+The private Usage Server data directory (including database, token secrets,
+TLS keys and published INI configuration) may not be used as a website root.
+Hidden and sensitive configuration/key files are refused; symbolic links
+outside the selected root are refused. The web service does not provide write
+access, directory uploads or dynamic code execution. If an app needs a backend,
+separate user login, server-side APIs or unrestricted extension support, use a
+dedicated application server instead of treating it as a static website.
+
+An equivalent manual `server.toml` entry uses this form (modify only while
+stopped, or prefer the authenticated Settings page):
+
+```toml
+[websites]
+sites = [{ name = "Apps", enabled = true, host = "0.0.0.0", port = 9443, path = "/apps", directory = "D:/CompanyApps/Portal", https = true, spa_fallback = false }]
+```
+
+Existing `server.toml` files with no `[websites]` section continue to work.
+The site list is empty by default, and importing an application does not
+change LicenseCounter, LogPath analytics, billing or retention.
 
 ## 6. Configure LicenseCounter in `redink.ini`
 

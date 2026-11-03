@@ -4201,7 +4201,7 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Creates tracked-change comparison by using Word's CompareDocuments on temporary docs, then pastes result into target range.
-    ''' Shows splash screen and minimizes temp doc windows.
+    ''' Compares two hidden scratch documents without creating or minimizing a document window.
     ''' </summary>
     ''' <param name="originalText">Original text.</param>
     ''' <param name="newText">Revised text.</param>
@@ -4210,15 +4210,9 @@ Partial Public Class ThisAddIn
     ''' <param name="noformatting">Skip formatting application.</param>
     Private Sub CompareAndInsertComparedoc(originalText As String, newText As String, targetrange As Range, Optional paraformatinline As Boolean = False, Optional noformatting As Boolean = True)
 
-        Dim splash As New SLib.SplashScreen("Creating markup using the Word compare functionality (ignore any flickering and press 'No' if prompted) ...")
-        splash.Show()
-        splash.Refresh()
-
         Dim wordApp As Word.Application = Globals.ThisAddIn.Application
         Dim tempOriginalDoc As Word.Document = Nothing
         Dim tempNewDoc As Word.Document = Nothing
-        Dim comparisonDoc As Word.Document = Nothing
-        Dim originalAuthor As String = wordApp.UserName
         Dim originalScreenUpdating As Boolean = wordApp.ScreenUpdating
         Dim rng As Word.Range
 
@@ -4226,20 +4220,15 @@ Partial Public Class ThisAddIn
         Dim targetDoc As Word.Document = targetrange.Document
         Dim originalTrackRevisions As Boolean = targetDoc.TrackRevisions
 
+        Dim splash As New SLib.SplashScreen("Creating markup using the Word compare functionality (ignore any flickering and press 'No' if prompted) ...")
         Try
-            ' Disable screen updating to reduce flickers
+            splash.Show()
+            splash.Refresh()
+            ' Keep screen updating disabled until both scratch documents have closed.
             wordApp.ScreenUpdating = False
 
-            ' Set the temporary author name to app
-            ' wordApp.UserName = AN
-
-            ' Create temporary documents for original and new text
-            tempOriginalDoc = wordApp.Documents.Add
-            tempNewDoc = wordApp.Documents.Add
-
-            ' Minimize the windows of the temporary documents
-            tempOriginalDoc.Windows(1).WindowState = Word.WdWindowState.wdWindowStateMinimize
-            tempNewDoc.Windows(1).WindowState = Word.WdWindowState.wdWindowStateMinimize
+            tempOriginalDoc = wordApp.Documents.Add(Visible:=False)
+            tempNewDoc = wordApp.Documents.Add(Visible:=False)
 
             ' Insert original text into the first temporary document
             tempOriginalDoc.Content.Text = originalText
@@ -4253,11 +4242,11 @@ Partial Public Class ThisAddIn
                 ApplyParagraphFormat(rng)
             End If
 
-            ' Perform the comparison
-            comparisonDoc = wordApp.CompareDocuments(
+            ' Write revisions into the prepared revised copy, which also carries the paragraph formatting.
+            Dim comparisonDoc As Microsoft.Office.Interop.Word.Document = wordApp.CompareDocuments(
                 OriginalDocument:=tempOriginalDoc,
                 RevisedDocument:=tempNewDoc,
-                Destination:=WdCompareDestination.wdCompareDestinationNew,
+                Destination:=Microsoft.Office.Interop.Word.WdCompareDestination.wdCompareDestinationRevised,
                 Granularity:=WdGranularity.wdGranularityWordLevel,
                 CompareFormatting:=False,
                 CompareCaseChanges:=False,
@@ -4293,21 +4282,24 @@ Partial Public Class ThisAddIn
         Catch ex As System.Exception
             Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Error in CompareAndInsertComparedoc: " & ex.Message, "Error")
         Finally
-            ' Restore screen updating
-            wordApp.ScreenUpdating = originalScreenUpdating
-
-            ' Restore the original TrackRevisions state
-            targetDoc.TrackRevisions = originalTrackRevisions
-
-            ' Restore the original author name
-            'wordApp.UserName = originalAuthor
-
-            ' Clean up temporary documents
-            If tempOriginalDoc IsNot Nothing Then tempOriginalDoc.Close(SaveChanges:=False)
-            If tempNewDoc IsNot Nothing Then tempNewDoc.Close(SaveChanges:=False)
-            If comparisonDoc IsNot Nothing Then comparisonDoc.Close(SaveChanges:=False)
-
-            splash.Close()
+            ' The comparison result is the revised scratch document. Close each scratch document once.
+            For Each scratchDoc As Microsoft.Office.Interop.Word.Document In {tempNewDoc, tempOriginalDoc}
+                If scratchDoc Is Nothing Then Continue For
+                Try
+                    scratchDoc.Close(SaveChanges:=Microsoft.Office.Interop.Word.WdSaveOptions.wdDoNotSaveChanges)
+                Catch closeError As System.Exception
+                    System.Diagnostics.Debug.WriteLine("Word compare scratch document cleanup failed: " & closeError.ToString())
+                End Try
+            Next
+            Try
+                targetDoc.TrackRevisions = originalTrackRevisions
+            Finally
+                Try
+                    wordApp.ScreenUpdating = originalScreenUpdating
+                Finally
+                    splash.Close()
+                End Try
+            End Try
 
         End Try
     End Sub
