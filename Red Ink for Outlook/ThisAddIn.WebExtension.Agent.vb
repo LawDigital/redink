@@ -598,20 +598,24 @@ Partial Public Class ThisAddIn
         SyncWorkspaceToPathPolicy(includeSessionTempFallback:=True)
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "AutoPilot (Local) invoked")
 
-        Dim tools As New List(Of ModelConfig)()
+        Return BuildChatAgentToolSelection(If(selectedTools, _selectedToolsForChat))
+    End Function
 
-        If selectedTools IsNot Nothing Then
-            tools.AddRange(selectedTools)
-        ElseIf _selectedToolsForChat IsNot Nothing Then
-            tools.AddRange(_selectedToolsForChat)
+    ' Share the exact Local Chat selection assembly with other host-managed runs.
+    Private Function BuildChatAgentToolSelection(
+        selectedTools As System.Collections.Generic.IEnumerable(Of Global.SharedLibrary.SharedLibrary.ModelConfig),
+        Optional includeWorkspaceTools As System.Boolean = True) As System.Collections.Generic.List(Of Global.SharedLibrary.SharedLibrary.ModelConfig)
+
+        Dim tools As New System.Collections.Generic.List(Of Global.SharedLibrary.SharedLibrary.ModelConfig)()
+        If selectedTools IsNot Nothing Then tools.AddRange(selectedTools)
+        If includeWorkspaceTools Then
+            tools.AddRange(GetChatAgentWorkspaceTools())
+            tools.AddRange(Global.SharedLibrary.Agents.WorkspaceTools.BuildAll())
         End If
 
-        tools.AddRange(GetChatAgentWorkspaceTools())
-        tools.AddRange(SharedLibrary.Agents.WorkspaceTools.BuildAll())
-
         Return tools.
-            Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
-            GroupBy(Function(t) t.ToolName, StringComparer.OrdinalIgnoreCase).
+            Where(Function(t) t IsNot Nothing AndAlso Not System.String.IsNullOrWhiteSpace(t.ToolName)).
+            GroupBy(Function(t) t.ToolName, System.StringComparer.OrdinalIgnoreCase).
             Select(Function(g) g.First()).
             ToList()
     End Function
@@ -1320,10 +1324,10 @@ Partial Public Class ThisAddIn
     End Sub
 
     ''' <summary>
-    ''' Returns True if the chat agent mode is blocked because AutoPilot is running.
+    ''' Returns True while AutoPilot or a batch job owns the agent context.
     ''' </summary>
     Private Function IsChatAgentBlocked() As Boolean
-        Return _apActive
+        Return _apActive OrElse System.Threading.Volatile.Read(_batchAgentRunning) <> 0
     End Function
 
 

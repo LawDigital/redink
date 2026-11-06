@@ -102,7 +102,8 @@ Partial Public Class ThisAddIn
                 toolCall.Arguments,
                 context.SequencingState,
                 restoredRetryInvariants,
-                retryInvariantError) Then
+                retryInvariantError,
+                toolCall.CallId) Then
 
                 context.LogWarn("Retry fidelity guard rejected a tool call.", details:=retryInvariantError)
                 response.Success = False

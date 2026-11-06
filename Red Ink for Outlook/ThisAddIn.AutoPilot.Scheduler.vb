@@ -1,4 +1,4 @@
-﻿' Part of "Red Ink for Outlook"
+' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
@@ -195,6 +195,15 @@ Partial Public Class ThisAddIn
 
         ''' <summary>Number of failed e-mail execution retries for the current due occurrence.</summary>
         Public Property FailureRetryCount As Integer = 0
+    End Class
+
+    ''' <summary>A post-execution protocol error must not replay already completed tool side effects.</summary>
+    Private NotInheritable Class ScheduledTaskDeliveryDecisionException
+        Inherits System.InvalidOperationException
+
+        Public Sub New(reason As System.String)
+            MyBase.New("Scheduled task returned an invalid delivery decision: " & reason)
+        End Sub
     End Class
 
     ''' <summary>Root object for the schedule JSON file.</summary>
@@ -860,12 +869,16 @@ Partial Public Class ThisAddIn
                 ApDashboardLog($"📅 Executing scheduled task: {task.Id.Substring(0, 8)}... — ""{Truncate(task.Instruction, 60)}""", "info")
 
                 Try
-                    Await ExecuteScheduledTask(task, ct)
+                    Dim deliveryDisposition As Global.SharedLibrary.Agents.ToolingDeliveryDisposition =
+                        Await ExecuteScheduledTask(task, ct)
 
-                    ' Mark as executed and advance schedule
+                    ' A completed conditional no-op consumes this occurrence exactly once, like a delivered result.
                     task.LastExecutedUtc = DateTime.UtcNow
                     task.FailureRetryCount = 0
-                    task.LastResult = "Completed successfully at " & DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss UTC")
+                    task.LastResult =
+                        If(deliveryDisposition = Global.SharedLibrary.Agents.ToolingDeliveryDisposition.Suppress,
+                           "Completed successfully without delivery at ", "Completed successfully at ") &
+                        DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss UTC")
 
                     AdvanceTaskSchedule(task)
                     SchedulerUpdateTask(task)
@@ -874,6 +887,10 @@ Partial Public Class ThisAddIn
 
                 Catch ex As OperationCanceledException
                     Throw
+                Catch ex As ScheduledTaskDeliveryDecisionException
+                    ' The tools already ran. Keep the failed delivery visible, but never replay
+                    ' mutations just to repair final notification metadata.
+                    HandleScheduledTaskExecutionFailure(task, ex, allowAutomaticRetry:=False)
                 Catch ex As System.Exception
                     HandleScheduledTaskExecutionFailure(task, ex)
                 End Try
@@ -883,12 +900,14 @@ Partial Public Class ThisAddIn
         Next
     End Function
 
-    Private Sub HandleScheduledTaskExecutionFailure(task As ScheduledTask, ex As System.Exception)
+    Private Sub HandleScheduledTaskExecutionFailure(task As ScheduledTask,
+                                                    ex As System.Exception,
+                                                    Optional allowAutomaticRetry As System.Boolean = True)
         If task Is Nothing Then Return
 
         task.FailureRetryCount += 1
 
-        If task.FailureRetryCount <= Math.Max(0, AP_SchedulerEmailFailureRetryLimit) Then
+        If allowAutomaticRetry AndAlso task.FailureRetryCount <= Math.Max(0, AP_SchedulerEmailFailureRetryLimit) Then
             task.LastResult =
                 $"Failed at {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss UTC}: {ex.Message} " &
                 $"— retry {task.FailureRetryCount} of {AP_SchedulerEmailFailureRetryLimit} will be attempted"
@@ -903,22 +922,25 @@ Partial Public Class ThisAddIn
 
         task.LastResult =
             $"Failed at {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss UTC}: {ex.Message} " &
-            $"— retry limit reached after {AP_SchedulerEmailFailureRetryLimit} retr{If(AP_SchedulerEmailFailureRetryLimit = 1, "y", "ies")}"
+            If(allowAutomaticRetry,
+               $"— retry limit reached after {AP_SchedulerEmailFailureRetryLimit} retr{If(AP_SchedulerEmailFailureRetryLimit = 1, "y", "ies")}",
+               "— automatic replay skipped after task execution")
 
         AdvanceTaskSchedule(task)
         task.FailureRetryCount = 0
         SchedulerUpdateTask(task)
 
         ApDashboardLog(
-            $"📅 Task {task.Id.Substring(0, 8)}... FAILED: {ex.Message} — retry limit reached. Next due: {If(task.Status = "completed", "(none — completed)", task.NextDueUtc.ToString("yyyy-MM-dd HH:mm UTC"))}",
+            $"📅 Task {task.Id.Substring(0, 8)}... FAILED: {ex.Message} — {If(allowAutomaticRetry, "retry limit reached", "automatic replay skipped after task execution")}. Next due: {If(task.Status = "completed", "(none — completed)", task.NextDueUtc.ToString("yyyy-MM-dd HH:mm UTC"))}",
             "error")
     End Sub
 
     ''' <summary>
     ''' Executes a single scheduled task: sends instruction to LLM with tooling,
-    ''' collects result, persists workspace files, and delivers result by e-mail.
+    ''' collects results, persists workspace files, and applies an explicit conditional delivery decision.
     ''' </summary>
-    Private Async Function ExecuteScheduledTask(task As ScheduledTask, ct As CancellationToken) As Task
+    Private Async Function ExecuteScheduledTask(task As ScheduledTask,
+                                                ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of Global.SharedLibrary.Agents.ToolingDeliveryDisposition)
         Dim tempDir As String = Nothing
         Dim previousMaxToolIterations As Integer = 0
         Dim executionState As InkyState = Nothing
@@ -958,6 +980,7 @@ Partial Public Class ThisAddIn
             _lastCompletedToolingRunState = Nothing
             _lastCompletedToolingWorkflowId = System.String.Empty
             _lastCompletedToolingWasBlocked = False
+            _lastCompletedToolingTaskStatus = System.String.Empty
             _lastCompletedToolResponses = New List(Of ToolResponse)()
 
             ' Create isolated temp directory
@@ -1079,7 +1102,8 @@ Partial Public Class ThisAddIn
                     If(archivePrepared.HasTrigger, archivePrepared.CleanPrompt, Nothing))
             If archivePrepared.HasTrigger Then userPrompt.AppendLine(archivePrepared.ContextText)
 
-            Dim systemPrompt = InterpolateAtRuntime(SP_AutoPilot)
+            Dim systemPrompt = InterpolateAtRuntime(SP_AutoPilot) & System.Environment.NewLine &
+                Global.SharedLibrary.Agents.ToolingDeliveryContract.ConditionalDeliveryInstruction
 
             ' A task created by an AutoPilot sender must retain the same hard sender policy
             ' when it executes later; scheduling must not become a policy-bypass path.
@@ -1104,8 +1128,32 @@ Partial Public Class ThisAddIn
                 ApplyModelConfig(_context, executionModelConfig)
             End If
 
+            Dim deliveryCondition As Global.SharedLibrary.Agents.ToolingDeliveryCondition = Nothing
+            For classificationAttempt As System.Int32 = 1 To 2
+                ct.ThrowIfCancellationRequested()
+                Dim conditionJson As System.String = Await LLM(
+                    Global.SharedLibrary.Agents.ToolingDeliveryContract.ConditionClassificationInstruction,
+                    Newtonsoft.Json.JsonConvert.SerializeObject(New With {.task_instruction = task.Instruction}),
+                    UseSecondAPI:=executionUseSecondApi, HideSplash:=True, EnsureUI:=False,
+                    cancellationToken:=ct,
+                    transportRetryProfile:=Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Unattended)
+                deliveryCondition = Global.SharedLibrary.Agents.ToolingDeliveryContract.ParseCondition(conditionJson, task.Instruction)
+                If deliveryCondition.IsValid Then Exit For
+                ApDashboardLog("Scheduled delivery classification needs a corrected metadata response.", "warn")
+            Next
+            If deliveryCondition Is Nothing OrElse Not deliveryCondition.IsValid Then
+                Throw New System.InvalidOperationException("The model could not classify the task's delivery condition. No task tools ran.")
+            End If
+            ct.ThrowIfCancellationRequested()
+            Dim deliveryConditionInstruction As System.String =
+                Global.SharedLibrary.Agents.ToolingDeliveryContract.BuildConditionInstruction(deliveryCondition)
+            systemPrompt &= System.Environment.NewLine & deliveryConditionInstruction
+            ApDashboardLog("Scheduled delivery contract: " & If(deliveryCondition.IsConditional, "conditional", "normal delivery"), "info")
+
             ' Execute with tooling
             Dim response As String
+            Dim coachingArchivePathForOutcome As System.String = System.String.Empty
+            Dim executedToolingLoop As System.Boolean = False
             Dim modelCanCallTools As Boolean =
                 ScheduledTaskExecutionSupportsTooling(
                     executionState,
@@ -1130,7 +1178,9 @@ Partial Public Class ThisAddIn
                         source:="autopilot_schedule", messageId:=task.Id)
                     Dim coachingArchivePath As System.String = BuildAutoPilotToolingLogArchivePath(
                         task.CreatedBy, If(System.String.IsNullOrWhiteSpace(task.Subject), task.Instruction, task.Subject), originalRequest)
+                    coachingArchivePathForOutcome = If(coachingArchivePath, System.String.Empty)
                     Try
+                        executedToolingLoop = True
                         response = Await ExecuteToolingLoop(
                             systemPrompt, userPrompt.ToString(),
                             schedulerTools, executionUseSecondApi,
@@ -1152,7 +1202,9 @@ Partial Public Class ThisAddIn
                                          transportRetryProfile:=Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Unattended)
                 End If
             Else
-                Dim effectiveSystemPrompt = If(modelCanCallTools, systemPrompt, InterpolateAtRuntime(SP_AutoPilot_NoTools))
+                Dim effectiveSystemPrompt = If(modelCanCallTools, systemPrompt,
+                    InterpolateAtRuntime(SP_AutoPilot_NoTools) & System.Environment.NewLine &
+                    Global.SharedLibrary.Agents.ToolingDeliveryContract.ConditionalDeliveryInstruction & System.Environment.NewLine & deliveryConditionInstruction)
                 response = Await LLM(effectiveSystemPrompt, userPrompt.ToString(),
                                      UseSecondAPI:=executionUseSecondApi,
                                      HideSplash:=True, EnsureUI:=False,
@@ -1161,13 +1213,35 @@ Partial Public Class ThisAddIn
                                      transportRetryProfile:=Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Unattended)
             End If
 
+            ' The parent tooling loop may return cancellation prose; the caller token remains authoritative.
+            ct.ThrowIfCancellationRequested()
             If String.IsNullOrWhiteSpace(response) Then
                 Throw New InvalidOperationException("LLM returned empty response for scheduled task")
             End If
 
             Dim taskStatus = SharedLibrary.Agents.TaskStatusFooterParser.Parse(response)
+            Dim deliveryDirective As Global.SharedLibrary.Agents.ToolingDeliveryDirective = Nothing
+            Dim runCompleted As System.Boolean = False
             Dim isPartialResult As Boolean = False
             Dim partialFailureMessage As String = ""
+
+            If executedToolingLoop Then
+                ' Accepted tool-loop footers are removed before egress. Never reconstruct their control
+                ' metadata from localized prose or from another scheduled/AutoPilot run.
+                If _lastCompletedToolingRunState IsNot Nothing Then
+                    deliveryDirective = _lastCompletedToolingRunState.FinalDeliveryDirective
+                End If
+                isPartialResult = _lastCompletedToolingWasBlocked
+                runCompleted = Not isPartialResult AndAlso _lastCompletedToolingRunState IsNot Nothing AndAlso
+                    System.String.Equals(_lastCompletedToolingTaskStatus, "complete", System.StringComparison.OrdinalIgnoreCase)
+                If isPartialResult Then partialFailureMessage = "Scheduled task execution was blocked."
+            Else
+                deliveryDirective = Global.SharedLibrary.Agents.ToolingDeliveryContract.ParseFinalDirective(response)
+                Dim strictStatus As Global.SharedLibrary.Agents.ToolCallSequencing.TaskStatusParseResult =
+                    Global.SharedLibrary.Agents.ToolCallSequencing.ParseStrictTaskStatus(response)
+                runCompleted = strictStatus.IsValid AndAlso
+                    strictStatus.Status = Global.SharedLibrary.Agents.ToolCallSequencing.TaskStatusKind.Complete
+            End If
 
             If taskStatus IsNot Nothing Then
                 Select Case taskStatus.Kind
@@ -1197,20 +1271,80 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
-            ' Collect result attachments
+            ' Validate and collect normal delivery outputs before considering suppression. Missing or
+            ' invalid artifacts must remain errors even when the model requests no notification.
             Dim resultAttachments = CollectResultAttachments(tempDir, attachments)
-            Dim sourcesHtml = BuildSourcesUsedHtml(_apCurrentToolCallLog)
 
             ' ── Persist new tool outputs to workspace ──
             If resultAttachments IsNot Nothing AndAlso resultAttachments.Count > 0 Then
                 PersistResultsToWorkspace(task.Id, tempDir, resultAttachments, inputFileNames, workspaceFileNames)
-                ' Re-sync the workspace file list
                 SyncWorkspaceFileList(task)
             End If
+
+            If Not isPartialResult AndAlso (deliveryCondition.IsConditional OrElse deliveryDirective IsNot Nothing) Then
+                Dim hasUserDeliverables As System.Boolean = resultAttachments IsNot Nothing AndAlso resultAttachments.Count > 0
+                Dim presentableComplete As System.Boolean = runCompleted AndAlso
+                    Global.SharedLibrary.Agents.ToolCallSequencing.IsUserPresentableFinalText(response)
+                Dim suppressionRejection As System.String =
+                    Global.SharedLibrary.Agents.ToolingDeliveryContract.GetRequiredDecisionRejectionReason(
+                        deliveryDirective, deliveryCondition, task.Instruction, presentableComplete, hasUserDeliverables)
+                If deliveryCondition.IsConditional AndAlso suppressionRejection.Length > 0 AndAlso presentableComplete Then
+                    ApDashboardLog("Reviewing delivery metadata only; task tools will not run again.", "info")
+                    Try
+                        Dim repairedJson As System.String = Await LLM(
+                            "Return only the requested result-delivery JSON. Do not perform the task or call tools.",
+                            Global.SharedLibrary.Agents.ToolingDeliveryContract.BuildDecisionRepairPrompt(
+                                deliveryCondition, task.Instruction, response, hasUserDeliverables),
+                            UseSecondAPI:=executionUseSecondApi, HideSplash:=True, EnsureUI:=False,
+                            cancellationToken:=ct,
+                            transportRetryProfile:=Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Unattended)
+                        ct.ThrowIfCancellationRequested()
+                        deliveryDirective = Global.SharedLibrary.Agents.ToolingDeliveryContract.ParseRepairedDecision(repairedJson)
+                        suppressionRejection = Global.SharedLibrary.Agents.ToolingDeliveryContract.GetRequiredDecisionRejectionReason(
+                            deliveryDirective, deliveryCondition, task.Instruction, presentableComplete, hasUserDeliverables)
+                    Catch ex As System.OperationCanceledException When ct.IsCancellationRequested
+                        ' Preserve cancellation and consume the finished occurrence; never replay tools for this metadata step.
+                        SyncWorkspaceFileList(task)
+                        HandleScheduledTaskExecutionFailure(task,
+                            New ScheduledTaskDeliveryDecisionException("delivery_metadata_review_cancelled"), allowAutomaticRetry:=False)
+                        Throw
+                    Catch ex As System.Exception
+                        suppressionRejection = "delivery_metadata_review_failed"
+                        ApDashboardLog("Delivery metadata review failed: " & ex.GetType().FullName, "warn")
+                    End Try
+                End If
+                If Not System.String.IsNullOrWhiteSpace(suppressionRejection) Then
+                    ' The terminal fault handler saves this same task object after Finally.
+                    ' Preserve its workspace inventory even when no deliverable was created.
+                    SyncWorkspaceFileList(task)
+                    ApDashboardLog("Scheduled delivery decision rejected: " & suppressionRejection, "warn")
+                    Throw New ScheduledTaskDeliveryDecisionException(suppressionRejection)
+                End If
+
+                If deliveryDirective.Disposition = Global.SharedLibrary.Agents.ToolingDeliveryDisposition.Suppress Then
+                    ' Workspace tools write directly to this task's durable workspace. Refresh THIS task
+                    ' before its caller saves the successful occurrence; a stale file list must not win.
+                    SyncWorkspaceFileList(task)
+                    ct.ThrowIfCancellationRequested()
+                    mayDeleteTempDirectory = True
+                    RecordLastProcessedTime()
+                    ApDashboardLog("Scheduled task completed; conditional result delivery suppressed.", "info")
+                    ' The run was intentionally silent; do not imply a reply or queue a tip.
+                    ' Suppression is a successful host decision, not a reason to
+                    ' send the requester a separate critique of the task text.
+                    SuppressAutoPilotPromptCoachingRun(coachingArchivePathForOutcome)
+                    Return Global.SharedLibrary.Agents.ToolingDeliveryDisposition.Suppress
+                End If
+            End If
+
+            Dim sourcesHtml = BuildSourcesUsedHtml(_apCurrentToolCallLog)
             AddSemanticArchiveEvidenceAttachments(resultAttachments, archiveScope, tempDir)
 
-            ' Send result e-mail
+            ' Send result e-mail. Blocked/partial outcomes never use the suppression path.
+            ct.ThrowIfCancellationRequested()
             Await SwitchToUi(Sub() SendScheduledTaskResult(task, response, resultAttachments, sourcesHtml))
+            RecordAutoPilotPromptCoachingDeliveredOutcome(coachingArchivePathForOutcome, isPartialResult,
+                If(isPartialResult, New System.String() {"review_with_operator"}, System.Array.Empty(Of System.String)()), response)
             mayDeleteTempDirectory = True
 
             Interlocked.Increment(_apSessionReplyCount)
@@ -1219,6 +1353,7 @@ Partial Public Class ThisAddIn
             If isPartialResult Then
                 Throw New InvalidOperationException(partialFailureMessage)
             End If
+            Return Global.SharedLibrary.Agents.ToolingDeliveryDisposition.Deliver
 
         Finally
             ' A cancellation/error while waiting for AgentGate means this run never owned

@@ -117,7 +117,8 @@ Partial Public Class ThisAddIn
         Dim systemPrompt As String = SharedLibrary.Agents.ToolingBootstrapPreflight.BuildSystemPrompt(manifests)
         Dim userPrompt As String = SharedLibrary.Agents.ToolingBootstrapPreflight.BuildUserPrompt(
             context.LatestUserRequestRaw,
-            context.HostTaskSummary)
+            context.HostTaskSummary,
+            context.SequencingState.OutputContractInputs)
 
         context.Log("Bootstrap preflight started: response language, memory grounding, source-format authority, capability routing, and first capability load.")
         ToolingFileLogger.LogStep("[PERF] Bootstrap preflight LLM request started.")
@@ -150,7 +151,13 @@ Partial Public Class ThisAddIn
             Throw
         Catch ex As System.OperationCanceledException
             sw.Stop()
-            ToolingFileLogger.LogStep($"[PERF] Bootstrap preflight cancelled: elapsedMs={sw.ElapsedMilliseconds}.")
+            Try
+                ToolingFileLogger.LogStep($"[PERF] Bootstrap preflight cancelled: elapsedMs={sw.ElapsedMilliseconds}.")
+                ToolingFileLogger.LogStep(SharedLibrary.Agents.ToolingPhaseTelemetry.BuildCancellationRecord(
+                    "bootstrap_routing", context.HostKind, sw.ElapsedMilliseconds, ex, cancellationToken, context.IsCancelled))
+            Catch telemetryException As System.Exception
+                ' Diagnostics must never replace the original cancellation or alter its propagation.
+            End Try
             Throw
         Catch ex As System.Exception
             sw.Stop()
@@ -168,6 +175,13 @@ Partial Public Class ThisAddIn
 
         Dim decision As SharedLibrary.Agents.ToolingBootstrapPreflight.Decision =
             SharedLibrary.Agents.ToolingBootstrapPreflight.ParseDecision(raw)
+
+        Dim outputContractError As System.String = System.String.Empty
+        If context.SequencingState IsNot Nothing AndAlso Not context.SequencingState.OutputContractPinned Then
+            If Not context.SequencingState.TryApplyOutputRequirements(decision.OutputRequirements, False, outputContractError) Then
+                context.Log("Output contract needs an explicit completion review: " & outputContractError, "diag")
+            End If
+        End If
 
         Dim normalizedForLog As String = If(decision.NormalizedOutput, "")
         If normalizedForLog.Length > 1200 Then normalizedForLog = normalizedForLog.Substring(0, 1200) & "..."

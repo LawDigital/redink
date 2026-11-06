@@ -525,7 +525,7 @@ Partial Public Class ThisAddIn
             End If
 
             If context IsNot Nothing AndAlso context.SequencingState IsNot Nothing Then
-                SharedLibrary.Agents.ToolCallSequencing.CaptureRetryInvariantArguments(toolCall.ToolName, toolCall.Arguments, context.SequencingState)
+                SharedLibrary.Agents.ToolCallSequencing.CaptureRetryInvariantArguments(toolCall.ToolName, toolCall.Arguments, context.SequencingState, toolCall.CallId)
             End If
 
             Dim fileName As String = GetArgString(toolCall.Arguments, "file_name")
@@ -6247,7 +6247,7 @@ Partial Public Class ThisAddIn
             End If
 
             If context IsNot Nothing AndAlso context.SequencingState IsNot Nothing Then
-                SharedLibrary.Agents.ToolCallSequencing.CaptureRetryInvariantArguments(toolCall.ToolName, toolCall.Arguments, context.SequencingState)
+                SharedLibrary.Agents.ToolCallSequencing.CaptureRetryInvariantArguments(toolCall.ToolName, toolCall.Arguments, context.SequencingState, toolCall.CallId)
             End If
 
             ' ── Determine file name and extension ──
@@ -11692,7 +11692,7 @@ Partial Public Class ThisAddIn
             End If
 
             If context IsNot Nothing AndAlso context.SequencingState IsNot Nothing Then
-                SharedLibrary.Agents.ToolCallSequencing.CaptureRetryInvariantArguments(toolCall.ToolName, toolCall.Arguments, context.SequencingState)
+                SharedLibrary.Agents.ToolCallSequencing.CaptureRetryInvariantArguments(toolCall.ToolName, toolCall.Arguments, context.SequencingState, toolCall.CallId)
             End If
 
             If GetArgBool(toolCall.Arguments, "use_repository_default_design", True) AndAlso

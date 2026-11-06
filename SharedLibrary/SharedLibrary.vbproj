@@ -513,6 +513,7 @@
     </Compile>
     <Compile Include="Code\Agents\AgentToolRouter.vb" />
     <Compile Include="Code\Agents\ArtifactDelivery.vb" />
+    <Compile Include="Code\Agents\ArtifactPublication.vb" />
     <Compile Include="Code\Agents\AskUserTool.vb" />
     <Compile Include="Code\Agents\BrowserToolRuntime.vb" />
     <Compile Include="Code\Agents\BrowserTools.vb" />

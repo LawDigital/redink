@@ -52,6 +52,58 @@ Namespace Agents
             Return System.String.Join("; ", parts)
         End Function
 
+        ''' <summary>
+        ''' Adds bounded cancellation observations without inferring who cancelled or why.
+        ''' Token state is evidence at catch time, not proof of the originating cancellation source.
+        ''' Exception messages, stacks and Data are deliberately excluded because they may contain source content.
+        ''' </summary>
+        Public Shared Function BuildCancellationRecord(phase As System.String,
+                                                       host As System.String,
+                                                       elapsedMilliseconds As System.Int64,
+                                                       cancellation As System.OperationCanceledException,
+                                                       callerToken As System.Threading.CancellationToken,
+                                                       Optional contextIsCancelled As System.Nullable(Of System.Boolean) = Nothing) As System.String
+            Dim parts As New System.Collections.Generic.List(Of System.String) From {
+                BuildRecord(NormalizeCancellationDiagnosticToken(phase, "unknown"),
+                            NormalizeCancellationDiagnosticToken(host, "unknown"),
+                            elapsedMilliseconds, "cancelled"),
+                "cancellationOrigin=unknown",
+                "callerTokenCanBeCanceled=" & callerToken.CanBeCanceled.ToString().ToLowerInvariant(),
+                "callerTokenCancellationRequested=" & callerToken.IsCancellationRequested.ToString().ToLowerInvariant(),
+                "contextIsCancelled=" & If(contextIsCancelled.HasValue,
+                                            contextIsCancelled.GetValueOrDefault().ToString().ToLowerInvariant(), "unknown")
+            }
+
+            If cancellation Is Nothing Then
+                parts.Add("exceptionType=unknown")
+                parts.Add("exceptionTokenCanBeCanceled=unknown")
+                parts.Add("exceptionTokenCancellationRequested=unknown")
+                parts.Add("exceptionTokenRelation=unknown")
+                parts.Add("innerExceptionType=unknown")
+            Else
+                Dim exceptionToken As System.Threading.CancellationToken = cancellation.CancellationToken
+                Dim tokenRelation As System.String = "none"
+                If exceptionToken.CanBeCanceled Then
+                    tokenRelation = If(callerToken.CanBeCanceled AndAlso exceptionToken.Equals(callerToken), "caller", "different")
+                End If
+                parts.Add("exceptionType=" & NormalizeCancellationDiagnosticToken(cancellation.GetType().FullName, "unknown"))
+                parts.Add("exceptionTokenCanBeCanceled=" & exceptionToken.CanBeCanceled.ToString().ToLowerInvariant())
+                parts.Add("exceptionTokenCancellationRequested=" & exceptionToken.IsCancellationRequested.ToString().ToLowerInvariant())
+                parts.Add("exceptionTokenRelation=" & tokenRelation)
+                parts.Add("innerExceptionType=" & If(cancellation.InnerException Is Nothing, "none",
+                    NormalizeCancellationDiagnosticToken(cancellation.InnerException.GetType().FullName, "unknown")))
+            End If
+
+            Return System.String.Join("; ", parts)
+        End Function
+
+        Private Shared Function NormalizeCancellationDiagnosticToken(value As System.String,
+                                                                      fallback As System.String) As System.String
+            Dim boundedValue As System.String = If(value, System.String.Empty)
+            If boundedValue.Length > 160 Then boundedValue = boundedValue.Substring(0, 160)
+            Return NormalizeToken(boundedValue, fallback)
+        End Function
+
         Public Shared Function ResolveToolPhase(toolName As System.String) As System.String
             Dim normalized As System.String = If(toolName, System.String.Empty).Trim().ToLowerInvariant()
             If normalized = "tool_loader" Then
