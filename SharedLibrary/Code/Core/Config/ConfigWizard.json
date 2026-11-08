@@ -749,10 +749,10 @@
                 },
                 {
                     "key": "WordCommentSelectionTracking",
-                    "label": "Track comment selection in Word",
+                    "label": "Background Word selection tracking",
                     "type": "boolean",
                     "default": "True",
-                    "description": "Track the selected comment card while Word is open. When off, comment commands use the selection Word reports. A single matching comment in the document text is used automatically. Apply Comment To Para also checks the paragraph if the cursor or selected text misses the comment. Restart Word after changing this setting. [WordCommentSelectionTracking]"
+                    "description": "Track the selected comment card while Word is open and enable the DocCheck selection guard. When off, both Word selection handlers and the comment UI Automation/input observer remain unregistered. Explicit comment commands use the selection Word reports. A single matching comment in the document text is used automatically. Apply Comment To Para also checks the paragraph if the cursor or selected text misses the comment. Restart Word after changing this setting. APIDebug reports the loaded value, effective startup mode and handler registration states in RI_Word_Performance.log. [WordCommentSelectionTracking]"
                 },
                 {
                     "key": "MarkupMethodHelper",
@@ -1410,6 +1410,20 @@
                     "type": "path",
                     "default": "",
                     "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word\\extractorliblocal.txt. [ExtractorPathLocal]"
+                },
+                {
+                    "key": "TabularReviewPath",
+                    "label": "Tabular Review Templates",
+                    "type": "path",
+                    "default": "",
+                    "description": "Choose a shared JSON library file of named Tabular Review column templates, or a directory containing *.json library files. Red Ink reads files in that directory only. Use a central network location to share templates across users. You can use normal path placeholders such as %APPDATA%. Leave empty if you do not use a shared library. [TabularReviewPath]"
+                },
+                {
+                    "key": "TabularReviewPathLocal",
+                    "label": "Tabular Review Templates (Local)",
+                    "type": "path",
+                    "default": "",
+                    "description": "Choose your personal JSON library file of named Tabular Review column templates, or a directory containing *.json library files. Red Ink reads files in that directory only. Keep personal templates here and use TabularReviewPath for shared templates. You can use normal path placeholders such as %APPDATA%. Leave empty if you do not use a personal library. [TabularReviewPathLocal]"
                 },
                 {
                     "key": "RenameLibPath",

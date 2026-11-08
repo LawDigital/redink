@@ -4725,9 +4725,19 @@ Partial Public Class ThisAddIn
     '  ATTACHMENT HANDLING (save + improved collect)
     ' ═══════════════════════════════════════════════════════════════════════════
 
+    ' Use the existing host sanitizer only for physical copies; preserve the full
+    ' logical attachment name for tool lookup and provenance.
+    Private Function AllocateAttachmentCopyPath(tempDir As System.String, ByRef logicalFileName As System.String,
+                                                logicalNames As System.Collections.Generic.ISet(Of System.String)) As System.String
+        Dim physicalName As System.String = MakeSafeFileName(logicalFileName).TrimEnd("."c, " "c)
+        physicalName = MakeSafeFileName(physicalName)
+        Return Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(tempDir, physicalName, logicalFileName, occupiedLogicalNames:=logicalNames)
+    End Function
+
     ''' <summary>Saves attachments to a per-mail temporary directory.</summary>
     Private Function SaveAttachmentsToTemp(mi As MailItem, tempDir As String) As List(Of AutoPilotAttachmentInfo)
         Dim result As New List(Of AutoPilotAttachmentInfo)()
+        Dim logicalNames As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
         For i As Integer = 1 To mi.Attachments.Count
             Dim att = mi.Attachments(i)
             Try
@@ -4742,16 +4752,12 @@ Partial Public Class ThisAddIn
                             embeddedFileName = Path.GetFileNameWithoutExtension(embeddedFileName) & ".msg"
                         End If
 
-                        Dim savePath = Path.Combine(tempDir, embeddedFileName)
-                        Dim counter = 1
-                        While File.Exists(savePath)
-                            savePath = Path.Combine(tempDir, Path.GetFileNameWithoutExtension(embeddedFileName) & $"_{counter}.msg")
-                            counter += 1
-                        End While
+                        Dim logicalEmbeddedName As System.String = embeddedFileName
+                        Dim savePath As System.String = AllocateAttachmentCopyPath(tempDir, logicalEmbeddedName, logicalNames)
                         att.SaveAsFile(savePath)
 
                         ' Unpack the .msg recursively into the temp directory
-                        Dim unpackedInfos = UnpackEmbeddedMailFile(savePath, tempDir, Path.GetFileNameWithoutExtension(savePath), 0)
+                        Dim unpackedInfos = UnpackEmbeddedMailFile(savePath, tempDir, Path.GetFileNameWithoutExtension(logicalEmbeddedName), 0, originalFileName:=logicalEmbeddedName, sourceDisplayName:=embeddedFileName, logicalNames:=logicalNames)
                         result.AddRange(unpackedInfos)
                     Catch ex As System.Exception
                         result.Add(New AutoPilotAttachmentInfo() With {
@@ -4788,15 +4794,12 @@ Partial Public Class ThisAddIn
                     info.TempFilePath = Nothing
                     info.StatusMessage = $"Skipped (size {size / 1024 / 1024:F1} MB exceeds limit)"
                 Else
-                    Dim savePath = Path.Combine(tempDir, fileName)
-                    Dim counter = 1
-                    While File.Exists(savePath)
-                        savePath = Path.Combine(tempDir, Path.GetFileNameWithoutExtension(fileName) & $"_{counter}" & Path.GetExtension(fileName))
-                        counter += 1
-                    End While
+                    Dim logicalAttachmentName As System.String = fileName
+                    Dim savePath As System.String = AllocateAttachmentCopyPath(tempDir, logicalAttachmentName, logicalNames)
                     att.SaveAsFile(savePath)
+                    info.OriginalFileName = logicalAttachmentName
                     info.TempFilePath = savePath
-                    info.StatusMessage = "Saved"
+                    info.StatusMessage = If(System.String.Equals(logicalAttachmentName, fileName, System.StringComparison.Ordinal), "Saved", "Saved; original attachment: " & fileName)
 
                     ' ── Extract PDF page metadata (page count, orientation, page size) ──
                     If info.Extension = ".pdf" Then
@@ -4839,7 +4842,7 @@ Partial Public Class ThisAddIn
                     If ext = ".msg" OrElse ext = ".eml" Then
                         Try
                             Dim unpackedInfos = UnpackEmbeddedMailFile(info.TempFilePath, tempDir,
-                                Path.GetFileNameWithoutExtension(info.OriginalFileName), 0)
+                                Path.GetFileNameWithoutExtension(info.OriginalFileName), 0, originalFileName:=info.OriginalFileName, sourceDisplayName:=fileName, logicalNames:=logicalNames)
                             result.AddRange(unpackedInfos)
                             ' Skip adding the raw .msg/.eml itself — the unpacked text + attachments replace it
                             Continue For
@@ -4850,7 +4853,7 @@ Partial Public Class ThisAddIn
                     ElseIf ext = ".zip" Then
                         Try
                             Dim unpackedInfos = UnpackZipFile(info.TempFilePath, tempDir,
-                                Path.GetFileNameWithoutExtension(info.OriginalFileName), 0)
+                                Path.GetFileNameWithoutExtension(info.OriginalFileName), 0, originalFileName:=info.OriginalFileName, sourceDisplayName:=fileName, logicalNames:=logicalNames)
                             result.AddRange(unpackedInfos)
                             ' Skip adding the raw .zip itself — the unpacked files replace it
                             Continue For
@@ -4889,17 +4892,23 @@ Partial Public Class ThisAddIn
             zipFilePath As String,
             tempDir As String,
             baseName As String,
-            depth As Integer) As List(Of AutoPilotAttachmentInfo)
+            depth As Integer,
+            Optional originalFileName As System.String = Nothing,
+            Optional sourceDisplayName As System.String = Nothing,
+            Optional logicalNames As System.Collections.Generic.ISet(Of System.String) = Nothing) As List(Of AutoPilotAttachmentInfo)
 
+        If logicalNames Is Nothing Then logicalNames = New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+        Dim sourceName As System.String = If(System.String.IsNullOrWhiteSpace(originalFileName), System.IO.Path.GetFileName(zipFilePath), originalFileName)
+        Dim sourceDescription As System.String = If(System.String.IsNullOrWhiteSpace(sourceDisplayName), sourceName, sourceDisplayName)
         Dim results As New List(Of AutoPilotAttachmentInfo)()
 
         If depth > AP_MaxArchiveDepth Then
             results.Add(New AutoPilotAttachmentInfo() With {
-                .OriginalFileName = Path.GetFileName(zipFilePath),
+                .OriginalFileName = sourceName,
                 .TempFilePath = zipFilePath,
                 .Extension = ".zip",
                 .SizeBytes = If(File.Exists(zipFilePath), New FileInfo(zipFilePath).Length, 0),
-                .StatusMessage = $"Max archive nesting depth ({AP_MaxArchiveDepth}) reached — not unpacked"
+                .StatusMessage = $"Max archive nesting depth ({AP_MaxArchiveDepth}) reached — not unpacked: {sourceDescription}"
             })
             Return results
         End If
@@ -4908,13 +4917,13 @@ Partial Public Class ThisAddIn
             Using archive = ZipFile.OpenRead(zipFilePath)
                 ' ── Zip bomb check: entry count ──
                 If archive.Entries.Count > AP_MaxZipEntries Then
-                    ApDashboardLog($"  ⚠ Zip has {archive.Entries.Count} entries (limit {AP_MaxZipEntries}) — not unpacked: {Path.GetFileName(zipFilePath)}", "warn")
+                    ApDashboardLog($"  ⚠ Zip has {archive.Entries.Count} entries (limit {AP_MaxZipEntries}) — not unpacked: {sourceDescription}", "warn")
                     results.Add(New AutoPilotAttachmentInfo() With {
-                        .OriginalFileName = Path.GetFileName(zipFilePath),
+                        .OriginalFileName = sourceName,
                         .TempFilePath = zipFilePath,
                         .Extension = ".zip",
                         .SizeBytes = New FileInfo(zipFilePath).Length,
-                        .StatusMessage = $"Skipped (zip contains {archive.Entries.Count} entries, limit is {AP_MaxZipEntries})"
+                        .StatusMessage = $"Skipped (zip contains {archive.Entries.Count} entries, limit is {AP_MaxZipEntries}): {sourceDescription}"
                     })
                     Return results
                 End If
@@ -4925,20 +4934,20 @@ Partial Public Class ThisAddIn
                     totalUncompressed += entry.Length
                 Next
                 If totalUncompressed > AP_MaxZipTotalBytes Then
-                    ApDashboardLog($"  ⚠ Zip uncompressed size {totalUncompressed / 1024 / 1024:F1} MB exceeds limit — not unpacked: {Path.GetFileName(zipFilePath)}", "warn")
+                    ApDashboardLog($"  ⚠ Zip uncompressed size {totalUncompressed / 1024 / 1024:F1} MB exceeds limit — not unpacked: {sourceDescription}", "warn")
                     results.Add(New AutoPilotAttachmentInfo() With {
-                        .OriginalFileName = Path.GetFileName(zipFilePath),
+                        .OriginalFileName = sourceName,
                         .TempFilePath = zipFilePath,
                         .Extension = ".zip",
                         .SizeBytes = New FileInfo(zipFilePath).Length,
-                        .StatusMessage = $"Skipped (uncompressed size {totalUncompressed / 1024 / 1024:F1} MB exceeds limit)"
+                        .StatusMessage = $"Skipped (uncompressed size {totalUncompressed / 1024 / 1024:F1} MB exceeds limit): {sourceDescription}"
                     })
                     Return results
                 End If
 
-                ApDashboardLog($"  📦 Unpacking zip: {Path.GetFileName(zipFilePath)} ({archive.Entries.Count} entries)", "info")
+                ApDashboardLog($"  📦 Unpacking zip: {sourceDescription} ({archive.Entries.Count} entries)", "info")
 
-                Dim tempDirFull = Path.GetFullPath(tempDir)
+                Dim tempDirFull As System.String = System.IO.Path.GetFullPath(tempDir).TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar) & System.IO.Path.DirectorySeparatorChar
 
                 For Each entry In archive.Entries
                     Try
@@ -4957,20 +4966,13 @@ Partial Public Class ThisAddIn
                         End If
 
                         ' Build safe output path and validate against zip-slip
-                        Dim outputPath = Path.Combine(tempDir, entryFileName)
+                        Dim logicalEntryName As System.String = entryFileName
+                        Dim outputPath As System.String = AllocateAttachmentCopyPath(tempDir, logicalEntryName, logicalNames)
                         Dim outputPathFull = Path.GetFullPath(outputPath)
                         If Not outputPathFull.StartsWith(tempDirFull, StringComparison.OrdinalIgnoreCase) Then
                             ' Zip-slip attempt — skip this entry
                             Continue For
                         End If
-
-                        ' Prevent filename collision
-                        Dim counter = 1
-                        While File.Exists(outputPath)
-                            outputPath = Path.Combine(tempDir, Path.GetFileNameWithoutExtension(entryFileName) &
-                                $"_{counter}" & Path.GetExtension(entryFileName))
-                            counter += 1
-                        End While
 
                         Dim entryExt = Path.GetExtension(entryFileName).ToLowerInvariant()
                         Dim entrySize = entry.Length
@@ -4989,22 +4991,22 @@ Partial Public Class ThisAddIn
                         End If
 
                         ' Extract the entry
-                        entry.ExtractToFile(outputPath, True)
+                        entry.ExtractToFile(outputPath, False)
 
                         Dim info As New AutoPilotAttachmentInfo() With {
-                            .OriginalFileName = Path.GetFileName(outputPath),
+                            .OriginalFileName = logicalEntryName,
                             .TempFilePath = outputPath,
                             .Extension = entryExt,
                             .SizeBytes = New FileInfo(outputPath).Length,
                             .IsOverSizeLimit = False,
-                            .StatusMessage = $"Extracted from zip: {Path.GetFileName(zipFilePath)}"
+                            .StatusMessage = $"Extracted from zip: {sourceDescription}; original entry: {entry.FullName}"
                         }
 
                         ' Recursively unpack nested containers
                         If entryExt = ".msg" OrElse entryExt = ".eml" Then
                             Try
                                 Dim subResults = UnpackEmbeddedMailFile(outputPath, tempDir,
-                                    Path.GetFileNameWithoutExtension(entryFileName), depth + 1)
+                                    Path.GetFileNameWithoutExtension(logicalEntryName), depth + 1, originalFileName:=logicalEntryName, sourceDisplayName:=sourceDescription & " > " & entry.FullName, logicalNames:=logicalNames)
                                 results.AddRange(subResults)
                                 Continue For
                             Catch
@@ -5013,7 +5015,7 @@ Partial Public Class ThisAddIn
                         ElseIf entryExt = ".zip" Then
                             Try
                                 Dim subResults = UnpackZipFile(outputPath, tempDir,
-                                    Path.GetFileNameWithoutExtension(entryFileName), depth + 1)
+                                    Path.GetFileNameWithoutExtension(logicalEntryName), depth + 1, originalFileName:=logicalEntryName, sourceDisplayName:=sourceDescription & " > " & entry.FullName, logicalNames:=logicalNames)
                                 results.AddRange(subResults)
                                 Continue For
                             Catch
@@ -5031,16 +5033,16 @@ Partial Public Class ThisAddIn
                 Next
             End Using
 
-            ApDashboardLog($"  ✓ Zip unpacked: {Path.GetFileName(zipFilePath)} → {results.Count} file(s)", "info")
+            ApDashboardLog($"  ✓ Zip unpacked: {sourceDescription} → {results.Count} file(s)", "info")
 
         Catch ex As System.Exception
             ApDashboardLog($"  ⚠ Failed to unpack zip: {ex.Message}", "warn")
             results.Add(New AutoPilotAttachmentInfo() With {
-                .OriginalFileName = Path.GetFileName(zipFilePath),
+                .OriginalFileName = sourceName,
                 .TempFilePath = zipFilePath,
                 .Extension = ".zip",
                 .SizeBytes = If(File.Exists(zipFilePath), New FileInfo(zipFilePath).Length, 0),
-                .StatusMessage = $"Saved (zip unpack failed: {ex.Message})"
+                .StatusMessage = $"Saved (zip unpack failed for {sourceDescription}: {ex.Message})"
             })
         End Try
 
@@ -5065,16 +5067,22 @@ Partial Public Class ThisAddIn
             mailFilePath As String,
             tempDir As String,
             baseName As String,
-            depth As Integer) As List(Of AutoPilotAttachmentInfo)
+            depth As Integer,
+            Optional originalFileName As System.String = Nothing,
+            Optional sourceDisplayName As System.String = Nothing,
+            Optional logicalNames As System.Collections.Generic.ISet(Of System.String) = Nothing) As List(Of AutoPilotAttachmentInfo)
 
+        If logicalNames Is Nothing Then logicalNames = New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+        Dim sourceName As System.String = If(System.String.IsNullOrWhiteSpace(originalFileName), System.IO.Path.GetFileName(mailFilePath), originalFileName)
+        Dim sourceDescription As System.String = If(System.String.IsNullOrWhiteSpace(sourceDisplayName), sourceName, sourceDisplayName)
         Dim results As New List(Of AutoPilotAttachmentInfo)()
         If depth > AP_MaxEmbeddedMailDepth Then
             results.Add(New AutoPilotAttachmentInfo() With {
-                .OriginalFileName = Path.GetFileName(mailFilePath),
+                .OriginalFileName = sourceName,
                 .TempFilePath = mailFilePath,
                 .Extension = Path.GetExtension(mailFilePath).ToLowerInvariant(),
                 .SizeBytes = If(File.Exists(mailFilePath), New FileInfo(mailFilePath).Length, 0),
-                .StatusMessage = $"Max nesting depth ({AP_MaxEmbeddedMailDepth}) reached — not unpacked"
+                .StatusMessage = $"Max nesting depth ({AP_MaxEmbeddedMailDepth}) reached — not unpacked: {sourceDescription}"
             })
             Return results
         End If
@@ -5082,17 +5090,17 @@ Partial Public Class ThisAddIn
         Dim ext = Path.GetExtension(mailFilePath).ToLowerInvariant()
 
         If ext = ".msg" Then
-            Return UnpackMsgFile(mailFilePath, tempDir, baseName, depth)
+            Return UnpackMsgFile(mailFilePath, tempDir, baseName, depth, originalFileName:=sourceName, sourceDisplayName:=sourceDescription, logicalNames:=logicalNames)
         ElseIf ext = ".eml" Then
-            Return UnpackEmlFile(mailFilePath, tempDir, baseName, depth)
+            Return UnpackEmlFile(mailFilePath, tempDir, baseName, depth, originalFileName:=sourceName, sourceDisplayName:=sourceDescription, logicalNames:=logicalNames)
         Else
             ' Unknown extension — return as-is
             results.Add(New AutoPilotAttachmentInfo() With {
-                .OriginalFileName = Path.GetFileName(mailFilePath),
+                .OriginalFileName = sourceName,
                 .TempFilePath = mailFilePath,
                 .Extension = ext,
                 .SizeBytes = If(File.Exists(mailFilePath), New FileInfo(mailFilePath).Length, 0),
-                .StatusMessage = "Saved"
+                .StatusMessage = "Saved; original container: " & sourceDescription
             })
             Return results
         End If
@@ -5107,8 +5115,14 @@ Partial Public Class ThisAddIn
             msgFilePath As String,
             tempDir As String,
             baseName As String,
-            depth As Integer) As List(Of AutoPilotAttachmentInfo)
+            depth As Integer,
+            Optional originalFileName As System.String = Nothing,
+            Optional sourceDisplayName As System.String = Nothing,
+            Optional logicalNames As System.Collections.Generic.ISet(Of System.String) = Nothing) As List(Of AutoPilotAttachmentInfo)
 
+        If logicalNames Is Nothing Then logicalNames = New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+        Dim sourceName As System.String = If(System.String.IsNullOrWhiteSpace(originalFileName), System.IO.Path.GetFileName(msgFilePath), originalFileName)
+        Dim sourceDescription As System.String = If(System.String.IsNullOrWhiteSpace(sourceDisplayName), sourceName, sourceDisplayName)
         Dim results As New List(Of AutoPilotAttachmentInfo)()
         Dim msgItem As MailItem = Nothing
 
@@ -5121,11 +5135,11 @@ Partial Public Class ThisAddIn
             If msgItem Is Nothing Then
                 ' Not a MailItem (could be a meeting request, etc.) — return the raw file
                 results.Add(New AutoPilotAttachmentInfo() With {
-                    .OriginalFileName = Path.GetFileName(msgFilePath),
+                    .OriginalFileName = sourceName,
                     .TempFilePath = msgFilePath,
                     .Extension = ".msg",
                     .SizeBytes = New FileInfo(msgFilePath).Length,
-                    .StatusMessage = "Saved (not a standard mail message)"
+                    .StatusMessage = $"Saved (not a standard mail message: {sourceDescription})"
                 })
                 If sharedItem IsNot Nothing Then Try : Marshal.ReleaseComObject(sharedItem) : Catch : End Try
                 Return results
@@ -5134,13 +5148,7 @@ Partial Public Class ThisAddIn
             ' Extract metadata + body as text
             Dim textContent = BuildEmbeddedMailText(msgItem)
             Dim textFileName = baseName & "_content.txt"
-            Dim textFilePath = Path.Combine(tempDir, textFileName)
-            Dim counter = 1
-            While File.Exists(textFilePath)
-                textFilePath = Path.Combine(tempDir, baseName & $"_content_{counter}.txt")
-                textFileName = Path.GetFileName(textFilePath)
-                counter += 1
-            End While
+            Dim textFilePath As System.String = AllocateAttachmentCopyPath(tempDir, textFileName, logicalNames)
             File.WriteAllText(textFilePath, textContent, Encoding.UTF8)
 
             results.Add(New AutoPilotAttachmentInfo() With {
@@ -5149,10 +5157,10 @@ Partial Public Class ThisAddIn
                 .Extension = ".txt",
                 .SizeBytes = New FileInfo(textFilePath).Length,
                 .IsOverSizeLimit = False,
-                .StatusMessage = $"Extracted from embedded mail: {Path.GetFileName(msgFilePath)}"
+                .StatusMessage = $"Extracted from embedded mail: {sourceDescription}"
             })
 
-            ApDashboardLog($"  📧 Unpacked embedded mail: {Path.GetFileName(msgFilePath)} → {textFileName}" &
+            ApDashboardLog($"  📧 Unpacked embedded mail: {sourceDescription} → {textFileName}" &
                            If(msgItem.Attachments.Count > 0, $" + {msgItem.Attachments.Count} attachment(s)", ""), "info")
 
             ' Extract nested attachments
@@ -5166,15 +5174,11 @@ Partial Public Class ThisAddIn
                             If Not nestedName.EndsWith(".msg", StringComparison.OrdinalIgnoreCase) Then
                                 nestedName = Path.GetFileNameWithoutExtension(nestedName) & ".msg"
                             End If
-                            Dim nestedPath = Path.Combine(tempDir, nestedName)
-                            Dim nc = 1
-                            While File.Exists(nestedPath)
-                                nestedPath = Path.Combine(tempDir, Path.GetFileNameWithoutExtension(nestedName) & $"_{nc}.msg")
-                                nc += 1
-                            End While
+                            Dim logicalNestedName As System.String = nestedName
+                            Dim nestedPath As System.String = AllocateAttachmentCopyPath(tempDir, logicalNestedName, logicalNames)
                             nestedAtt.SaveAsFile(nestedPath)
                             results.AddRange(UnpackEmbeddedMailFile(nestedPath, tempDir,
-                                Path.GetFileNameWithoutExtension(nestedPath), depth + 1))
+                                Path.GetFileNameWithoutExtension(logicalNestedName), depth + 1, originalFileName:=logicalNestedName, sourceDisplayName:=sourceDescription & " > " & nestedName, logicalNames:=logicalNames))
                         Catch ex As System.Exception
                             results.Add(New AutoPilotAttachmentInfo() With {
                                 .OriginalFileName = If(nestedAtt.FileName, $"nested_{depth}_{j}"),
@@ -5196,21 +5200,18 @@ Partial Public Class ThisAddIn
                             nestedInfo.TempFilePath = Nothing
                             nestedInfo.StatusMessage = $"Skipped (from embedded mail, size {nestedSize / 1024 / 1024:F1} MB exceeds limit)"
                         Else
-                            Dim nestedSavePath = Path.Combine(tempDir, nestedFileName)
-                            Dim nc = 1
-                            While File.Exists(nestedSavePath)
-                                nestedSavePath = Path.Combine(tempDir, Path.GetFileNameWithoutExtension(nestedFileName) & $"_{nc}" & Path.GetExtension(nestedFileName))
-                                nc += 1
-                            End While
+                            Dim logicalNestedName As System.String = nestedFileName
+                            Dim nestedSavePath As System.String = AllocateAttachmentCopyPath(tempDir, logicalNestedName, logicalNames)
                             nestedAtt.SaveAsFile(nestedSavePath)
+                            nestedInfo.OriginalFileName = logicalNestedName
                             nestedInfo.TempFilePath = nestedSavePath
-                            nestedInfo.StatusMessage = $"Saved (from embedded mail: {Path.GetFileName(msgFilePath)})"
+                            nestedInfo.StatusMessage = $"Saved (from embedded mail: {sourceDescription}; original attachment: {nestedFileName})"
 
                             ' If this nested attachment is itself a .msg, .eml, or .zip, recurse
                             If nestedInfo.Extension = ".msg" OrElse nestedInfo.Extension = ".eml" Then
                                 Try
                                     Dim subResults = UnpackEmbeddedMailFile(nestedSavePath, tempDir,
-                                        Path.GetFileNameWithoutExtension(nestedFileName), depth + 1)
+                                        Path.GetFileNameWithoutExtension(logicalNestedName), depth + 1, originalFileName:=logicalNestedName, sourceDisplayName:=sourceDescription & " > " & nestedFileName, logicalNames:=logicalNames)
                                     results.AddRange(subResults)
                                     Continue For ' Don't add the raw file — the unpacked results replace it
                                 Catch
@@ -5219,7 +5220,7 @@ Partial Public Class ThisAddIn
                             ElseIf nestedInfo.Extension = ".zip" Then
                                 Try
                                     Dim subResults = UnpackZipFile(nestedSavePath, tempDir,
-                                        Path.GetFileNameWithoutExtension(nestedFileName), depth + 1)
+                                        Path.GetFileNameWithoutExtension(logicalNestedName), depth + 1, originalFileName:=logicalNestedName, sourceDisplayName:=sourceDescription & " > " & nestedFileName, logicalNames:=logicalNames)
                                     results.AddRange(subResults)
                                     Continue For
                                 Catch
@@ -5240,11 +5241,11 @@ Partial Public Class ThisAddIn
             ' OpenSharedItem failed — return the raw .msg as a fallback
             ApDashboardLog($"  ⚠ Failed to unpack .msg: {ex.Message}", "warn")
             results.Add(New AutoPilotAttachmentInfo() With {
-                .OriginalFileName = Path.GetFileName(msgFilePath),
+                .OriginalFileName = sourceName,
                 .TempFilePath = msgFilePath,
                 .Extension = ".msg",
                 .SizeBytes = If(File.Exists(msgFilePath), New FileInfo(msgFilePath).Length, 0),
-                .StatusMessage = $"Saved (unpack failed: {ex.Message})"
+                .StatusMessage = $"Saved (unpack failed for {sourceDescription}: {ex.Message})"
             })
         Finally
             If msgItem IsNot Nothing Then Try : Marshal.ReleaseComObject(msgItem) : Catch : End Try
@@ -5262,8 +5263,14 @@ Partial Public Class ThisAddIn
             emlFilePath As String,
             tempDir As String,
             baseName As String,
-            depth As Integer) As List(Of AutoPilotAttachmentInfo)
+            depth As Integer,
+            Optional originalFileName As System.String = Nothing,
+            Optional sourceDisplayName As System.String = Nothing,
+            Optional logicalNames As System.Collections.Generic.ISet(Of System.String) = Nothing) As List(Of AutoPilotAttachmentInfo)
 
+        If logicalNames Is Nothing Then logicalNames = New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+        Dim sourceName As System.String = If(System.String.IsNullOrWhiteSpace(originalFileName), System.IO.Path.GetFileName(emlFilePath), originalFileName)
+        Dim sourceDescription As System.String = If(System.String.IsNullOrWhiteSpace(sourceDisplayName), sourceName, sourceDisplayName)
         Dim results As New List(Of AutoPilotAttachmentInfo)()
 
         Try
@@ -5277,13 +5284,7 @@ Partial Public Class ThisAddIn
                     ' Successfully opened as MailItem — use the same logic as .msg
                     Dim textContent = BuildEmbeddedMailText(emlMail)
                     Dim textFileName = baseName & "_content.txt"
-                    Dim textFilePath = Path.Combine(tempDir, textFileName)
-                    Dim counter = 1
-                    While File.Exists(textFilePath)
-                        textFilePath = Path.Combine(tempDir, baseName & $"_content_{counter}.txt")
-                        textFileName = Path.GetFileName(textFilePath)
-                        counter += 1
-                    End While
+                    Dim textFilePath As System.String = AllocateAttachmentCopyPath(tempDir, textFileName, logicalNames)
                     File.WriteAllText(textFilePath, textContent, Encoding.UTF8)
 
                     results.Add(New AutoPilotAttachmentInfo() With {
@@ -5292,10 +5293,10 @@ Partial Public Class ThisAddIn
                         .Extension = ".txt",
                         .SizeBytes = New FileInfo(textFilePath).Length,
                         .IsOverSizeLimit = False,
-                        .StatusMessage = $"Extracted from embedded mail: {Path.GetFileName(emlFilePath)}"
+                        .StatusMessage = $"Extracted from embedded mail: {sourceDescription}"
                     })
 
-                    ApDashboardLog($"  📧 Unpacked .eml via Outlook: {Path.GetFileName(emlFilePath)} → {textFileName}" &
+                    ApDashboardLog($"  📧 Unpacked .eml via Outlook: {sourceDescription} → {textFileName}" &
                                    If(emlMail.Attachments.Count > 0, $" + {emlMail.Attachments.Count} attachment(s)", ""), "info")
 
                     ' Extract nested attachments (same logic as .msg)
@@ -5308,15 +5309,11 @@ Partial Public Class ThisAddIn
                                     If Not nestedName.EndsWith(".msg", StringComparison.OrdinalIgnoreCase) Then
                                         nestedName = Path.GetFileNameWithoutExtension(nestedName) & ".msg"
                                     End If
-                                    Dim nestedPath = Path.Combine(tempDir, nestedName)
-                                    Dim nc = 1
-                                    While File.Exists(nestedPath)
-                                        nestedPath = Path.Combine(tempDir, Path.GetFileNameWithoutExtension(nestedName) & $"_{nc}.msg")
-                                        nc += 1
-                                    End While
+                                    Dim logicalNestedName As System.String = nestedName
+                                    Dim nestedPath As System.String = AllocateAttachmentCopyPath(tempDir, logicalNestedName, logicalNames)
                                     nestedAtt.SaveAsFile(nestedPath)
                                     results.AddRange(UnpackEmbeddedMailFile(nestedPath, tempDir,
-                                        Path.GetFileNameWithoutExtension(nestedPath), depth + 1))
+                                        Path.GetFileNameWithoutExtension(logicalNestedName), depth + 1, originalFileName:=logicalNestedName, sourceDisplayName:=sourceDescription & " > " & nestedName, logicalNames:=logicalNames))
                                 Catch ex As System.Exception
                                     results.Add(New AutoPilotAttachmentInfo() With {
                                         .OriginalFileName = If(nestedAtt.FileName, $"nested_{depth}_{j}"),
@@ -5334,20 +5331,17 @@ Partial Public Class ThisAddIn
                                     .IsOverSizeLimit = (nestedSize > _apConfig.MaxAttachmentBytes)
                                 }
                                 If Not nestedInfo.IsOverSizeLimit Then
-                                    Dim nestedSavePath = Path.Combine(tempDir, nestedFileName)
-                                    Dim nc = 1
-                                    While File.Exists(nestedSavePath)
-                                        nestedSavePath = Path.Combine(tempDir, Path.GetFileNameWithoutExtension(nestedFileName) & $"_{nc}" & Path.GetExtension(nestedFileName))
-                                        nc += 1
-                                    End While
+                                    Dim logicalNestedName As System.String = nestedFileName
+                                    Dim nestedSavePath As System.String = AllocateAttachmentCopyPath(tempDir, logicalNestedName, logicalNames)
                                     nestedAtt.SaveAsFile(nestedSavePath)
+                                    nestedInfo.OriginalFileName = logicalNestedName
                                     nestedInfo.TempFilePath = nestedSavePath
-                                    nestedInfo.StatusMessage = $"Saved (from embedded .eml: {Path.GetFileName(emlFilePath)})"
+                                    nestedInfo.StatusMessage = $"Saved (from embedded .eml: {sourceDescription}; original attachment: {nestedFileName})"
 
                                     If nestedInfo.Extension = ".msg" OrElse nestedInfo.Extension = ".eml" Then
                                         Try
                                             Dim subResults = UnpackEmbeddedMailFile(nestedSavePath, tempDir,
-                                                Path.GetFileNameWithoutExtension(nestedFileName), depth + 1)
+                                                Path.GetFileNameWithoutExtension(logicalNestedName), depth + 1, originalFileName:=logicalNestedName, sourceDisplayName:=sourceDescription & " > " & nestedFileName, logicalNames:=logicalNames)
                                             results.AddRange(subResults)
                                             Continue For
                                         Catch
@@ -5355,7 +5349,7 @@ Partial Public Class ThisAddIn
                                     ElseIf nestedInfo.Extension = ".zip" Then
                                         Try
                                             Dim subResults = UnpackZipFile(nestedSavePath, tempDir,
-                                                Path.GetFileNameWithoutExtension(nestedFileName), depth + 1)
+                                                Path.GetFileNameWithoutExtension(logicalNestedName), depth + 1, originalFileName:=logicalNestedName, sourceDisplayName:=sourceDescription & " > " & nestedFileName, logicalNames:=logicalNames)
                                             results.AddRange(subResults)
                                             Continue For
                                         Catch
@@ -5385,18 +5379,12 @@ Partial Public Class ThisAddIn
             End Try
 
             ' Fallback: parse .eml as plain text (RFC 2822)
-            ApDashboardLog($"  📧 Parsing .eml as text: {Path.GetFileName(emlFilePath)}", "step")
+            ApDashboardLog($"  📧 Parsing .eml as text: {sourceDescription}", "step")
             Dim emlContent = File.ReadAllText(emlFilePath, Encoding.UTF8)
-            Dim textResult = ParseEmlAsText(emlContent, Path.GetFileName(emlFilePath))
+            Dim textResult = ParseEmlAsText(emlContent, sourceDescription)
 
             Dim fallbackTextFileName = baseName & "_content.txt"
-            Dim fallbackTextFilePath = Path.Combine(tempDir, fallbackTextFileName)
-            Dim fallbackCounter = 1
-            While File.Exists(fallbackTextFilePath)
-                fallbackTextFilePath = Path.Combine(tempDir, baseName & $"_content_{fallbackCounter}.txt")
-                fallbackTextFileName = Path.GetFileName(fallbackTextFilePath)
-                fallbackCounter += 1
-            End While
+            Dim fallbackTextFilePath As System.String = AllocateAttachmentCopyPath(tempDir, fallbackTextFileName, logicalNames)
             File.WriteAllText(fallbackTextFilePath, textResult, Encoding.UTF8)
 
             results.Add(New AutoPilotAttachmentInfo() With {
@@ -5405,17 +5393,17 @@ Partial Public Class ThisAddIn
                 .Extension = ".txt",
                 .SizeBytes = New FileInfo(fallbackTextFilePath).Length,
                 .IsOverSizeLimit = False,
-                .StatusMessage = $"Extracted from .eml (text parse): {Path.GetFileName(emlFilePath)}"
+                .StatusMessage = $"Extracted from .eml (text parse): {sourceDescription}"
             })
 
         Catch ex As System.Exception
             ApDashboardLog($"  ⚠ Failed to unpack .eml: {ex.Message}", "warn")
             results.Add(New AutoPilotAttachmentInfo() With {
-                .OriginalFileName = Path.GetFileName(emlFilePath),
+                .OriginalFileName = sourceName,
                 .TempFilePath = emlFilePath,
                 .Extension = ".eml",
                 .SizeBytes = If(File.Exists(emlFilePath), New FileInfo(emlFilePath).Length, 0),
-                .StatusMessage = $"Saved (unpack failed: {ex.Message})"
+                .StatusMessage = $"Saved (unpack failed for {sourceDescription}: {ex.Message})"
             })
         End Try
 

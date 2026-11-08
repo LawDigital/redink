@@ -2074,6 +2074,10 @@ Namespace SharedLibrary
                     Return context.INI_ExtractorPath
                 Case "ExtractorPathLocal"
                     Return context.INI_ExtractorPathLocal
+                Case "TabularReviewPath"
+                    Return context.INI_TabularReviewPath
+                Case "TabularReviewPathLocal"
+                    Return context.INI_TabularReviewPathLocal
                 Case "RenameLibPath"
                     Return context.INI_RenameLibPath
                 Case "RenameLibPathLocal"
@@ -2582,6 +2586,10 @@ Namespace SharedLibrary
                     context.INI_ExtractorPath = value
                 Case "ExtractorPathLocal"
                     context.INI_ExtractorPathLocal = value
+                Case "TabularReviewPath"
+                    context.INI_TabularReviewPath = value
+                Case "TabularReviewPathLocal"
+                    context.INI_TabularReviewPathLocal = value
                 Case "RenameLibPath"
                     context.INI_RenameLibPath = value
                 Case "RenameLibPathLocal"
@@ -2978,6 +2986,8 @@ Namespace SharedLibrary
                     {"RedactionInstructionsPathLocal", context.INI_RedactionInstructionsPathLocal},
                     {"ExtractorPath", context.INI_ExtractorPath},
                     {"ExtractorPathLocal", context.INI_ExtractorPathLocal},
+                    {"TabularReviewPath", context.INI_TabularReviewPath},
+                    {"TabularReviewPathLocal", context.INI_TabularReviewPathLocal},
                     {"RenameLibPath", context.INI_RenameLibPath},
                     {"RenameLibPathLocal", context.INI_RenameLibPathLocal},
                     {"MailMoverPath", context.INI_MailMoverPath},
@@ -3720,6 +3730,8 @@ Namespace SharedLibrary
                     {"RedactionInstructionsPathLocal", context.INI_RedactionInstructionsPathLocal},
                     {"ExtractorPath", context.INI_ExtractorPath},
                     {"ExtractorPathLocal", context.INI_ExtractorPathLocal},
+                    {"TabularReviewPath", context.INI_TabularReviewPath},
+                    {"TabularReviewPathLocal", context.INI_TabularReviewPathLocal},
                     {"RenameLibPath", context.INI_RenameLibPath},
                     {"RenameLibPathLocal", context.INI_RenameLibPathLocal},
                     {"MailMoverPath", context.INI_MailMoverPath},
@@ -4319,6 +4331,10 @@ Namespace SharedLibrary
                                     Tuple.Create("User Dictionary", context.INI_DictionaryPathLocal, True, "", ""),
                                     Tuple.Create("Extractor Library", context.INI_ExtractorPath, True, "", ""),
                                     Tuple.Create("Extractor Library (Local)", context.INI_ExtractorPathLocal, True, "", ""),
+                                    System.Tuple.Create("Tabular Review Templates", context.INI_TabularReviewPath, True, "", ""),
+                                    System.Tuple.Create("Tabular Review Templates", context.INI_TabularReviewPath, False, "", ".json"),
+                                    System.Tuple.Create("Tabular Review Templates (Local)", context.INI_TabularReviewPathLocal, True, "", ""),
+                                    System.Tuple.Create("Tabular Review Templates (Local)", context.INI_TabularReviewPathLocal, False, "", ".json"),
                                     Tuple.Create("Rename Library", context.INI_RenameLibPath, True, "", ""),
                                     Tuple.Create("Rename Library (Local)", context.INI_RenameLibPathLocal, True, "", ""),
                                     Tuple.Create("Snapshot Library", context.INI_SnapshotLibPath, True, "", ""),
@@ -4632,6 +4648,8 @@ Namespace SharedLibrary
             variableValues.Add("RedactionInstructionsPathLocal", context.INI_RedactionInstructionsPathLocal)
             variableValues.Add("ExtractorPath", context.INI_ExtractorPath)
             variableValues.Add("ExtractorPathLocal", context.INI_ExtractorPathLocal)
+            variableValues.Add("TabularReviewPath", context.INI_TabularReviewPath)
+            variableValues.Add("TabularReviewPathLocal", context.INI_TabularReviewPathLocal)
             variableValues.Add("RenameLibPath", context.INI_RenameLibPath)
             variableValues.Add("RenameLibPathLocal", context.INI_RenameLibPathLocal)
             variableValues.Add("MailMoverPath", context.INI_MailMoverPath)
@@ -5071,6 +5089,8 @@ Namespace SharedLibrary
                     If updatedValues.ContainsKey("RedactionInstructionsPathLocal") Then context.INI_RedactionInstructionsPathLocal = CStr(updatedValues("RedactionInstructionsPathLocal"))
                     If updatedValues.ContainsKey("ExtractorPath") Then context.INI_ExtractorPath = CStr(updatedValues("ExtractorPath"))
                     If updatedValues.ContainsKey("ExtractorPathLocal") Then context.INI_ExtractorPathLocal = CStr(updatedValues("ExtractorPathLocal"))
+                    If updatedValues.ContainsKey("TabularReviewPath") Then context.INI_TabularReviewPath = CStr(updatedValues("TabularReviewPath"))
+                    If updatedValues.ContainsKey("TabularReviewPathLocal") Then context.INI_TabularReviewPathLocal = CStr(updatedValues("TabularReviewPathLocal"))
                     If updatedValues.ContainsKey("RenameLibPath") Then context.INI_RenameLibPath = CStr(updatedValues("RenameLibPath"))
                     If updatedValues.ContainsKey("RenameLibPathLocal") Then context.INI_RenameLibPathLocal = CStr(updatedValues("RenameLibPathLocal"))
                     If updatedValues.ContainsKey("MailMoverPath") Then context.INI_MailMoverPath = CStr(updatedValues("MailMoverPath"))

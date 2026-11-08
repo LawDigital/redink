@@ -327,7 +327,7 @@
     text("log-agentic",data.agentic_invocations ? formatNumber(data.agentic_invocations) : "—");
     text("log-standard",formatNumber(data.standard_invocations));
     text("log-users",formatNumber(data.users));
-    text("log-coverage",formatNumber(data.event_kinds?.internal || 0)+" internal calls excluded · "+formatNumber(data.files)+" imported files · "+formatNumber(data.scanned_sources)+" configured sources · "+formatNumber(data.other_entries)+" non-invocation log entries");
+    text("log-coverage",formatNumber(data.event_kinds?.internal || 0)+" internal calls excluded · "+formatNumber(data.files)+" imported files · "+formatNumber(data.scanned_sources)+" configured sources · "+formatNumber(data.other_entries)+" non-invocation log entries"+(data.retained_from_date?" · Function history retained from "+data.retained_from_date:""));
     text("log-last-event",data.last_entry_local ? data.last_entry_local.replace("T"," ")+" (client-local; no timezone)" : "No events observed in range");
     text("log-import-quality",sourceRows.length ? (formatNumber(data.import_errors)+" reported import issues") : "No log paths have been scanned. Configure [imports].log_paths.");
     const warning=byId("log-source-warning");
@@ -572,6 +572,11 @@
     tls: {enabled:"Enable native HTTPS",certificate:"PEM certificate / chain path",private_key:"PEM private key path",key_password_env:"Environment variable for key password"},
     collection: {recent_report_window_seconds:"Legacy option (not used in current counting)",maximum_clock_skew_seconds:"Legacy option (not used in current counting)",maximum_request_bytes:"Maximum request bytes"},
     imports: {counter_paths:"LicenseCounter input folders or files (one path per line)",log_paths:"LogPath folders or files (one path per line)",recursive:"Scan subdirectories",scan_seconds:"Seconds between import scans",maximum_file_bytes:"Read budget per scan / file (bytes)",maximum_files_per_scan:"Files examined per scan"},
+    log_storage: {statistics_months:"Function statistics retained (calendar months; licences unaffected)",
+      archive_enabled:"Automatically archive closed, fully imported log segments daily",
+      online_months:"Unpacked log months to keep (including current month)",
+      archive_directory:"Log archive folder (empty = data/log-archives; outside import folders)",
+      archive_months:"Monthly archives retained (including current month)"},
     publishing: {source_directory:"Alternate configuration publication folder (empty = default)"},
     billing: {unit_price:"Price per identity-month (empty = no price)",currency:"Billing currency (three letters)"},
     retention: {cutoff_date:"Earliest client-local date retained (YYYY-MM-DD; empty disables)",
@@ -760,6 +765,7 @@
     updateAddinSnippet();
     updateClientUrls();
     refreshAutostart();
+    refreshLogStorage();
     text("settings-state", "Settings loaded · websites each have their own Save website button");
   }
   function updateAddinSnippet() {
@@ -893,11 +899,31 @@
       if(Object.hasOwn(changes,"publishing")) refresh();
       if(Object.hasOwn(changes,"imports")) refreshLogs();
       if(Object.hasOwn(changes,"retention")) previewRetention();
+      if(Object.hasOwn(changes,"log_storage")) refreshLogStorage();
       if(saveButton.textContent!=="Update rolled back") saveButton.textContent="✓ Saved";
     } catch(e) {byId("settings-error").textContent=e.message;byId("settings-error").hidden=false;saveButton.textContent="Save failed";text("settings-state","Save failed · no settings applied");}
     finally {saveButton.disabled=false;setTimeout(()=>{saveButton.textContent=oldLabel;},1800);}
 
   });
+  async function refreshLogStorage() {
+    const area=byId("log-storage-status");
+    try {
+      const data=await apiJson("/api/settings/log-storage");
+      area.replaceChildren();
+      area.append(element("p","","Function statistics retained from "+data.retained_from_date+
+        ". Licence retention: "+(data.licence_retention_enabled?"separately enabled — check retention settings":"disabled; licence history stays")));
+      const status=data.archive_status;
+      if(!status) {area.append(element("p","","Daily log maintenance has not run yet."));return;}
+      area.append(element("p","","Last maintenance: "+status.date+" · Archived files: "+status.archived+
+        " · Expired archives: "+status.expired_archives+" · Retained for review: "+status.held+
+        " · Unsplit legacy files: "+(status.legacy_files||0)+
+        (status.disabled?" · Automatic archival disabled or no LogPath configured":"")));
+      for(const detail of (status.details||[])) area.append(element("p","",(detail.name?detail.name+": ":"")+
+        (detail.reason||detail.state)));
+    } catch(error) {area.textContent="Log maintenance status unavailable: "+error.message;}
+  }
+  byId("log-storage-refresh").addEventListener("click",refreshLogStorage);
+
   async function previewRetention() {
     const area=byId("retention-preview"), button=byId("retention-clean");
     try {

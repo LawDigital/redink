@@ -813,6 +813,36 @@ Partial Public Class ThisAddIn
     Private _suppressBalloonClicks As Integer = 0
     Private _handlingSelectionChange As Boolean = False
     Private _docCheckAnchorDoc As Word.Document
+    Private _docCheckSelectionApplication As Microsoft.Office.Interop.Word.Application
+
+    Private Sub StartDocCheckSelectionTracking()
+        If Not WordSelectionTrackingEnabled Then Return
+        If GetWordEventSubscriptionStatus("DocCheck.WindowSelectionChange") <> WordEventSubscriptionStatus.Inactive Then Return
+        Try
+            _docCheckSelectionApplication = Application
+            If Not WordSelectionTrackingEnabled Then
+                StopDocCheckSelectionTracking()
+                Return
+            End If
+            If _docCheckSelectionApplication Is Nothing Then Throw New System.InvalidOperationException("The Word event source is unavailable.")
+            SetWordEventSubscription("DocCheck.WindowSelectionChange", True,
+                Sub()
+                    AddHandler _docCheckSelectionApplication.WindowSelectionChange, AddressOf WordApp_WindowSelectionChange
+                End Sub)
+        Catch ex As System.Exception
+            LogWordCommandDiagnostic("DocCheck.SelectionTracking.Startup", ex.ToString())
+        End Try
+    End Sub
+
+    Private Sub StopDocCheckSelectionTracking()
+        If _docCheckSelectionApplication Is Nothing Then Return
+        If SetWordEventSubscription("DocCheck.WindowSelectionChange", False,
+            Sub()
+                RemoveHandler _docCheckSelectionApplication.WindowSelectionChange, AddressOf WordApp_WindowSelectionChange
+            End Sub) Then
+            _docCheckSelectionApplication = Nothing
+        End If
+    End Sub
 
     ''' <summary>
     ''' Redirects the Word selection back to the guarded anchor range when balloon clicks are suppressed.
@@ -833,7 +863,8 @@ Partial Public Class ThisAddIn
     ''' Handles Word selection changes to keep focus out of the comments pane when DocCheck protections are active.
     ''' </summary>
     ''' <param name="Sel">Current Word selection supplied by the event.</param>
-    Private Sub WordApp_WindowSelectionChange(ByVal Sel As Word.Selection) Handles wordApp.WindowSelectionChange
+    Private Sub WordApp_WindowSelectionChange(ByVal Sel As Microsoft.Office.Interop.Word.Selection)
+        If Not WordSelectionTrackingEnabled OrElse GetWordEventSubscriptionStatus("DocCheck.WindowSelectionChange") <> WordEventSubscriptionStatus.Active Then Return
         If _handlingSelectionChange Then Exit Sub
 
         ' Activate guard if either a run is ongoing or a suppress request is active

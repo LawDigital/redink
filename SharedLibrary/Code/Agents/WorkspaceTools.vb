@@ -163,6 +163,8 @@ Namespace Agents
                         Return Err_("host_only_tool", toolName & " must be executed by the host (Word/Outlook), not via the shared dispatcher.")
                     Case Else : Return Err_("unknown_workspace_tool", "Unknown tool '" & toolName & "'.")
                 End Select
+            Catch ex As System.IO.PathTooLongException
+                Return Err_("path_too_long", FilePathBudget.PathTooLongMessage)
             Catch uae As UnauthorizedAccessException
                 Return Err_("access_denied", uae.Message)
             Catch ex As Exception
@@ -518,6 +520,8 @@ Namespace Agents
                             Key .mtime = fi.LastWriteTimeUtc
                         })
                     End If
+                Catch ex As System.IO.PathTooLongException
+                    Throw
                 Catch
                 End Try
             Next
@@ -606,6 +610,12 @@ Namespace Agents
                         Key .size = fi.Length,
                         Key .truncated = truncated,
                         Key .text = text
+                    })
+                Catch ex As System.IO.PathTooLongException
+                    items.Add(New With {
+                        Key .path = relPath,
+                        Key .error = "path_too_long",
+                        Key .message = FilePathBudget.PathTooLongMessage
                     })
                 Catch uae As UnauthorizedAccessException
                     items.Add(New With {
@@ -764,6 +774,8 @@ Namespace Agents
                         Dim rel = f.Substring(_active.RootPath.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
                         out.Add(New With {Key .path = rel, Key .hits = hits})
                     End If
+                Catch ex As System.IO.PathTooLongException
+                    Throw
                 Catch
                 End Try
             Next

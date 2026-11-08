@@ -20,29 +20,222 @@ Option Explicit On
 Option Strict On
 
 Partial Public Class ThisAddIn
-    Private WithEvents _commentSelectionApplication As Microsoft.Office.Interop.Word.Application
+    Private Enum WordEventSubscriptionStatus
+        Inactive
+        Active
+        Unknown
+    End Enum
+
+    ' These states describe this add-in's own COM subscriptions, never other add-ins.
+    ' Unknown is retained after a failed COM operation; it must not be reported as inactive.
+    Private ReadOnly _wordEventSubscriptions As New System.Collections.Generic.Dictionary(Of System.String, WordEventSubscriptionStatus)(System.StringComparer.Ordinal)
+    Private ReadOnly _wordEventSubscriptionErrors As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.Ordinal)
+    Private ReadOnly _wordEventChangesInProgress As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
+    Private ReadOnly _deferredWordEventRemovals As New System.Collections.Generic.Dictionary(Of System.String, System.Action)(System.StringComparer.Ordinal)
+    Private _wordSelectionModeInitialized As System.Boolean
+    Private _wordSelectionShutdown As System.Boolean
+    Private _wordSelectionShutdownInProgress As System.Boolean
+    Private _commentSelectionApplication As Microsoft.Office.Interop.Word.Application
     Private _commentSelectionTracker As WordCommentSelectionTracker
+    Private _retiredCommentSelectionTracker As WordCommentSelectionTracker
+    ' Keep this as the explicit startup opt-out: tracker failure must retain the conservative fallback.
     Private _commentSelectionTrackingDisabled As System.Boolean
+    Private _commentProbeTimer As System.Windows.Forms.Timer
+    Private _commentProbePending As System.Boolean
+    Private _commentProbeRunning As System.Boolean
+    Private _commentContextDocument As Microsoft.Office.Interop.Word.Document
+    Private _commentContextWindow As System.Int32
+    Private _commentContextRevision As System.Int32
     Private _lastCommentBodyWindow As System.Int32
     Private _lastCommentBodyStart As System.Int32 = -1
     Private _lastCommentBodyEnd As System.Int32 = -1
     Private _lastCommentBodyStory As System.Int32 = -1
 
-    ' Called on the Word UI thread after reading the startup configuration.
-    Private Sub StartCommentSelectionTracking()
-        If _commentSelectionTracker IsNot Nothing OrElse _commentSelectionTrackingDisabled Then Return
-        _commentSelectionTrackingDisabled = Not _context.INI_WordCommentSelectionTracking
-        If _commentSelectionTrackingDisabled Then
-            LogWordCommandDiagnostic("CommentSelection.Startup", "tracking_off")
+    Private ReadOnly Property WordSelectionTrackingEnabled As System.Boolean
+        Get
+            Return _wordSelectionModeInitialized AndAlso Not _commentSelectionTrackingDisabled AndAlso Not _wordSelectionShutdown
+        End Get
+    End Property
+
+    Private Function GetWordEventSubscriptionStatus(eventName As System.String) As WordEventSubscriptionStatus
+        Dim status As WordEventSubscriptionStatus
+        If _wordEventSubscriptions.TryGetValue(eventName, status) Then Return status
+        Return WordEventSubscriptionStatus.Inactive
+    End Function
+
+    ' All callers run on the Word UI thread. Each COM operation is isolated so one
+    ' failed removal cannot prevent another handler from being detached.
+    Private Function SetWordEventSubscription(eventName As System.String,
+                                              enabled As System.Boolean,
+                                              changeSubscription As System.Action) As System.Boolean
+        Dim desired As WordEventSubscriptionStatus = If(enabled, WordEventSubscriptionStatus.Active, WordEventSubscriptionStatus.Inactive)
+        Dim current As WordEventSubscriptionStatus = GetWordEventSubscriptionStatus(eventName)
+        If current = desired Then Return True
+        ' COM may reenter Word while AddHandler/RemoveHandler is in progress. Keep
+        ' the source reference alive and finish a requested removal after that call.
+        If _wordEventChangesInProgress.Contains(eventName) Then
+            If Not enabled Then _deferredWordEventRemovals(eventName) = changeSubscription
+            Return False
+        End If
+        ' An uncertain AddHandler may already have succeeded. Never add it twice.
+        If enabled AndAlso current = WordEventSubscriptionStatus.Unknown Then Return False
+
+        _wordEventChangesInProgress.Add(eventName)
+        _wordEventSubscriptions(eventName) = WordEventSubscriptionStatus.Unknown
+        Try
+            changeSubscription.Invoke()
+            _wordEventSubscriptions(eventName) = desired
+            _wordEventSubscriptionErrors.Remove(eventName)
+        Catch ex As System.Exception
+            _wordEventSubscriptions(eventName) = WordEventSubscriptionStatus.Unknown
+            _wordEventSubscriptionErrors(eventName) = ex.ToString()
+            LogWordCommandDiagnostic("SelectionTracking.Subscription", eventName & "; requested=" & desired.ToString() & "; actual=Unknown; " & ex.ToString())
+        Finally
+            _wordEventChangesInProgress.Remove(eventName)
+            Dim deferredRemoval As System.Action = Nothing
+            If _deferredWordEventRemovals.TryGetValue(eventName, deferredRemoval) Then
+                _deferredWordEventRemovals.Remove(eventName)
+                SetWordEventSubscription(eventName, False, deferredRemoval)
+            End If
+        End Try
+        Return GetWordEventSubscriptionStatus(eventName) = desired
+    End Function
+
+    ' Called only after the startup configuration has returned. The documented
+    ' restart-required mode governs both selection handlers and is never re-latched.
+    Private Sub StartWordSelectionTracking()
+        If _wordSelectionShutdown Then
+            LogWordSelectionTrackingStatus("StartIgnoredAfterShutdown")
             Return
         End If
+        If Not _wordSelectionModeInitialized Then
+            _commentSelectionTrackingDisabled = _context Is Nothing OrElse Not _context.INI_WordCommentSelectionTracking
+            _wordSelectionModeInitialized = True
+        End If
+        If Not WordSelectionTrackingEnabled Then
+            LogWordCommandDiagnostic("CommentSelection.Startup", "tracking_off")
+            LogWordSelectionTrackingStatus("StartupDisabled")
+            Return
+        End If
+
+        ' Preserve the original order and independence: DocCheck was bound before
+        ' the comment tracker, and remains available if only tracker startup fails.
+        StartDocCheckSelectionTracking()
+        StartCommentSelectionTracking()
+        LogWordSelectionTrackingStatus("Startup")
+    End Sub
+
+    Private Sub StartCommentSelectionTracking()
+        If Not WordSelectionTrackingEnabled OrElse _commentSelectionTracker IsNot Nothing OrElse _retiredCommentSelectionTracker IsNot Nothing Then Return
+        If GetWordEventSubscriptionStatus("Comment.DocumentChange") <> WordEventSubscriptionStatus.Inactive OrElse
+           GetWordEventSubscriptionStatus("Comment.WindowSelectionChange") <> WordEventSubscriptionStatus.Inactive Then Return
         Try
+            _commentProbeTimer = New System.Windows.Forms.Timer() With {.Interval = 75}
+            AddHandler _commentProbeTimer.Tick, AddressOf ProcessPendingCommentProbe
             _commentSelectionTracker = New WordCommentSelectionTracker()
             _commentSelectionApplication = Application
+            If Not WordSelectionTrackingEnabled Then
+                StopCommentSelectionTracking()
+                Return
+            End If
+            If _commentSelectionApplication Is Nothing Then Throw New System.InvalidOperationException("The Word event source is unavailable.")
+            If Not SetWordEventSubscription("Comment.DocumentChange", True,
+                Sub()
+                    AddHandler _commentSelectionApplication.DocumentChange, AddressOf CommentSelectionDocumentChanged
+                End Sub) Then
+                StopCommentSelectionTracking()
+                Return
+            End If
+            If Not SetWordEventSubscription("Comment.WindowSelectionChange", True,
+                Sub()
+                    AddHandler _commentSelectionApplication.WindowSelectionChange, AddressOf CommentSelectionBodyChanged
+                End Sub) Then
+                StopCommentSelectionTracking()
+                Return
+            End If
             WatchActiveCommentWindow()
         Catch ex As System.Exception
-            CommentSelectionShutdown()
+            StopCommentSelectionTracking()
             LogWordCommandDiagnostic("CommentSelection.Startup", ex.ToString())
+        End Try
+    End Sub
+
+    Private Sub StopCommentSelectionTracking()
+        If _commentProbeTimer IsNot Nothing Then
+            _commentProbeTimer.Stop()
+            RemoveHandler _commentProbeTimer.Tick, AddressOf ProcessPendingCommentProbe
+            _commentProbeTimer.Dispose()
+            _commentProbeTimer = Nothing
+        End If
+        _commentProbePending = False
+        _commentContextDocument = Nothing
+        _commentContextWindow = 0
+        If _commentSelectionTracker IsNot Nothing Then
+            _retiredCommentSelectionTracker = _commentSelectionTracker
+            _commentSelectionTracker = Nothing
+        End If
+        If _commentSelectionApplication IsNot Nothing Then
+            SetWordEventSubscription("Comment.WindowSelectionChange", False,
+                Sub()
+                    RemoveHandler _commentSelectionApplication.WindowSelectionChange, AddressOf CommentSelectionBodyChanged
+                End Sub)
+            SetWordEventSubscription("Comment.DocumentChange", False,
+                Sub()
+                    RemoveHandler _commentSelectionApplication.DocumentChange, AddressOf CommentSelectionDocumentChanged
+                End Sub)
+            If GetWordEventSubscriptionStatus("Comment.WindowSelectionChange") = WordEventSubscriptionStatus.Inactive AndAlso
+               GetWordEventSubscriptionStatus("Comment.DocumentChange") = WordEventSubscriptionStatus.Inactive Then
+                _commentSelectionApplication = Nothing
+            End If
+        End If
+        If _retiredCommentSelectionTracker IsNot Nothing Then
+            Try
+                _retiredCommentSelectionTracker.Dispose()
+                _retiredCommentSelectionTracker = Nothing
+            Catch ex As System.Exception
+                LogWordCommandDiagnostic("CommentSelection.Dispose", ex.ToString())
+            End Try
+        End If
+    End Sub
+
+    Private Sub LogWordSelectionTrackingStatus(reason As System.String)
+        If _context Is Nothing OrElse Not _context.INI_APIDebug Then Return
+        Try
+            Dim configured As System.Boolean = _context.INI_WordCommentSelectionTracking
+            Dim effective As System.Boolean = _wordSelectionModeInitialized AndAlso Not _commentSelectionTrackingDisabled
+            Dim details As New System.Text.StringBuilder()
+            details.Append("reason=").Append(reason)
+            Using process As System.Diagnostics.Process = System.Diagnostics.Process.GetCurrentProcess()
+                details.Append("; processId=").Append(process.Id.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            End Using
+            details.Append("; version=").Append(Version)
+            details.Append("; WordCommentSelectionTracking=").Append(configured.ToString())
+            details.Append("; modeInitialized=").Append(_wordSelectionModeInitialized.ToString())
+            details.Append("; effectiveStartupEnabled=").Append(effective.ToString())
+            details.Append("; restartRequired=").Append((_wordSelectionModeInitialized AndAlso configured <> effective).ToString())
+            details.Append("; shutdown=").Append(_wordSelectionShutdown.ToString())
+            details.Append("; commentCallbackMode=DeferredSTA")
+            details.Append("; commentProbePending=").Append(_commentProbePending.ToString())
+            details.Append("; commentProbeRunning=").Append(_commentProbeRunning.ToString())
+            details.Append("; trackerCreated=").Append((_commentSelectionTracker IsNot Nothing).ToString())
+            details.Append("; trackerCleanupPending=").Append((_retiredCommentSelectionTracker IsNot Nothing).ToString())
+            For Each eventName As System.String In New System.String() {
+                "Comment.WindowSelectionChange", "Comment.DocumentChange", "DocCheck.WindowSelectionChange",
+                "Startup.WindowActivate", "Startup.DocumentOpen", "Startup.NewDocument",
+                "Startup.ProtectedViewWindowOpen", "Startup.ProtectedViewWindowBeforeEdit",
+                "Startup.ProtectedViewWindowActivate", "Startup.DocumentChange"}
+                details.Append("; ").Append(eventName).Append("=").Append(GetWordEventSubscriptionStatus(eventName).ToString())
+            Next
+            For Each failure As System.Collections.Generic.KeyValuePair(Of System.String, System.String) In _wordEventSubscriptionErrors
+                details.Append("; subscriptionError[").Append(failure.Key).Append("]=").Append(failure.Value)
+            Next
+            ' No Word selection, UI Automation probe or window activation is needed
+            ' to report these states. The performance log also works without LogPath.
+            LogWordCommandDiagnostic("SelectionTracking.Status", details.ToString())
+            Global.SharedLibrary.SharedLibrary.PerformanceLogger.LogEvent(
+                _context, "WordSelectionTracking", "Status", details.ToString(), hostName:="Word")
+        Catch ex As System.Exception
+            System.Diagnostics.Debug.WriteLine("Word selection tracking status logging: " & ex.ToString())
         End Try
     End Sub
 
@@ -77,59 +270,114 @@ Partial Public Class ThisAddIn
     End Sub
 
     Private Sub CommentSelectionShutdown() Handles Me.Shutdown, Application.Quit
-        Dim tracker As WordCommentSelectionTracker = _commentSelectionTracker
-        _commentSelectionTracker = Nothing
+        _wordSelectionShutdown = True
+        If _wordSelectionShutdownInProgress Then Return
+        _wordSelectionShutdownInProgress = True
         Try
-            _commentSelectionApplication = Nothing
-        Catch ex As System.Exception
-            LogWordCommandDiagnostic("CommentSelection.Shutdown", ex.ToString())
+            StopCommentSelectionTracking()
+            StopDocCheckSelectionTracking()
+            RemoveStartupHandlers()
+            LogWordSelectionTrackingStatus("Shutdown")
         Finally
-            If tracker IsNot Nothing Then tracker.Dispose()
+            _wordSelectionShutdownInProgress = False
         End Try
     End Sub
 
-    Private Sub CommentSelectionDocumentChanged() Handles _commentSelectionApplication.DocumentChange
-        _lastCommentBodyWindow = 0
-        _lastCommentBodyStart = -1
-        _lastCommentBodyEnd = -1
-        _lastCommentBodyStory = -1
-        If _commentSelectionTracker IsNot Nothing Then
-            _commentSelectionTracker.Invalidate()
-            WatchActiveCommentWindow()
-        End If
+    ' Event callbacks only schedule work. Never query Word COM from selection events.
+    Private Sub CommentSelectionDocumentChanged()
+        If Not WordSelectionTrackingEnabled Then Return
+        _commentContextRevision += 1
+        QueueCommentProbe()
     End Sub
 
-    Private Sub CommentSelectionBodyChanged(selection As Microsoft.Office.Interop.Word.Selection) Handles _commentSelectionApplication.WindowSelectionChange
+    Private Sub CommentSelectionBodyChanged(selection As Microsoft.Office.Interop.Word.Selection)
+        If Not WordSelectionTrackingEnabled Then Return
+        QueueCommentProbe()
+    End Sub
+
+    Private Sub QueueCommentProbe()
+        If _commentSelectionTracker Is Nothing OrElse _commentProbeTimer Is Nothing Then Return
+        _commentProbePending = True
+        _commentProbeTimer.Start()
+    End Sub
+
+    Private Sub ProcessPendingCommentProbe(sender As System.Object, args As System.EventArgs)
+        If _commentProbeRunning OrElse Not WordSelectionTrackingEnabled Then Return
+        If _commentProbeTimer IsNot Nothing Then _commentProbeTimer.Stop()
+        If Not _commentProbePending OrElse _commentSelectionTracker Is Nothing Then Return
+        _commentProbePending = False
+        _commentProbeRunning = True
+        Dim revision As System.Int32 = _commentContextRevision
         Try
-            If _commentSelectionTracker Is Nothing OrElse selection Is Nothing OrElse
-               selection.StoryType = Microsoft.Office.Interop.Word.WdStoryType.wdCommentsStory OrElse
+            Dim window As Microsoft.Office.Interop.Word.Window = GetActiveWordDocumentWindow(Application)
+            If window Is Nothing Then
+                _commentSelectionTracker.Invalidate()
+                _commentSelectionTracker.WatchWindow(System.IntPtr.Zero)
+                _commentContextDocument = Nothing
+                _commentContextWindow = 0
+                Return
+            End If
+            Dim doc As Microsoft.Office.Interop.Word.Document = window.Document
+            Dim hwnd As System.Int32 = window.Hwnd
+            If revision <> _commentContextRevision Then Return
+            If hwnd <> _commentContextWindow OrElse Not IsSameCommentDocument(doc, _commentContextDocument) Then
+                ' Switching windows must preserve evidence already observed in the NEW
+                ' window. Only a reused HWND with a different document needs a full reset.
+                If hwnd = _commentContextWindow Then _commentSelectionTracker.Invalidate()
+                LogCommentCommandResolution("context_switch; oldWindow=" & _commentContextWindow.ToString() &
+                    "; activeWindow=" & hwnd.ToString() & "; document=" & CommentDocumentIdentity(doc))
+                _commentContextDocument = doc
+                _commentContextWindow = hwnd
+                _lastCommentBodyWindow = 0
+                _lastCommentBodyStart = -1
+                _lastCommentBodyEnd = -1
+                _lastCommentBodyStory = -1
+            End If
+            _commentSelectionTracker.WatchWindow(New System.IntPtr(hwnd))
+            Dim selection As Microsoft.Office.Interop.Word.Selection = window.Selection
+            If selection Is Nothing OrElse selection.StoryType = Microsoft.Office.Interop.Word.WdStoryType.wdCommentsStory OrElse
                CBool(selection.Information(Microsoft.Office.Interop.Word.WdInformation.wdInCommentPane)) Then Return
             Dim currentRange As Microsoft.Office.Interop.Word.Range = selection.Range
-            If currentRange Is Nothing Then Return
-            Dim window As Microsoft.Office.Interop.Word.Window = GetActiveWordDocumentWindow(selection.Application)
-            If window Is Nothing OrElse Not IsSameProcessingDocument(window.Document, currentRange.Document) Then Return
-            Dim hwnd As System.Int32 = window.Hwnd
+            If revision <> _commentContextRevision OrElse currentRange Is Nothing OrElse
+               Not IsSameCommentDocument(doc, currentRange.Document) Then Return
             If hwnd <> _lastCommentBodyWindow OrElse currentRange.Start <> _lastCommentBodyStart OrElse
                currentRange.End <> _lastCommentBodyEnd OrElse CInt(currentRange.StoryType) <> _lastCommentBodyStory Then
                 _lastCommentBodyWindow = hwnd
                 _lastCommentBodyStart = currentRange.Start
                 _lastCommentBodyEnd = currentRange.End
                 _lastCommentBodyStory = CInt(currentRange.StoryType)
-                ' Word may move the body anchor when a card is selected, or restore
-                ' the old body selection on a ribbon click. That is NOT a document
-                ' change. Let the input/UIA observer distinguish those transitions.
                 _commentSelectionTracker.ObserveBodySelectionChange(New System.IntPtr(hwnd))
             End If
-        Catch closed As System.Runtime.InteropServices.COMException When closed.ErrorCode = &H800A1098I
-            ' A final selection event can race the last document closing.
-            If _commentSelectionTracker IsNot Nothing Then _commentSelectionTracker.WatchWindow(System.IntPtr.Zero)
         Catch ex As System.Exception
-            LogWordCommandDiagnostic("CommentSelection.SelectionEvent", ex.ToString())
+            LogWordCommandDiagnostic("CommentSelection.DeferredProbe", ex.ToString())
+        Finally
+            _commentProbeRunning = False
+            If _commentProbePending AndAlso _commentProbeTimer IsNot Nothing Then _commentProbeTimer.Start()
         End Try
     End Sub
 
+    Private Shared Function CommentDocumentIdentity(doc As Microsoft.Office.Interop.Word.Document) As System.String
+        If doc Is Nothing Then Return "none"
+        Dim identity As System.IntPtr = System.IntPtr.Zero
+        Try
+            identity = System.Runtime.InteropServices.Marshal.GetIUnknownForObject(doc)
+            Return identity.ToInt64().ToString("X", System.Globalization.CultureInfo.InvariantCulture)
+        Finally
+            If identity <> System.IntPtr.Zero Then System.Runtime.InteropServices.Marshal.Release(identity)
+        End Try
+    End Function
+
+    Private Shared Function IsSameCommentDocument(first As Microsoft.Office.Interop.Word.Document,
+                                                   second As Microsoft.Office.Interop.Word.Document) As System.Boolean
+        If first Is Nothing OrElse second Is Nothing Then Return False
+        If first Is second Then Return True
+        Return System.String.Equals(CommentDocumentIdentity(first), CommentDocumentIdentity(second), System.StringComparison.Ordinal)
+    End Function
+
     Private Async Function CaptureCommentSelectionEvidenceAsync() As System.Threading.Tasks.Task(Of WordCommentSelectionTracker.Evidence)
         Await EnsureUIThread()
+        QueueCommentProbe()
+        ProcessPendingCommentProbe(Nothing, System.EventArgs.Empty)
         Dim before As Microsoft.Office.Interop.Word.Window = GetActiveWordDocumentWindow(Globals.ThisAddIn.Application)
         If before Is Nothing Then Throw New WordCommandNoticeException("Open a document and select its comment first.")
         Dim doc As Microsoft.Office.Interop.Word.Document = before.Document
@@ -142,10 +390,11 @@ Partial Public Class ThisAddIn
         Dim evidence As WordCommentSelectionTracker.Evidence = Await tracker.CaptureAsync(hwnd)
         Await EnsureUIThread()
         Dim after As Microsoft.Office.Interop.Word.Window = GetActiveWordDocumentWindow(Globals.ThisAddIn.Application)
-        If after Is Nothing OrElse after.Hwnd <> hwnd.ToInt32() OrElse Not IsSameProcessingDocument(doc, after.Document) Then
+        If after Is Nothing OrElse after.Hwnd <> hwnd.ToInt32() OrElse Not IsSameCommentDocument(doc, after.Document) Then
             Throw New WordCommandNoticeException("The active document changed. Please select the comment again and retry.")
         End If
-        LogCommentCommandResolution("uia; " & evidence.Diagnostic)
+        LogCommentCommandResolution("uia; activeWindow=" & hwnd.ToString() & "; evidenceWindow=" & evidence.WindowHandle.ToString() &
+            "; document=" & CommentDocumentIdentity(doc) & "; " & evidence.Diagnostic)
         Return evidence
     End Function
 
@@ -180,7 +429,7 @@ Partial Public Class ThisAddIn
                                                   candidate As Microsoft.Office.Interop.Word.Comment,
                                                   matches As System.Collections.Generic.List(Of Microsoft.Office.Interop.Word.Comment))
         Dim range As Microsoft.Office.Interop.Word.Range = candidate.Range
-        If Not IsSameProcessingDocument(doc, range.Document) Then Return
+        If Not IsSameCommentDocument(doc, range.Document) Then Return
         If Not WordCommentSelectionTracker.Matches(evidence, range.Text, candidate.Author) Then Return
         ' Some Word builds include a reply in both enumerations. Count its identity
         ' once, but never merge different comments merely because their text matches.
@@ -255,8 +504,8 @@ Partial Public Class ThisAddIn
                                          isReply As System.Boolean)
         Dim body As Microsoft.Office.Interop.Word.Range = comment.Range
         Dim anchor As Microsoft.Office.Interop.Word.Range = comment.Scope
-        If Not IsSameProcessingDocument(doc, body.Document) OrElse
-           Not IsSameProcessingDocument(doc, anchor.Document) OrElse
+        If Not IsSameCommentDocument(doc, body.Document) OrElse
+           Not IsSameCommentDocument(doc, anchor.Document) OrElse
            body.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdCommentsStory Then
             Throw New WordCommandNoticeException("A comment is no longer available. Please select it again.")
         End If
@@ -294,7 +543,7 @@ Partial Public Class ThisAddIn
         Dim rightBody As Microsoft.Office.Interop.Word.Range = right.Range
         ' RCW reference equality and comment text are NOT durable identity. Keep
         ' equal-text comments at different anchors (or different comment ranges).
-        Return IsSameProcessingDocument(leftBody.Document, rightBody.Document) AndAlso
+        Return IsSameCommentDocument(leftBody.Document, rightBody.Document) AndAlso
             leftBody.StoryType = rightBody.StoryType AndAlso leftBody.IsEqual(rightBody) AndAlso
             left.Scope.IsEqual(right.Scope) AndAlso left.Reference.IsEqual(right.Reference)
     End Function
@@ -313,7 +562,7 @@ Partial Public Class ThisAddIn
         Dim matches As New System.Collections.Generic.List(Of Microsoft.Office.Interop.Word.Comment)()
         If doc Is Nothing OrElse bodyRange Is Nothing OrElse
            bodyRange.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory OrElse
-           Not IsSameProcessingDocument(doc, bodyRange.Document) Then Return matches
+           Not IsSameCommentDocument(doc, bodyRange.Document) Then Return matches
 
         Dim startPos As System.Int32 = bodyRange.Start
         Dim endPos As System.Int32 = bodyRange.End
@@ -337,7 +586,7 @@ Partial Public Class ThisAddIn
             End Try
             If anchor Is Nothing OrElse
                anchor.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory OrElse
-               Not IsSameProcessingDocument(doc, anchor.Document) Then Continue For
+               Not IsSameCommentDocument(doc, anchor.Document) Then Continue For
 
             Dim intersects As System.Boolean
             If startPos = endPos Then
@@ -370,9 +619,7 @@ Partial Public Class ThisAddIn
                                               Optional allowedComments As System.Collections.Generic.IReadOnlyList(Of Microsoft.Office.Interop.Word.Comment) = Nothing,
                                               Optional allowDocumentSelection As System.Boolean = False) As Microsoft.Office.Interop.Word.Comment
         Dim choices As New System.Collections.Generic.List(Of CommentChoice)()
-        Dim items As New System.Collections.Generic.List(Of Global.SharedLibrary.SharedLibrary.SharedMethods.SelectionItem) From {
-            New Global.SharedLibrary.SharedLibrary.SharedMethods.SelectionItem("Choose a comment...", 0)
-        }
+        Dim items As New System.Collections.Generic.List(Of Global.SharedLibrary.SharedLibrary.SharedMethods.SelectionItem)()
         For Each entry As CommentChoice In ReadCommandCommentCatalog(doc, allowedComments)
             If System.String.IsNullOrWhiteSpace(entry.Text) Then Continue For
             choices.Add(entry)
@@ -382,7 +629,7 @@ Partial Public Class ThisAddIn
             items.Add(New Global.SharedLibrary.SharedLibrary.SharedMethods.SelectionItem(label, choices.Count))
         Next
         If allowDocumentSelection Then
-            items.Insert(1, New Global.SharedLibrary.SharedLibrary.SharedMethods.SelectionItem("Use the comments in the selected document text", choices.Count + 1))
+            items.Add(New Global.SharedLibrary.SharedLibrary.SharedMethods.SelectionItem("Use the comments in the selected document text", choices.Count + 1))
         End If
         If choices.Count = 0 Then
             Throw New WordCommandNoticeException("There is no readable comment in this document. Please select a comment and try again.")
@@ -405,8 +652,8 @@ Partial Public Class ThisAddIn
         End If
         Dim chosen As CommentChoice = choices(picked - 1)
         Try
-            If Not IsSameProcessingDocument(doc, Globals.ThisAddIn.Application.ActiveDocument) OrElse
-               Not IsSameProcessingDocument(doc, chosen.Comment.Range.Document) OrElse
+            If Not IsSameCommentDocument(doc, Globals.ThisAddIn.Application.ActiveDocument) OrElse
+               Not IsSameCommentDocument(doc, chosen.Comment.Range.Document) OrElse
                Not chosen.Comment.Scope.IsEqual(chosen.Anchor) OrElse
                Not System.String.Equals(chosen.Comment.Range.Text, chosen.Text, System.StringComparison.Ordinal) Then
                 Throw New WordCommandNoticeException("The comment or document changed while the list was open. Please select the comment again.")

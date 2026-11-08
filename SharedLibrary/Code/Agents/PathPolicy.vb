@@ -360,8 +360,10 @@ Namespace Agents
                 Else
                     full = Path.GetFullPath(Path.Combine(GetDefaultWritableRoot(), requestedPath))
                 End If
-            Catch ex As Exception
-                Throw New UnauthorizedAccessException("Invalid path: " & ex.Message)
+            Catch ex As System.IO.PathTooLongException
+                Throw New System.IO.PathTooLongException(FilePathBudget.PathTooLongMessage, ex)
+            Catch ex As System.Exception
+                Throw New System.UnauthorizedAccessException("Invalid path: " & ex.Message)
             End Try
 
             ' Block raw devices and UNC by default.

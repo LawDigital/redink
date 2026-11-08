@@ -281,10 +281,12 @@ Partial Public Class ThisAddIn
             ct.ThrowIfCancellationRequested()
             If Not resumeLastJob Then options.IncludeSelectedTools = True
             manifest = If(resumeLastJob, BatchJobs.Store.LoadManifest(options.LastManifestPath), BatchJobs.Store.Create(options, ct))
+            Dim layout As BatchJobs.StorageLayout = BatchJobs.Store.LayoutFor(manifest)
             options.LastManifestPath = System.IO.Path.Combine(manifest.RootDirectory, "Job.json")
             options.LastPrompt = manifest.Options.Prompt
             BatchJobs.Store.SaveSettings(options)
             ReportBatchProgress(manifest, Nothing, "Preparing this job's results and verifying its execution configuration.", progress)
+            If Not System.String.IsNullOrWhiteSpace(manifest.StorageNotice) Then ReportBatchProgress(manifest, Nothing, manifest.StorageNotice, progress)
             ' Publication consumes verified checkpoints only. It must remain possible
             ' even after models, selected tools or resource drives become unavailable.
             BatchJobs.Store.Publish(manifest)
@@ -357,6 +359,9 @@ Partial Public Class ThisAddIn
                 _apConfig = New AutoPilotConfig()
                 _apKnowledgeSourceCopies = New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
                 Dim tools = environment.Tools
+                For Each pendingItem As BatchJobs.Item In manifest.Items.Where(Function(value) value.Status <> "succeeded")
+                    BatchJobs.Store.PrepareItemStorage(manifest, pendingItem)
+                Next
                 BatchJobs.Store.Save(manifest)
                 ReportBatchProgress(manifest, Nothing, "Captured Local Chat " & environment.SourceChatId.ToString(System.Globalization.CultureInfo.InvariantCulture) & ": " & tools.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) & " selected/session tools; " & System.Linq.Enumerable.Count(environment.ResourceFiles, Function(value) Not System.String.IsNullOrWhiteSpace(value.ToolName)).ToString(System.Globalization.CultureInfo.InvariantCulture) & " skills/agents. Configuration: " & environment.Fingerprint, progress)
                 ReportBatchProgress(manifest, Nothing, "Selected tools: " & System.String.Join(", ", manifest.ToolNames), progress)
@@ -374,19 +379,22 @@ Partial Public Class ThisAddIn
                     For retryIndex As System.Int32 = 0 To manifest.Options.Retries
                         ct.ThrowIfCancellationRequested()
                         item.AttemptCount += 1
-                        Dim attemptStem = System.IO.Path.Combine("History", BatchJobs.Store.ItemDirectory(item), "Attempt " & item.AttemptCount.ToString("00", System.Globalization.CultureInfo.InvariantCulture))
+                        Dim attemptStem = System.IO.Path.Combine(layout.HistoryDirectoryName, BatchJobs.Store.ItemDirectory(item), layout.AttemptDirectoryName(item.AttemptCount))
                         Dim attemptRootRelative = attemptStem
                         Dim attemptRoot = BatchJobs.Store.ContainedPath(manifest.RootDirectory, attemptRootRelative)
                         Dim orphanSuffix As System.Int32 = 2
                         ' A crash can leave an unrecorded directory before Job.json was
                         ' saved. Never reuse it, even though its attempt number is free.
                         While System.IO.Directory.Exists(attemptRoot) OrElse System.IO.File.Exists(attemptRoot)
-                            attemptRootRelative = attemptStem & " (" & orphanSuffix.ToString(System.Globalization.CultureInfo.InvariantCulture) & ")"
+                            attemptRootRelative = layout.CollisionDirectoryName(attemptStem, orphanSuffix)
                             attemptRoot = BatchJobs.Store.ContainedPath(manifest.RootDirectory, attemptRootRelative)
+                            If orphanSuffix = System.Int32.MaxValue Then Throw New System.IO.IOException("The host cannot allocate another attempt directory. Choose Start batch; the host keeps this job's existing checkpoints.")
                             orphanSuffix += 1
                         End While
-                        Dim work = System.IO.Path.Combine(attemptRoot, "Work")
-                        Dim candidate = System.IO.Path.Combine(attemptRoot, "Candidate")
+                        Dim work = System.IO.Path.Combine(attemptRoot, layout.WorkDirectoryName)
+                        Dim candidate = System.IO.Path.Combine(attemptRoot, layout.CandidateDirectoryName)
+                        Global.SharedLibrary.Agents.FilePathBudget.RequireGeneratedPath(System.IO.Path.Combine(work, BatchJobs.Store.ContractFileName))
+                        Global.SharedLibrary.Agents.FilePathBudget.RequireGeneratedPath(System.IO.Path.Combine(candidate, "Response.md.native-append.pending"))
                         System.IO.Directory.CreateDirectory(work)
                         System.IO.Directory.CreateDirectory(candidate)
                         Dim attempt As New BatchJobs.Attempt With {.Number = item.AttemptCount, .StartedUtc = System.DateTime.UtcNow, .LogPath = System.IO.Path.Combine(attemptRootRelative, "Tooling.txt")}
@@ -412,12 +420,28 @@ Partial Public Class ThisAddIn
                             ElseIf currentHash <> item.SourceSha256 Then
                                 Throw New System.IO.InvalidDataException("The source file changed since the batch inventory was recorded. Start a new job for changed inputs.")
                             End If
-                            Dim inputs = System.IO.Path.Combine(work, "Inputs")
+                            Dim inputs = System.IO.Path.Combine(work, layout.InputsDirectoryName)
                             System.IO.Directory.CreateDirectory(inputs)
-                            Dim inputPath = System.IO.Path.Combine(inputs, "Input - " & System.IO.Path.GetFileName(item.SourcePath))
+                            Dim inputPath As System.String
+                            Dim inputLogicalName As System.String = Nothing
+                            If layout.IsCompact Then
+                                inputLogicalName = "Input - " & System.IO.Path.GetFileName(item.SourcePath)
+                                Dim occupiedNames As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+                                If previous IsNot Nothing Then
+                                    For Each previousOutput As BatchJobs.OutputFile In previous.Outputs
+                                        occupiedNames.Add(previousOutput.Name)
+                                    Next
+                                End If
+                                inputPath = Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(inputs, layout.InputCopyFileName(item.SourcePath), inputLogicalName, occupiedLogicalNames:=occupiedNames)
+                            Else
+                                inputPath = Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(inputs, layout.InputCopyFileName(item.SourcePath))
+                            End If
                             System.IO.File.Copy(item.SourcePath, inputPath, False)
+                            If Not System.String.Equals(System.IO.Path.GetFileName(inputPath), "Input - " & System.IO.Path.GetFileName(item.SourcePath), System.StringComparison.Ordinal) Then
+                                ReportBatchProgress(manifest, item, "The host uses a compact physical input copy: " & System.IO.Path.GetFileName(inputPath) & ". The batch context retains the complete original filename and relative path.", progress)
+                            End If
                             If BatchJobs.Store.Hash(inputPath) <> item.SourceSha256 Then Throw New System.IO.InvalidDataException("Source changed while its working copy was being created.")
-                            Dim attachments As New System.Collections.Generic.List(Of AutoPilotAttachmentInfo) From {BatchAttachment(inputPath)}
+                            Dim attachments As New System.Collections.Generic.List(Of AutoPilotAttachmentInfo) From {BatchAttachment(inputPath, inputLogicalName)}
                             If previous IsNot Nothing Then
                                 For Each output In previous.Outputs
                                     Dim carried = BatchJobs.Store.ContainedPath(work, output.Name)
@@ -426,7 +450,7 @@ Partial Public Class ThisAddIn
                                 Next
                             End If
                             Dim context = New With {.Schema = 1, .Job = System.IO.Path.GetFileName(manifest.RootDirectory), .ItemNumber = item.Number, .ItemCount = manifest.Items.Count,
-                                .Source = item.RelativeName, .SourceWorkingCopy = inputPath, .Objective = manifest.Options.Prompt, .CarryForward = manifest.Options.CarryForward,
+                                .Source = item.RelativeName, .SourceOriginalFileName = System.IO.Path.GetFileName(item.SourcePath), .SourceAttachmentName = attachments(0).OriginalFileName, .SourceWorkingCopy = inputPath, .Objective = manifest.Options.Prompt, .CarryForward = manifest.Options.CarryForward,
                                 .PreviouslyCommittedInputs = manifest.Items.Where(Function(value) value.Status = "succeeded").Select(Function(value) value.RelativeName).ToArray(),
                                 .PreviousOutputs = If(previous Is Nothing, New System.String() {}, previous.Outputs.Select(Function(output) output.Name).ToArray()),
                                 .PreviousOutputBindings = If(previous Is Nothing, New BatchJobs.OutputFile() {}, previous.Outputs.ToArray())}
@@ -446,7 +470,7 @@ Partial Public Class ThisAddIn
                                 Dim extension = System.IO.Path.GetExtension(inputPath).ToLowerInvariant()
                                 If extension = ".msg" OrElse extension = ".eml" Then
                                     If _uiContext Is Nothing Then Throw New System.InvalidOperationException("The Outlook UI dispatcher is unavailable for embedded mail extraction.")
-                                    Dim expanded = Await UnpackBatchMailAsync(inputPath, inputs, ct).ConfigureAwait(False)
+                                    Dim expanded = Await UnpackBatchMailAsync(inputPath, inputs, ct, System.IO.Path.GetFileName(item.SourcePath)).ConfigureAwait(False)
                                     For Each attachment In expanded
                                         If Not attachments.Any(Function(existing) System.String.Equals(existing.TempFilePath, attachment.TempFilePath, System.StringComparison.OrdinalIgnoreCase)) Then attachments.Add(attachment)
                                     Next
@@ -463,7 +487,8 @@ Partial Public Class ThisAddIn
                                     "You have the user's selected Local Chat tools, skills and agents. Load the applicable selected skill before applying its instructions. " &
                                     "Follow that skill's output/template contract; an unavailable required resource is a blocker, not permission to substitute a different format. " &
                                     "Resource/reference roots are read-only. Copy templates or other source assets into the current workspace before editing them. " &
-                                    "Save final files in the workspace root with human-readable basenames. Register all final outputs with explicit artifact metadata and a COMPLETE expected_artifacts set. " &
+                                    "Save final files in the workspace root with human-readable basenames. The complete final basename including extension must contain at most " & BatchJobs.Store.OutputFileNameLimit(manifest, attemptRoot).ToString(System.Globalization.CultureInfo.InvariantCulture) & " characters so the host can preserve it through validation, later inputs and publication. " &
+                                    "Register all final outputs with explicit artifact metadata and a COMPLETE expected_artifacts set. " &
                                     "Mark working/intermediate outputs as non-deliverable. Do not deliver batch-context.json, batch-output-contract.json or previous-response.md."
                                 If manifest.Options.CarryForward Then systemPrompt &= System.Environment.NewLine &
                                     "Continue the actual carried artifacts and return the COMPLETE current output set. Do not regenerate a different workbook or discard earlier contributions. " &
@@ -541,6 +566,7 @@ Partial Public Class ThisAddIn
                                         Dim name = If(bound Is Nothing, System.IO.Path.GetFileName(output), bound.Binding.Name)
                                         If name.Equals(BatchJobs.Store.ContractFileName, System.StringComparison.OrdinalIgnoreCase) OrElse name.Equals(BatchJobs.Store.ContextFileName, System.StringComparison.OrdinalIgnoreCase) OrElse name.Equals("previous-response.md", System.StringComparison.OrdinalIgnoreCase) Then Throw New System.IO.InvalidDataException("Batch control files cannot be user deliverables.")
                                         If name.Equals(BatchJobs.Store.StatusDirectoryName, System.StringComparison.OrdinalIgnoreCase) Then Throw New System.IO.InvalidDataException("Choose another output name; Batch status holds the host reports.")
+                                        BatchJobs.Store.RequireOutputFileName(manifest, attemptRoot, name)
                                         Dim target = BatchJobs.Store.ContainedPath(candidate, name)
                                         Dim suffix As System.Int32 = 2
                                         While System.IO.File.Exists(target)
@@ -548,6 +574,7 @@ Partial Public Class ThisAddIn
                                             target = BatchJobs.Store.ContainedPath(candidate, System.IO.Path.GetFileNameWithoutExtension(name) & " (" & suffix.ToString(System.Globalization.CultureInfo.InvariantCulture) & ")" & System.IO.Path.GetExtension(name))
                                             suffix += 1
                                         End While
+                                        BatchJobs.Store.RequireOutputFileName(manifest, attemptRoot, System.IO.Path.GetFileName(target))
                                         System.IO.File.Copy(full, target, False)
                                         If bound IsNot Nothing AndAlso BatchJobs.Store.Hash(target) <> bound.SourceSha256 Then Throw New System.IO.InvalidDataException("Output changed during candidate staging: " & name)
                                         If (New System.IO.FileInfo(target)).Length = 0 Then Throw New System.IO.InvalidDataException("Empty deliverable: " & name)
@@ -567,9 +594,9 @@ Partial Public Class ThisAddIn
                                 End If
                                 ct.ThrowIfCancellationRequested()
                                 attempt.Phase = "checkpoint_commit"
-                                Dim committedPath = System.IO.Path.Combine(attemptRoot, "Committed")
+                                Dim committedPath = System.IO.Path.Combine(attemptRoot, layout.CommittedDirectoryName)
                                 System.IO.Directory.Move(candidate, committedPath)
-                                item.Snapshot = System.IO.Path.Combine(attemptRootRelative, "Committed")
+                                item.Snapshot = System.IO.Path.Combine(attemptRootRelative, layout.CommittedDirectoryName)
                                 item.Outputs = System.IO.Directory.GetFiles(committedPath).OrderBy(Function(path) path, System.StringComparer.OrdinalIgnoreCase).Select(Function(path)
                                     Dim name = System.IO.Path.GetFileName(path)
                                     Dim bound = boundOutputs.SingleOrDefault(Function(value) System.String.Equals(value.Binding.Name, name, System.StringComparison.OrdinalIgnoreCase))
@@ -611,13 +638,13 @@ Partial Public Class ThisAddIn
                             item.Snapshot = ""
                             item.Outputs.Clear()
                             item.Status = "failed"
-                            item.ErrorMessage = ex.Message
+                            item.ErrorMessage = If(TypeOf ex Is System.IO.PathTooLongException, Global.SharedLibrary.Agents.FilePathBudget.PathTooLongMessage, ex.Message)
                             attempt.Status = "failed"
                             attempt.ErrorMessage = ex.ToString()
                             attempt.FailureType = ex.GetType().Name
                             attempt.FinishedUtc = System.DateTime.UtcNow
                             BatchJobs.Store.Save(manifest)
-                            ReportBatchProgress(manifest, item, "Failed: " & ex.Message, progress)
+                            ReportBatchProgress(manifest, item, "Failed: " & item.ErrorMessage, progress)
                         Finally
                             ClearAttachmentCaches()
                         End Try
@@ -676,11 +703,12 @@ Partial Public Class ThisAddIn
             End If
             Throw
         Catch ex As System.Exception
+            Dim failureMessage As System.String = If(TypeOf ex Is System.IO.PathTooLongException, Global.SharedLibrary.Agents.FilePathBudget.PathTooLongMessage, ex.Message)
             If manifest IsNot Nothing Then
                 manifest.RunStatus = "stopped"
                 For Each interruptedItem In manifest.Items.Where(Function(value) value.Status = "running")
                     interruptedItem.Status = "failed"
-                    interruptedItem.ErrorMessage = ex.Message
+                    interruptedItem.ErrorMessage = failureMessage
                     For Each interruptedAttempt In interruptedItem.Attempts.Where(Function(value) value.Status = "running")
                         interruptedAttempt.Status = "failed"
                         interruptedAttempt.FailureType = ex.GetType().Name
@@ -688,7 +716,7 @@ Partial Public Class ThisAddIn
                         interruptedAttempt.FinishedUtc = System.DateTime.UtcNow
                     Next
                 Next
-                manifest.RunError = ex.Message
+                manifest.RunError = failureMessage
                 manifest.FinishedUtc = System.DateTime.UtcNow
                 Try
                     BatchJobs.Store.Save(manifest)
@@ -696,6 +724,7 @@ Partial Public Class ThisAddIn
                     System.Diagnostics.Trace.TraceWarning("Batch failure checkpoint: " & reportEx.Message)
                 End Try
             End If
+            If TypeOf ex Is System.IO.PathTooLongException Then Throw New System.IO.IOException(Global.SharedLibrary.Agents.FilePathBudget.PathTooLongMessage, ex)
             Throw
         Finally
             If manifest IsNot Nothing Then
@@ -713,9 +742,16 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
-    Private Async Function UnpackBatchMailAsync(path As System.String, inputs As System.String, ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of System.Collections.Generic.List(Of AutoPilotAttachmentInfo))
+    Private Async Function UnpackBatchMailAsync(path As System.String, inputs As System.String, ct As System.Threading.CancellationToken,
+                                               originalFileName As System.String) As System.Threading.Tasks.Task(Of System.Collections.Generic.List(Of AutoPilotAttachmentInfo))
         ct.ThrowIfCancellationRequested()
         Dim completion As New System.Threading.Tasks.TaskCompletionSource(Of System.Collections.Generic.List(Of AutoPilotAttachmentInfo))(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
+        Dim logicalNames As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+        If _apCurrentAttachments IsNot Nothing Then
+            For Each attachment As AutoPilotAttachmentInfo In _apCurrentAttachments
+                If attachment IsNot Nothing AndAlso Not System.String.IsNullOrWhiteSpace(attachment.OriginalFileName) Then logicalNames.Add(attachment.OriginalFileName)
+            Next
+        End If
         Dim dispatchState As System.Int32 = 0
         ' Cancellation may remove a QUEUED operation. Once COM extraction starts,
         ' await its completion before releasing the job's workspace/model context.
@@ -726,7 +762,7 @@ Partial Public Class ThisAddIn
                                 If System.Threading.Interlocked.CompareExchange(dispatchState, 1, 0) <> 0 Then Return
                                 Try
                                     ct.ThrowIfCancellationRequested()
-                                    completion.TrySetResult(UnpackEmbeddedMailFile(path, inputs, "Input", 0))
+                                    completion.TrySetResult(UnpackEmbeddedMailFile(path, inputs, "Input", 0, originalFileName:=originalFileName, logicalNames:=logicalNames))
                                 Catch ex As System.OperationCanceledException
                                     completion.TrySetCanceled()
                                 Catch ex As System.Exception
@@ -774,9 +810,9 @@ Partial Public Class ThisAddIn
         Return Global.SharedLibrary.Agents.OutputNameBinder.Resolve(candidates, prior, If(runState Is Nothing, Nothing, runState.HostOutputPublications))
     End Function
 
-    Private Shared Function BatchAttachment(path As System.String) As AutoPilotAttachmentInfo
+    Private Shared Function BatchAttachment(path As System.String, Optional logicalFileName As System.String = Nothing) As AutoPilotAttachmentInfo
         Dim info As New System.IO.FileInfo(path)
-        Return New AutoPilotAttachmentInfo With {.OriginalFileName = info.Name, .TempFilePath = info.FullName, .SourcePath = info.FullName, .Extension = info.Extension.ToLowerInvariant(), .SizeBytes = info.Length, .StatusMessage = "Batch working copy", .IsOverSizeLimit = False}
+        Return New AutoPilotAttachmentInfo With {.OriginalFileName = If(System.String.IsNullOrWhiteSpace(logicalFileName), info.Name, logicalFileName), .TempFilePath = info.FullName, .SourcePath = info.FullName, .Extension = info.Extension.ToLowerInvariant(), .SizeBytes = info.Length, .StatusMessage = "Batch working copy", .IsOverSizeLimit = False}
     End Function
 
     Private Shared Sub ReportBatchProgress(manifest As BatchJobs.Manifest, item As BatchJobs.Item, message As System.String, sink As System.IProgress(Of BatchJobs.ProgressInfo))

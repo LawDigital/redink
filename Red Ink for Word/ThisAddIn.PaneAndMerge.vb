@@ -210,7 +210,7 @@ Partial Public Class ThisAddIn
         End If
 
         Dim anchorRange As Microsoft.Office.Interop.Word.Range = activeComment.Scope.Duplicate
-        If Not IsSameProcessingDocument(doc, anchorRange.Document) OrElse
+        If Not IsSameCommentDocument(doc, anchorRange.Document) OrElse
            anchorRange.StoryType = Microsoft.Office.Interop.Word.WdStoryType.wdCommentsStory Then
             Throw New WordCommandNoticeException("The text linked to this comment is no longer available. Please select another comment.")
         End If
@@ -314,7 +314,7 @@ Partial Public Class ThisAddIn
         Try
             Dim paneSelection As Microsoft.Office.Interop.Word.Selection = selection.Application.ActiveWindow.ActivePane.Selection
             If paneSelection IsNot Nothing AndAlso paneSelection.Active AndAlso
-               IsSameProcessingDocument(doc, paneSelection.Document) Then
+               IsSameCommentDocument(doc, paneSelection.Document) Then
                 Dim paneOrigin As Microsoft.Office.Interop.Word.Range = paneSelection.Range.Duplicate
                 Dim paneDetected As System.Boolean = False
                 Dim resolved As System.Boolean = TryResolveSelectedCommentInSelection(
@@ -394,7 +394,7 @@ Partial Public Class ThisAddIn
             End If
 
             Dim matchedRange As Microsoft.Office.Interop.Word.Range = matched.Range
-            If Not IsSameProcessingDocument(doc, matchedRange.Document) OrElse
+            If Not IsSameCommentDocument(doc, matchedRange.Document) OrElse
                matchedRange.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdCommentsStory Then
                 diagnostic &= "; invalid_comment_document_or_story"
                 Return False
@@ -423,7 +423,7 @@ Partial Public Class ThisAddIn
                                                         candidate As Microsoft.Office.Interop.Word.Comment,
                                                         ByRef matched As Microsoft.Office.Interop.Word.Comment) As System.Boolean
         Dim candidateRange As Microsoft.Office.Interop.Word.Range = candidate.Range
-        If IsSameProcessingDocument(doc, candidateRange.Document) AndAlso origin.InRange(candidateRange) Then
+        If IsSameCommentDocument(doc, candidateRange.Document) AndAlso origin.InRange(candidateRange) Then
             If matched IsNot Nothing AndAlso Not SameCommandComment(matched, candidate) Then Return False
             matched = candidate
         End If
@@ -613,7 +613,7 @@ Partial Public Class ThisAddIn
             ' Word. Do not start the model/writeback path unless the intended document,
             ' story and exact range have actually become the active selection.
             Dim selected As Microsoft.Office.Interop.Word.Selection = Globals.ThisAddIn.Application.Selection
-            If selected Is Nothing OrElse Not IsSameProcessingDocument(targetRange.Document, selected.Document) OrElse
+            If selected Is Nothing OrElse Not IsSameCommentDocument(targetRange.Document, selected.Document) OrElse
                selected.StoryType <> targetRange.StoryType OrElse Not selected.Range.IsEqual(targetRange) Then
                 Throw New System.InvalidOperationException("Word did not activate the comment's document range.")
             End If

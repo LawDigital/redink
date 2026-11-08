@@ -461,6 +461,18 @@
     <Compile Include="Code\Agents\SemanticArchiveTools.vb" />
     <Compile Include="Code\Agents\TextExportService.vb" />
     <Compile Include="Code\Agents\CollectionAnalysisService.vb" />
+    <Compile Include="Code\CommonFeatures\TabularReview\TabularReviewModels.vb" />
+    <Compile Include="Code\CommonFeatures\TabularReview\TabularReviewModelsCatalog.vb" />
+    <Compile Include="Code\CommonFeatures\TabularReview\TabularReviewAnalysis.vb" />
+    <Compile Include="Code\CommonFeatures\TabularReview\TabularReviewContradictionService.vb" />
+    <Compile Include="Code\CommonFeatures\TabularReview\TabularReviewPromptService.vb" />
+    <Compile Include="Code\CommonFeatures\TabularReview\TabularReviewReportService.vb" />
+    <Compile Include="Code\CommonFeatures\TabularReview\TabularReviewTemplateService.vb" />
+    <Compile Include="Code\CommonFeatures\TabularReview\TabularReviewSourceService.vb" />
+    <Compile Include="Code\CommonFeatures\TabularReview\TabularReviewPreviewService.vb" />
+    <Compile Include="Code\CommonFeatures\TabularReview\TabularReviewForm.vb">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="Code\CommonFeatures\Maintenance\BackgroundMaintenanceCoordinator.vb" />
     <Compile Include="Code\CommonFeatures\Maintenance\OfficeMaintenanceService.vb" />
     <Compile Include="Code\CommonFeatures\SemanticArchive\SemanticArchive.Access.vb" />
@@ -522,6 +534,7 @@
     <Compile Include="Code\Agents\ContextExpandTool.vb" />
     <Compile Include="Code\Agents\ExplicitOperationRegistry.vb" />
     <Compile Include="Code\Agents\ExplicitSubAgentTaskRegistry.vb" />
+    <Compile Include="Code\Agents\FilePathBudget.vb" />
     <Compile Include="Code\Agents\FileTools.vb" />
     <Compile Include="Code\Agents\LargeToolResultProcessor.vb" />
     <Compile Include="Code\Agents\LogCountTool.vb" />
@@ -798,6 +811,9 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="app.config" />
+    <EmbeddedResource Include="Code\CommonFeatures\TabularReview\TabularReview.html">
+      <LogicalName>RedInk.TabularReview.html</LogicalName>
+    </EmbeddedResource>
     <EmbeddedResource Include="Code\CommonFeatures\MarkdownEditor.html">
       <LogicalName>RedInk.MarkdownEditor.html</LogicalName>
     </EmbeddedResource>

@@ -177,7 +177,12 @@ Partial Public Class ThisAddIn
                 Dim fullPath As String = ""
                 Try
                     fullPath = SharedLibrary.Agents.PathPolicy.Resolve(relPath, SharedLibrary.Agents.PathAccess.Read)
-                Catch ex As Exception
+                Catch ex As System.IO.PathTooLongException
+                    response.Success = False
+                    response.ErrorCode = "path_too_long"
+                    response.ErrorMessage = SharedLibrary.Agents.FilePathBudget.PathTooLongMessage
+                    GoTo __AfterDispatch
+                Catch ex As System.Exception
                     response.Success = False
                     response.ErrorMessage = "Invalid workspace path: " & ex.Message
                     GoTo __AfterDispatch
@@ -205,12 +210,14 @@ Partial Public Class ThisAddIn
                         Dim extractionTask As System.Threading.Tasks.Task(Of String) =
                             System.Threading.Tasks.Task.Run(
                                 Async Function() As System.Threading.Tasks.Task(Of String)
-                                    Return Await GetFileContent(
-                                        fullPath,
-                                        Silent:=True,
-                                        DoOCR:=True,
-                                        AskUser:=False,
-                                        CancellationToken:=cancellationToken).ConfigureAwait(False)
+                                    Using readerInput As SharedLibrary.Agents.FilePathBudget.ReaderInput = SharedLibrary.Agents.FilePathBudget.PrepareReaderInput(fullPath)
+                                        Return Await GetFileContent(
+                                            readerInput.Path,
+                                            Silent:=True,
+                                            DoOCR:=True,
+                                            AskUser:=False,
+                                            CancellationToken:=cancellationToken).ConfigureAwait(False)
+                                    End Using
                                 End Function)
 
                         fullText = If(Await AwaitCancelableToolTask(extractionTask, cancellationToken).ConfigureAwait(False), "")
@@ -228,6 +235,11 @@ Partial Public Class ThisAddIn
                     End If
                 Catch ex As System.OperationCanceledException
                     Throw
+                Catch ex As System.IO.PathTooLongException
+                    response.Success = False
+                    response.ErrorCode = "path_too_long"
+                    response.ErrorMessage = SharedLibrary.Agents.FilePathBudget.PathTooLongMessage
+                    GoTo __AfterDispatch
                 Catch ex As System.Exception
                     response.Success = False
                     response.ErrorMessage = "Extraction failed: " & ex.Message
@@ -329,7 +341,10 @@ Partial Public Class ThisAddIn
                     Dim manyFullPath As String = ""
                     Try
                         manyFullPath = SharedLibrary.Agents.PathPolicy.Resolve(manyRelPath, SharedLibrary.Agents.PathAccess.Read)
-                    Catch ex As Exception
+                    Catch ex As System.IO.PathTooLongException
+                        manyItems.Add(New With {Key .path = manyRelPath, Key .error = "path_too_long", Key .message = SharedLibrary.Agents.FilePathBudget.PathTooLongMessage})
+                        Continue For
+                    Catch ex As System.Exception
                         manyItems.Add(New With {Key .path = manyRelPath, Key .error = "invalid_path", Key .message = ex.Message})
                         Continue For
                     End Try
@@ -355,12 +370,14 @@ Partial Public Class ThisAddIn
                             Dim manyExtractionTask As System.Threading.Tasks.Task(Of String) =
                                 System.Threading.Tasks.Task.Run(
                                     Async Function() As System.Threading.Tasks.Task(Of String)
-                                        Return Await GetFileContent(
-                                            manyFullPath,
-                                            Silent:=True,
-                                            DoOCR:=True,
-                                            AskUser:=False,
-                                            CancellationToken:=cancellationToken).ConfigureAwait(False)
+                                        Using readerInput As SharedLibrary.Agents.FilePathBudget.ReaderInput = SharedLibrary.Agents.FilePathBudget.PrepareReaderInput(manyFullPath)
+                                            Return Await GetFileContent(
+                                                readerInput.Path,
+                                                Silent:=True,
+                                                DoOCR:=True,
+                                                AskUser:=False,
+                                                CancellationToken:=cancellationToken).ConfigureAwait(False)
+                                        End Using
                                     End Function)
 
                             manyFullText = If(Await AwaitCancelableToolTask(manyExtractionTask, cancellationToken).ConfigureAwait(False), "")
@@ -391,6 +408,8 @@ Partial Public Class ThisAddIn
                         })
                     Catch ex As System.OperationCanceledException
                         Throw
+                    Catch ex As System.IO.PathTooLongException
+                        manyItems.Add(New With {Key .path = manyRelPath, Key .error = "path_too_long", Key .message = SharedLibrary.Agents.FilePathBudget.PathTooLongMessage})
                     Catch ex As System.Exception
                         manyItems.Add(New With {Key .path = manyRelPath, Key .error = "extraction_failed", Key .message = ex.Message})
                     End Try

@@ -44,7 +44,7 @@
     <LoadBehavior>3</LoadBehavior>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Develop'">
-    <ApplicationVersion>1.7.12.700</ApplicationVersion>
+    <ApplicationVersion>1.8.1.700</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\develop\excel\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/develop/excel/</InstallUrl>
     <ProductName>Red Ink for Excel %28Develop%29</ProductName>
@@ -159,6 +159,12 @@
   -->
   <ItemGroup>
     <Reference Include="Accessibility" />
+    <Reference Include="Microsoft.Web.WebView2.Core, Version=1.0.4314.35, Culture=neutral, PublicKeyToken=2a8ab48044d2601e, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Web.WebView2.1.0.4314.35\lib\net462\Microsoft.Web.WebView2.Core.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.Web.WebView2.WinForms, Version=1.0.4314.35, Culture=neutral, PublicKeyToken=2a8ab48044d2601e, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Web.WebView2.1.0.4314.35\lib\net462\Microsoft.Web.WebView2.WinForms.dll</HintPath>
+    </Reference>
     <Reference Include="Microsoft.Vbe.Interop, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c, processorArchitecture=MSIL">
       <EmbedInteropTypes>True</EmbedInteropTypes>
     </Reference>
@@ -325,6 +331,8 @@
     <Compile Include="ThisAddIn.ExcelHelpers.vb" />
     <Compile Include="ThisAddIn.FactExtractor.vb" />
     <Compile Include="ThisAddIn.CollectionAnalyzer.vb" />
+    <Compile Include="ThisAddIn.TabularReview.vb" />
+    <Compile Include="TabularReviewWorkbookStore.vb" />
     <Compile Include="ThisAddIn.FileHelpers.vb" />
     <Compile Include="ThisAddIn.FileRenamer.vb" />
     <Compile Include="ThisAddIn.Helpers.vb" />
@@ -450,4 +458,8 @@
       </FlavorProperties>
     </VisualStudio>
   </ProjectExtensions>
+  <Target Name="EnsureTabularReviewWebView2Package" BeforeTargets="PrepareForBuild">
+    <Error Condition="!Exists('..\packages\Microsoft.Web.WebView2.1.0.4314.35\build\Microsoft.Web.WebView2.targets')" Text="Restore NuGet packages before building Tabular Review (Microsoft.Web.WebView2 1.0.4314.35)." />
+  </Target>
+  <Import Project="..\packages\Microsoft.Web.WebView2.1.0.4314.35\build\Microsoft.Web.WebView2.targets" Condition="Exists('..\packages\Microsoft.Web.WebView2.1.0.4314.35\build\Microsoft.Web.WebView2.targets')" />
 </Project>

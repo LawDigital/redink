@@ -7547,17 +7547,24 @@ Partial Public Class ThisAddIn
                 Return resp
             End If
 
-            Dim fullPath As String = ResolveWorkspacePath(relPath)
-            If String.IsNullOrWhiteSpace(fullPath) OrElse Not IO.File.Exists(fullPath) Then
-                resp.Success = False
-                resp.ErrorMessage = "Workspace file not found: " & If(relPath, "")
-                Return resp
-            End If
-
+            Dim fullPath As System.String = ""
             Dim extracted As String = ""
             Try
-                extracted = Await ChatAgentExtractFileText(fullPath).ConfigureAwait(False)
-            Catch ex As Exception
+                fullPath = ResolveWorkspacePath(relPath)
+                If String.IsNullOrWhiteSpace(fullPath) OrElse Not IO.File.Exists(fullPath) Then
+                    resp.Success = False
+                    resp.ErrorMessage = "Workspace file not found: " & If(relPath, "")
+                    Return resp
+                End If
+                extracted = Await ChatAgentExtractFileText(fullPath, cancellationToken).ConfigureAwait(False)
+            Catch ex As System.OperationCanceledException
+                Throw
+            Catch ex As System.IO.PathTooLongException
+                resp.Success = False
+                resp.ErrorCode = "path_too_long"
+                resp.ErrorMessage = SharedLibrary.Agents.FilePathBudget.PathTooLongMessage
+                Return resp
+            Catch ex As System.Exception
                 resp.Success = False
                 resp.ErrorMessage = "Extraction failed: " & ex.Message
                 Return resp
@@ -7641,17 +7648,20 @@ Partial Public Class ThisAddIn
             Dim etmItems As New List(Of Object)()
 
             For Each etmRelPath In etmSelected
-                Dim etmFullPath As String = ResolveWorkspacePath(etmRelPath)
-                If String.IsNullOrWhiteSpace(etmFullPath) OrElse Not IO.File.Exists(etmFullPath) Then
-                    etmItems.Add(New With {Key .path = etmRelPath, Key .error = "not_found", Key .message = "File not found."})
-                    Continue For
-                End If
-
                 Try
-                    Dim etmExtracted As String = Await ChatAgentExtractFileText(etmFullPath).ConfigureAwait(False)
+                    Dim etmFullPath As System.String = ResolveWorkspacePath(etmRelPath)
+                    If String.IsNullOrWhiteSpace(etmFullPath) OrElse Not IO.File.Exists(etmFullPath) Then
+                        etmItems.Add(New With {Key .path = etmRelPath, Key .error = "not_found", Key .message = "File not found."})
+                        Continue For
+                    End If
+                    Dim etmExtracted As String = Await ChatAgentExtractFileText(etmFullPath, cancellationToken).ConfigureAwait(False)
                     etmItems.Add(SharedLibrary.Agents.ToolResultStore.BuildSourcePreview(
                         context.WorkflowId, toolCall.ToolName, If(etmExtracted, ""), etmMaxCharsPerFile, etmFullPath))
-                Catch ex As Exception
+                Catch ex As System.OperationCanceledException
+                    Throw
+                Catch ex As System.IO.PathTooLongException
+                    etmItems.Add(New With {Key .path = etmRelPath, Key .error = "path_too_long", Key .message = SharedLibrary.Agents.FilePathBudget.PathTooLongMessage})
+                Catch ex As System.Exception
                     etmItems.Add(New With {Key .path = etmRelPath, Key .error = "extraction_failed", Key .message = ex.Message})
                 End Try
             Next
