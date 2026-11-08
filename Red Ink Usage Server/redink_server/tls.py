@@ -11,6 +11,10 @@ import os
 import re
 import shutil
 import ssl
+import sys
+import threading
+import time
+import errno
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -93,6 +97,82 @@ def validate_tls(settings: Settings) -> dict:
         raise ConfigError("Cannot load the TLS certificate/private-key pair. Check PEM format, matching key, and encrypted-key password. HTTPS was not started.") from None
 
 
+class TransportDiagnostics:
+    """Classify Cheroot events without logging request text, URLs or exception messages."""
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._buckets = {}
+
+    def report(self, msg, level, with_traceback):
+        exc_type, exc, tb = sys.exc_info()
+        category = "transport-notice"
+        if isinstance(msg, str) and msg.startswith('Client ') and 'attempted to speak plain HTTP' in msg:
+            category = "http-on-https-port"
+        elif isinstance(msg, str) and msg.startswith('Client ') and 'during handshake:' in msg:
+            category = "tls-handshake-aborted"
+        elif with_traceback or exc is not None or level >= logging.WARNING:
+            category = "request-processing-error"
+        elif msg in ('Keyboard Interrupt: shutting down', 'SystemExit raised: shutting down'):
+            category = "listener-stopping"
+        error_type = type(exc).__name__ if exc is not None else "none"
+        cause = exc
+        seen = set()
+        for _ in range(4):
+            if cause is None or id(cause) in seen:
+                break
+            seen.add(id(cause))
+            nested = cause.__cause__ or cause.__context__
+            if nested is None:
+                break
+            cause = nested
+        cause_type = type(cause).__name__ if cause is not None else "none"
+        facts = cause if category in ('tls-handshake-aborted', 'http-on-https-port') else exc
+        error_number = getattr(facts, 'errno', None)
+        error_number = error_number if isinstance(error_number, int) else None
+        # OpenSSL's reason code is a symbolic identifier, never its exception text.
+        reason = getattr(facts, 'reason', '')
+        reason = reason if isinstance(reason, str) and re.fullmatch(r'[A-Z0-9_]{1,80}', reason) else "none"
+        if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, TimeoutError)) or (
+            isinstance(exc, OSError) and error_number in (errno.ECONNRESET, errno.ECONNABORTED, errno.EPIPE, errno.ETIMEDOUT)):
+            category = "client-disconnected"
+            level = logging.DEBUG
+        elif category in ('tls-handshake-aborted', 'http-on-https-port'):
+            level = logging.INFO
+        frames = []
+        if with_traceback:
+            while tb is not None:
+                code = tb.tb_frame.f_code
+                # Code locations only. Do not include source lines, local values or paths.
+                module = tb.tb_frame.f_globals.get('__name__', '')
+                if isinstance(module, str) and re.fullmatch(r'[A-Za-z0-9_.]+', module):
+                    frames.append(module + '.' + code.co_name + ':' + str(tb.tb_lineno))
+                tb = tb.tb_next
+        location = ' > '.join(frames[-6:]) or 'none'
+        # Bound the key space and report one occurrence per category per minute.
+        # Exception facts come only from runtime types/codes, never raw messages.
+        key = (category, level, error_type, cause_type, error_number, reason, location)
+        now = time.monotonic()
+        with self._lock:
+            previous, suppressed = self._buckets.get(key, (-float('inf'), 0))
+            if now - previous < 60:
+                self._buckets[key] = (previous, suppressed + 1)
+                return
+            if key not in self._buckets and len(self._buckets) >= 64:
+                self._buckets.pop(next(iter(self._buckets)))
+            self._buckets[key] = (now, 0)
+        action = {
+            'http-on-https-port': 'Use https:// for this listener; check client, proxy and health-check URLs.',
+            'tls-handshake-aborted': 'Check client certificate trust, server hostname/chain and probe configuration.',
+            'request-processing-error': 'Check the exception code and code locations; inspect the failing client or handler.',
+            'client-disconnected': 'The client closed or timed out the connection.',
+            'listener-stopping': 'The listener is stopping.',
+            'transport-notice': 'The listener reported a transport notice.',
+        }[category]
+        logger.log(level, 'Transport category=%s exception=%s cause=%s errno=%s ssl_reason=%s locations=%s '
+                   'suppressed_since_previous=%s. %s', category, error_type, cause_type, error_number,
+                   reason, location, suppressed, action)
+
+
 def _create_listener(settings: Settings, app):
     """Construct (but do not bind) the shared HTTP/HTTPS transport.
 
@@ -101,10 +181,12 @@ def _create_listener(settings: Settings, app):
     """
     from cheroot.wsgi import Server
 
+    diagnostics = TransportDiagnostics()
+
     class PrivateLogServer(Server):
         def error_log(self, msg="", level=logging.INFO, traceback=False):
-            # Raw protocol diagnostics may contain ingestion/config bearer URLs.
-            logger.log(level, "Transport reported a connection or request-processing error.")
+            # Keep bearer URLs and raw exception/trace text out of operational logs.
+            diagnostics.report(msg, level, traceback)
 
     server = PrivateLogServer((settings.host, settings.port), app, numthreads=settings.threads,
                               timeout=30, shutdown_timeout=5, request_queue_size=128,

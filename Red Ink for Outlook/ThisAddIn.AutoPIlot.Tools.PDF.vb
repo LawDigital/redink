@@ -158,12 +158,28 @@ Partial Public Class ThisAddIn
                     counter += 1
                 End While
 
-                Dim success = Await CommentPdfForAutoPilot(att.TempFilePath, outputPath, instruction, ct, author)
+                Dim commentReport As New PdfCommentProcessingReport()
+                Dim commentRunId As System.String = System.Guid.NewGuid().ToString("N")
+                context.Log("PdfCommentRun=" & Newtonsoft.Json.JsonConvert.SerializeObject(New With {
+                    .runId = commentRunId, .inputFile = att.OriginalFileName, .outputFile = outputName
+                }), "diag")
+                Dim success = Await CommentPdfForAutoPilot(att.TempFilePath, outputPath, instruction, ct, author,
+                    commentReport, Sub(message As System.String) context.Log("PdfCommentRunId=" & commentRunId & "; " & message, "diag"))
 
                 If success Then
                     att.OutputFiles.Add(outputPath)
-                    resultMessages.Add($"✓ {att.OriginalFileName}: PDF comments added successfully. Output: {outputName}")
-                    ApDashboardLog($"✓ PDF comments added to: {att.OriginalFileName}", "info")
+                    resultMessages.Add($"✓ {att.OriginalFileName}: PDF saved. Anchored comments: {commentReport.HighlightedCount}; " &
+                        $"unanchored comments: {commentReport.UnanchoredCount}; anchoring_complete={(commentReport.UnanchoredCount = 0).ToString().ToLowerInvariant()}; " &
+                        $"unconfirmed_review_batches={commentReport.UnconfirmedBatchCount}. Output: {outputName}")
+                    If commentReport.UnanchoredCount > 0 Then
+                        resultMessages.Add("Review required: unverified or ambiguous references are labelled sticky notes on page 1; they are not highlights on a verified passage.")
+                        context.Log($"PDF comment anchoring incomplete for {att.OriginalFileName}: {commentReport.UnanchoredCount} unanchored comments retained as notes.", "warn")
+                    End If
+                    If commentReport.UnconfirmedBatchCount > 0 Then
+                        resultMessages.Add($"Review coverage is unconfirmed for {commentReport.UnconfirmedBatchCount} batch(es) with no usable comment response. This may also mean no findings; a complete review is not confirmed.")
+                        context.Log($"PDF review coverage unconfirmed for {att.OriginalFileName}: {commentReport.UnconfirmedBatchCount} batch(es) returned no usable comment response.", "warn")
+                    End If
+                    ApDashboardLog($"✓ PDF comments saved to: {att.OriginalFileName}", "info")
                 Else
                     resultMessages.Add($"✗ {att.OriginalFileName}: Failed to add PDF comments (document may be empty, image-only, or unsupported).")
                     ApDashboardLog($"⚠ Failed to add PDF comments to: {att.OriginalFileName}", "warn")
@@ -173,11 +189,11 @@ Partial Public Class ThisAddIn
             response.Success = resultMessages.Any(Function(m) m.StartsWith("✓"))
             response.Response = String.Join(vbCrLf, resultMessages)
 
-        Catch ex As OperationCanceledException
+        Catch ex As System.OperationCanceledException
             response.Success = False
             response.ErrorMessage = "Operation was cancelled."
             response.Response = response.ErrorMessage
-        Catch ex As Exception
+        Catch ex As System.Exception
             response.Success = False
             response.ErrorMessage = ex.Message
             response.Response = $"Error adding comments to PDF(s): {ex.Message}"

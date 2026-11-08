@@ -61,9 +61,18 @@ Partial Public Class ThisAddIn
             Dim expiry = GetThreadDeleteAfterUtc(path)
             If Not expiry.HasValue OrElse expiry.Value <= System.DateTime.UtcNow Then Return False
             Dim config = ScanInbox.Registry.Load(GetScanRegisterPath())
-            Dim person = config.Recipients.SingleOrDefault(Function(p) p.Active AndAlso p.Id = meta.Value(Of System.String)("RecipientId") AndAlso
-                p.SmtpAddress.Equals(mail.SenderEmail, System.StringComparison.OrdinalIgnoreCase))
-            Return person IsNot Nothing AndAlso config.RuleSets.Any(Function(r) r.Active AndAlso r.Id = meta.Value(Of System.String)("RuleSetId") AndAlso r.AllowedRecipientIds.Contains(person.Id))
+            Dim recipientIds = TryCast(meta("RecipientIds"), Newtonsoft.Json.Linq.JArray)
+            Dim ids As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
+            If recipientIds IsNot Nothing Then
+                For Each id In recipientIds
+                    If id.Type = Newtonsoft.Json.Linq.JTokenType.String Then ids.Add(id.ToObject(Of System.String)())
+                Next
+            Else
+                ids.Add(If(meta.Value(Of System.String)("RecipientId"), ""))
+            End If
+            Return config.Recipients.Any(Function(p) p.Active AndAlso ids.Contains(p.Id) AndAlso
+                p.SmtpAddress.Equals(mail.SenderEmail, System.StringComparison.OrdinalIgnoreCase) AndAlso
+                config.RuleSets.Any(Function(r) r.Active AndAlso r.Id = meta.Value(Of System.String)("RuleSetId") AndAlso r.AllowedRecipientIds.Contains(p.Id)))
         Catch ex As System.Exception
             ApDashboardLog("Scan thread authorization unavailable: " & ex.Message, "warn")
             Return False
@@ -81,7 +90,8 @@ Partial Public Class ThisAddIn
             Dim directory = GetThreadDirSafe(person.SmtpAddress, ("scan-" & operation.Id), False)
             Dim metaPath = System.IO.Path.Combine(directory, AP_ThreadMetaFileName)
             Dim meta = Newtonsoft.Json.Linq.JObject.Parse(System.IO.File.ReadAllText(metaPath))
-            meta("ScanConversationIds") = Newtonsoft.Json.Linq.JArray.FromObject(operation.Deliveries.Where(Function(d) d.ToIds.Concat(d.CcIds).Contains(id) AndAlso Not System.String.IsNullOrWhiteSpace(d.ConversationId)).Select(Function(d) d.ConversationId).Distinct())
+            Dim sameMailboxIds = config.Recipients.Where(Function(p) p.SmtpAddress.Equals(person.SmtpAddress, System.StringComparison.OrdinalIgnoreCase)).Select(Function(p) p.Id).ToList()
+            meta("ScanConversationIds") = Newtonsoft.Json.Linq.JArray.FromObject(operation.Deliveries.Where(Function(d) d.ToIds.Concat(d.CcIds).Any(Function(recipientId) sameMailboxIds.Contains(recipientId)) AndAlso Not System.String.IsNullOrWhiteSpace(d.ConversationId)).Select(Function(d) d.ConversationId).Distinct())
             ScanInbox.Registry.AtomicWrite(metaPath, meta.ToString())
             Dim path = System.IO.Path.Combine(GetThreadFilesDirSafe(directory, False), "scan-package.json")
             Dim payload = Newtonsoft.Json.Linq.JObject.Parse(System.IO.File.ReadAllText(path))
@@ -116,7 +126,17 @@ Partial Public Class ThisAddIn
         Dim existingMeta = System.IO.Path.Combine(threadDir, AP_ThreadMetaFileName)
         If System.IO.File.Exists(existingMeta) Then
             Dim expiry = GetThreadDeleteAfterUtc(threadDir)
-            If expiry.HasValue AndAlso expiry.Value > System.DateTime.UtcNow Then Return
+            If expiry.HasValue AndAlso expiry.Value > System.DateTime.UtcNow Then
+                Dim retainedMeta = Newtonsoft.Json.Linq.JObject.Parse(System.IO.File.ReadAllText(existingMeta))
+                If Not System.String.Equals(retainedMeta.Value(Of System.String)("Sender"), recipient.SmtpAddress, System.StringComparison.OrdinalIgnoreCase) OrElse
+                   retainedMeta.Value(Of System.String)("RuleSetId") <> rule.Id Then Throw New System.IO.InvalidDataException("Retained scan identity mismatch.")
+                Dim ids = TryCast(retainedMeta("RecipientIds"), Newtonsoft.Json.Linq.JArray)
+                If ids Is Nothing Then ids = New Newtonsoft.Json.Linq.JArray(retainedMeta.Value(Of System.String)("RecipientId"))
+                If Not ids.Any(Function(id) id.ToObject(Of System.String)() = recipient.Id) Then ids.Add(recipient.Id)
+                retainedMeta("RecipientIds") = ids
+                ScanInbox.Registry.AtomicWrite(existingMeta, retainedMeta.ToString())
+                Return
+            End If
             ' An expired seed cannot be silently revived with a new retention period.
             Throw New System.IO.InvalidDataException("Scan retention expired before pending delivery completed; manual review required.")
         End If
@@ -140,7 +160,7 @@ Partial Public Class ThisAddIn
             .Status = "retained_before_delivery", .PackageId = operation.Id}
         ScanInbox.Registry.AtomicWrite(System.IO.Path.Combine(filesDir, "scan-package.json"), Newtonsoft.Json.JsonConvert.SerializeObject(retained, Newtonsoft.Json.Formatting.Indented))
         Dim meta As New Newtonsoft.Json.Linq.JObject From {
-            {"ScanSeed", True}, {"Sender", recipient.SmtpAddress}, {"RecipientId", recipient.Id}, {"RuleSetId", rule.Id},
+            {"ScanSeed", True}, {"Sender", recipient.SmtpAddress}, {"RecipientId", recipient.Id}, {"RecipientIds", New Newtonsoft.Json.Linq.JArray(recipient.Id)}, {"RuleSetId", rule.Id},
             {"Mailbox", operation.Mailbox}, {"Subject", operation.Subject}, {"ConversationId", ""}, {"LastTouchedUtc", System.DateTime.UtcNow.ToString("o")},
             {"DeleteAfterUtc", System.DateTime.UtcNow.AddDays(rule.RetentionDays).ToString("o")}}
         ScanInbox.Registry.AtomicWrite(System.IO.Path.Combine(threadDir, AP_ThreadMetaFileName), meta.ToString())
@@ -190,10 +210,9 @@ Partial Public Class ThisAddIn
                     item = incoming.Item(i)
                     If item.Type <> CInt(Microsoft.Office.Interop.Outlook.OlMailRecipientType.olTo) AndAlso item.Type <> CInt(Microsoft.Office.Interop.Outlook.OlMailRecipientType.olCC) Then Continue For
                     Dim address = ScanRecipientAddress(item)
-                    Dim candidate = config.Recipients.SingleOrDefault(Function(p) p.Active AndAlso p.SmtpAddress.Equals(address, System.StringComparison.OrdinalIgnoreCase))
-                    If candidate Is Nothing Then Continue For
-                    Dim otherInfo As New AutoPilotMailInfo With {.Subject = info.Subject, .ConversationID = info.ConversationID, .SenderEmail = candidate.SmtpAddress}
-                    If AuthorizedScanThread(otherInfo) Then participants.Add(candidate.SmtpAddress)
+                    If Not config.Recipients.Any(Function(p) p.Active AndAlso p.SmtpAddress.Equals(address, System.StringComparison.OrdinalIgnoreCase)) Then Continue For
+                    Dim otherInfo As New AutoPilotMailInfo With {.Subject = info.Subject, .ConversationID = info.ConversationID, .SenderEmail = address}
+                    If AuthorizedScanThread(otherInfo) Then participants.Add(address)
                 Finally
                     ReleaseScanCom(item)
                 End Try

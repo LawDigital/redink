@@ -445,6 +445,8 @@ Namespace SharedLibrary
                 context.INI_RedactionInstructionsPathLocal = If(configDict.ContainsKey("RedactionInstructionsPathLocal"), configDict("RedactionInstructionsPathLocal"), "")
                 context.INI_ExtractorPath = If(configDict.ContainsKey("ExtractorPath"), configDict("ExtractorPath"), "")
                 context.INI_ExtractorPathLocal = If(configDict.ContainsKey("ExtractorPathLocal"), configDict("ExtractorPathLocal"), "")
+                context.INI_TabularReviewPath = If(configDict.ContainsKey("TabularReviewPath"), configDict("TabularReviewPath"), "")
+                context.INI_TabularReviewPathLocal = If(configDict.ContainsKey("TabularReviewPathLocal"), configDict("TabularReviewPathLocal"), "")
                 context.INI_RenameLibPath = If(configDict.ContainsKey("RenameLibPath"), configDict("RenameLibPath"), "")
                 context.INI_RenameLibPathLocal = If(configDict.ContainsKey("RenameLibPathLocal"), configDict("RenameLibPathLocal"), "")
                 context.INI_MailMoverPath = If(configDict.ContainsKey("MailMoverPath"), configDict("MailMoverPath"), "")

@@ -19,6 +19,7 @@ htmlcov/
 /tls/
 /certificates/
 /logs/
+/log-archives/
 /backups/
 /reports/
 /server.toml

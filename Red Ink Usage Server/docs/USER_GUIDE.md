@@ -18,6 +18,8 @@ The feature dashboard uses **LogPath** event records, which are separate from li
 
 An activity count indicates an observed action, **not** its successful completion, duration, time saved or productivity. Older add-ins may lack run-start markers, so their agent-run totals may be unavailable. Word, Excel and Outlook are labelled separately where the evidence identifies the host.
 
+Function statistics show the retained history only (twelve months by default). Automatic function-log cleanup does not remove licence figures. The administrator can review the retention window and archive status in Settings.
+
 ## User statistics and privacy
 
 Where the source log includes a stable pseudonymous identifier, the dashboard shows activity by that identifier. Figures include activity per calendar day, per seven calendar days, per active day and per active week. The denominators differ: calendar rates include inactive days; active-day/week averages do not. Peaks and medians help distinguish occasional intense use from regular use.

@@ -313,12 +313,12 @@ def create_app(settings: Settings, store: Store | None = None) -> Flask:
             elif network_changed:
                 # Flask's test client has no active listening socket. Do not
                 # claim the host/port has actually changed in that mode.
-                apply_runtime_settings(live_settings, scan_now='imports' in data)
+                apply_runtime_settings(live_settings, scan_now=bool(set(data) & {'imports', 'log_storage'}))
                 applied_now = changes
                 listener_update = 'unmanaged'
                 restart_required = True
             else:
-                apply_runtime_settings(fresh, scan_now='imports' in data)
+                apply_runtime_settings(fresh, scan_now=bool(set(data) & {'imports', 'log_storage'}))
                 applied_now = sorted(set(changes) | set(data.get('collection', {})))
                 listener_update = 'not_needed'
                 restart_required = False
@@ -516,6 +516,15 @@ def create_app(settings: Settings, store: Store | None = None) -> Flask:
                             mimetype='text/csv',headers={'Content-Disposition':'attachment; filename="redink-license-users.csv"'})
         except ValueError as exc:
             return jsonify(error=str(exc)), 400
+
+    @app.get("/api/settings/log-storage")
+    @admin_required
+    def log_storage_status_api():
+        raw = store.metadata('log_archive_status')
+        return jsonify(retained_from_date=store.log_retention_cutoff(),
+            statistics_months=settings.log_storage_statistics_months,
+            archive_status=json.loads(raw) if raw else None,
+            licence_retention_enabled=bool(store.retention_cutoff()))
 
     @app.get("/api/settings/retention/preview")
     @admin_required

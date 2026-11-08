@@ -66,6 +66,19 @@ Namespace Agents
 
     Public Module ToolingOrchestrator
 
+        ' Shared planning guidance only; extraction, routing and final-status contracts stay unchanged.
+        Public Const SourceEvidenceInstruction As System.String =
+            "SOURCE EVIDENCE RULE: Technical extraction success, a converted status, a complete text-layer pass or a file hash does not establish that the source contains the evidence needed for the requested task. " &
+            "Check the material actually read against the requested scope. If it is already known to contain only metadata or repeated marginal text and lacks the required body content, report the source as insufficient or incomplete using the existing caller response contract; do not present an empty findings list as a completed review or infer absence from unread content. " &
+            "Use an authorized recovery path when available; if necessary evidence remains unavailable, identify that limitation instead of claiming completion. Unknown extraction metadata alone is not a reason to block; a task asking only for metadata can be satisfied by adequate metadata. " &
+            "Enabling OCR only permits it and does not prove it ran. Use the existing ocr_attempted and ocr_used observations when present, retain their unknown state when absent, and do not treat either observation as proof of complete or accurate recognition."
+
+        Public Const ExistingArtifactTransformationInstruction As System.String =
+            "EXISTING ARTIFACT RULE: Distinguish each artifact the user wants changed from a source used only as input to a separate new output. Editing, shortening, translating or revising the existing artifact itself is a transformation. " &
+            "Use an available editing or transformation path that preserves native styles, layouts, masters, placeholders and structure except for the requested changes. Reading its text does not authorize rebuilding it from Markdown or plain text, or applying an implicit default design. " &
+            "sourceFormatAuthority=false does not authorize reconstructing an artifact being edited. Apply this rule per artifact: a separately requested new synthesis or other new output may use source facts as content, including in mixed requests. " &
+            "Respect an explicit request for a different format or redesign. If source preservation is impossible, use only an authorized controlled fallback and disclose the limitation."
+
         ' ---------------------------------------------------------------------
         ' TASK_STATUS footer contract text (replaces the per-host const).
         ' This is the SAME wording as before with one addition: an explicit rule
@@ -289,7 +302,9 @@ Namespace Agents
                 "WEB TOOL ROUTING RULE: Use web_grounding when relevant public pages first need to be discovered. Use retrieve_web_content for a known mostly-static URL when readable text/ordinary links are sufficient. Do not expose/load browser tools by default. For a task that needs browser behavior, load them lazily via tool_loader. Then prefer browser_open + browser_snapshot for exploration of a specific website, finding links/pages/downloads within that site, menus/navigation, pagination, or JavaScript/dynamically rendered content. Use browser_interact only when an actual browser action is needed, and take a fresh browser_snapshot after every interaction. If retrieve_web_content returns navigation failure, empty links, incomplete client-side content, or otherwise cannot expose the requested site structure, load browser_open, browser_snapshot and browser_interact via tool_loader and switch to browser_open + browser_snapshot before doing another broad web_grounding search. If the current browser snapshot already exposes the needed link/control, continue via the browser rather than restarting web_grounding."
 
             Dim repositoryFragment As String = DesignRepository.BuildPromptFragment()
-            Dim combinedDesignFragment As String = designFragment & System.Environment.NewLine & webToolRoutingFragment
+            Dim combinedDesignFragment As System.String = designFragment & System.Environment.NewLine & webToolRoutingFragment &
+                System.Environment.NewLine & ExistingArtifactTransformationInstruction &
+                System.Environment.NewLine & SourceEvidenceInstruction
             If Not System.String.IsNullOrWhiteSpace(repositoryFragment) Then
                 combinedDesignFragment &= System.Environment.NewLine & repositoryFragment.Trim()
             End If

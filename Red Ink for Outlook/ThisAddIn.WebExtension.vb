@@ -1792,6 +1792,32 @@ Partial Public Class ThisAddIn
         Return If(System.String.IsNullOrWhiteSpace(INI_Model_2), "Second API model", INI_Model_2)
     End Function
 
+    ' Build the same base guidance for interactive and host-managed Local Chat runs.
+    Private Function BuildLocalChatSystemPrompt(advancedToolsEnabled As System.Boolean,
+                                               Optional includeCurrentTime As System.Boolean = True) As System.String
+        Dim systemPrompt As System.String = _context.SP_Chat.Replace("{Location}", Location)
+        If includeCurrentTime Then
+            Dim nowLocal As System.String = System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss zzz", System.Globalization.CultureInfo.InvariantCulture)
+            systemPrompt &= System.Environment.NewLine & "Current local date/time: " & nowLocal
+        End If
+        systemPrompt &= System.Environment.NewLine & $"Your name is '{AN6}'. "
+
+        If advancedToolsEnabled Then
+            systemPrompt &= System.Environment.NewLine &
+                "Local Chat Agent behavior: Tools are optional. If the user's latest request can be answered directly, especially for creative writing, drafting, rewriting, brainstorming, summarizing, explanation, or ordinary chat, answer directly without using tools. Do not claim that you are unable to perform a normal language-generation task merely because no tool, attachment, or workspace action is required. Use tools only when they are actually needed for files, workspace operations, document processing, or external/source-backed work."
+        End If
+
+        ' Inject InkyMemory into the system prompt if the user enabled it.
+        If My.Settings.Inky_InkyMemory Then
+            Dim memoryContent As System.String = ReadInkyMemory(_context.INI_InkyMemoryCap)
+            systemPrompt &= System.Environment.NewLine & _context.SP_Add_InkyMemory
+            If Not System.String.IsNullOrWhiteSpace(memoryContent) Then
+                systemPrompt &= System.Environment.NewLine & "<INKY_MEMORY_CURRENT>" & System.Environment.NewLine & memoryContent & System.Environment.NewLine & "</INKY_MEMORY_CURRENT>"
+            End If
+        End If
+        Return systemPrompt
+    End Function
+
     ''' <summary>
     ''' Ensures tooling selections are loaded and the tooling-enabled flag is consistent with model support.
     ''' </summary>
@@ -2565,6 +2591,18 @@ Partial Public Class ThisAddIn
                     Newtonsoft.Json.Linq.JObject.Parse(body),
                     New Newtonsoft.Json.Linq.JObject())
                 Dim cmd As System.String = j("Command")?.ToString()
+
+                ' Local Chat command preparation can mutate the same model, workspace
+                ' and file fields as a batch before it enters AgentGate. Protect that
+                ' boundary too; status and cancellation of an existing browser job stay
+                ' available. Once the batch owns the context, cancel it in its dialog.
+                Dim batchState As System.Int32 = System.Threading.Volatile.Read(_batchAgentRunning)
+                If batchState <> 0 AndAlso If(cmd, "").StartsWith("inky", System.StringComparison.OrdinalIgnoreCase) AndAlso
+                   Not System.String.Equals(cmd, "inky_jobstatus", System.StringComparison.OrdinalIgnoreCase) AndAlso
+                   Not System.String.Equals(cmd, "inky_canceljob", System.StringComparison.OrdinalIgnoreCase) AndAlso
+                   Not (batchState = 1 AndAlso System.String.Equals(cmd, "inky_cancel", System.StringComparison.OrdinalIgnoreCase)) Then
+                    Return JsonErr("A Batch Agent Job is active. Use its progress dialog to cancel or finish it before changing Local Chat state.")
+                End If
 
                 If System.String.Equals(cmd, "inky_send", System.StringComparison.OrdinalIgnoreCase) Then
                     ' Protect Local Agent request preparation as well as the background run.
@@ -4008,24 +4046,7 @@ Partial Public Class ThisAddIn
                         ' Persist state with user turn BEFORE returning (important)
                         SaveInkyState(st)
                         ' ------------------ (D) Prepare system prompt (same logic) ------------------
-                        Dim sysPromptBase As String = _context.SP_Chat.Replace("{Location}", Location)
-                        Dim nowLocal As String = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss zzz", Globalization.CultureInfo.InvariantCulture)
-                        sysPromptBase &= Environment.NewLine & "Current local date/time: " & nowLocal
-                        sysPromptBase &= Environment.NewLine & $"Your name is '{AN6}'. "
-
-                        If advancedToolsForRequest Then
-                            sysPromptBase &= Environment.NewLine &
-                                "Local Chat Agent behavior: Tools are optional. If the user's latest request can be answered directly, especially for creative writing, drafting, rewriting, brainstorming, summarizing, explanation, or ordinary chat, answer directly without using tools. Do not claim that you are unable to perform a normal language-generation task merely because no tool, attachment, or workspace action is required. Use tools only when they are actually needed for files, workspace operations, document processing, or external/source-backed work."
-                        End If
-
-                        ' Inject InkyMemory into system prompt if enabled
-                        If My.Settings.Inky_InkyMemory Then
-                            Dim memoryContent = ReadInkyMemory(_context.INI_InkyMemoryCap)
-                            sysPromptBase &= Environment.NewLine & _context.SP_Add_InkyMemory
-                            If Not String.IsNullOrWhiteSpace(memoryContent) Then
-                                sysPromptBase &= Environment.NewLine & "<INKY_MEMORY_CURRENT>" & Environment.NewLine & memoryContent & Environment.NewLine & "</INKY_MEMORY_CURRENT>"
-                            End If
-                        End If
+                        Dim sysPromptBase As System.String = BuildLocalChatSystemPrompt(advancedToolsForRequest)
 
                         Dim useSecondApiLocal As Boolean = If(isLocalChatRetry, st.PendingContinuationUseSecondApi, st.UseSecondApi)
                         Dim selectedModelKeyLocal As String = If(isLocalChatRetry, If(st.PendingContinuationSelectedModelKey, System.String.Empty), st.SelectedModelKey)
@@ -5052,23 +5073,24 @@ Partial Public Class ThisAddIn
                             End If
                         End If
 
-                        ' Auto-enable tooling when switching TO a tooling-capable model
-                        ' if sources are already selected (or were previously).
+                        ' A manually selected tooling-capable model uses the same initial
+                        ' gates as the Agent button. Resolve the actual selection afresh:
+                        ' SelectedToolNames and _selectedToolsForChat can belong to the
+                        ' previously selected model or to an earlier agent-mode state.
+                        ' The opt-out lists remain untouched, so each user's selection of
+                        ' individual agents and tools is shared across model changes.
                         If supportsTooling Then
-                            If Not st.ToolingEnabled Then
-                                Dim hasTools As Boolean = (st.SelectedToolNames IsNot Nothing AndAlso st.SelectedToolNames.Count > 0) OrElse
-                                                          (_selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0)
-                                If hasTools Then
-                                    st.ToolingEnabled = True
-                                    _chatToolingEnabled = True
-                                End If
-                            End If
+                            st.AgentModeEnabled = True
+                            Dim hasCallableTools As System.Boolean =
+                                HasLocalChatAnyCallableTools(st, includeInteractiveM365Tools:=True)
 
-                            ' IMPORTANT:
-                            ' Do NOT auto-enable AgentModeEnabled ("Use all tools") here.
-                            ' The checkbox must remain a deliberate user choice.
-                            ' When it is unchecked, Local Chat should use only the selected
-                            ' Sources from the normal tooling pipeline.
+                            ' Do not silently reselect tools the user disabled. As with the
+                            ' Agent button, no active tools and no workspace means neither
+                            ' gate may be enabled until the user changes the selection.
+                            st.ToolingEnabled = hasCallableTools
+                            st.AgentModeEnabled = hasCallableTools
+                            _chatToolingEnabled = hasCallableTools
+                            _chatAdvancedToolsEnabled = hasCallableTools
                         End If
 
                         SaveInkyState(st)

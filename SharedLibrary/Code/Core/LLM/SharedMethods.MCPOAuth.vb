@@ -593,17 +593,18 @@ Namespace SharedLibrary
                 Throw New Exception("OAuth authentication required but UI is suppressed.")
             End If
 
-            Using browserForm As New MCPOAuthBrowserForm(authUrl.ToString(), redirectUri)
-                Dim __safeDialogOwner561 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
-                Dim dlgResult As Windows.Forms.DialogResult = If(__safeDialogOwner561 IsNot Nothing, browserForm.ShowDialog(__safeDialogOwner561), browserForm.ShowDialog())
-
-                If dlgResult <> Windows.Forms.DialogResult.OK OrElse
-                   String.IsNullOrWhiteSpace(browserForm.CapturedRedirectUrl) Then
-                    Throw New Exception("OAuth authentication was cancelled or did not complete.")
-                End If
-
-                capturedRedirect = browserForm.CapturedRedirectUrl
-            End Using
+            capturedRedirect = RunOnStaThread(Of System.String)(
+                Function()
+                    Using browserForm As New MCPOAuthBrowserForm(authUrl.ToString(), redirectUri)
+                        Dim owner As System.Windows.Forms.IWin32Window = Nothing
+                        If IsOnHostUiThread Then owner = ResolveSameThreadDialogOwner()
+                        Dim result As System.Windows.Forms.DialogResult = If(owner Is Nothing, browserForm.ShowDialog(), browserForm.ShowDialog(owner))
+                        If result <> System.Windows.Forms.DialogResult.OK OrElse System.String.IsNullOrWhiteSpace(browserForm.CapturedRedirectUrl) Then
+                            Throw New System.Exception("OAuth authentication was cancelled or did not complete.")
+                        End If
+                        Return browserForm.CapturedRedirectUrl
+                    End Using
+                End Function, "Red Ink MCP OAuth")
 
             ' Extract the authorization code from the captured redirect URL.
             Dim code As String = ""

@@ -38,7 +38,7 @@ def _is_link(path: Path) -> bool:
 
 
 def safe_iter_files(root: str | Path, *, recursive: bool = True,
-                    suffixes: tuple[str, ...] = (".json", ".jsonl", ".log", ".txt", ".csv")) -> Iterator[Path]:
+                    suffixes: tuple[str, ...] | None = (".json", ".jsonl", ".log", ".txt", ".csv")) -> Iterator[Path]:
     """Enumerate only ordinary files below a configured root, never symlinks.
 
     Explicit files are supported. An inaccessible/missing root is an error, so
@@ -54,14 +54,14 @@ def safe_iter_files(root: str | Path, *, recursive: bool = True,
         return
     if not root.is_dir():
         raise OSError("Import root is not a regular file or directory.")
-    suffix_set = {s.casefold() for s in suffixes}
+    suffix_set = {s.casefold() for s in suffixes} if suffixes is not None else None
     def fail(error):
         raise error
     for directory, dirs, files in os.walk(root, followlinks=False, onerror=fail):
         dirs[:] = sorted(d for d in dirs if not _is_link(Path(directory) / d)) if recursive else []
         for name in sorted(files):
             path = Path(directory) / name
-            if _is_link(path) or path.suffix.casefold() not in suffix_set:
+            if _is_link(path) or (suffix_set is not None and path.suffix.casefold() not in suffix_set):
                 continue
             try:
                 resolved = path.resolve(strict=True)

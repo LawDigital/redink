@@ -236,9 +236,15 @@ Public NotInheritable Class WordCommentSelectionTracker
         If windowHandle = System.IntPtr.Zero Then
             ' Last document closed: unsubscribe on the UIA worker, never on Office's STA.
             RemoveSelectionSubscriptions()
+            RejectObservedInput(System.IntPtr.Zero, "no_active_document")
             Return
         End If
         If _automation Is Nothing OrElse windowHandle = _watchedWindow OrElse Not IsWordWindow(windowHandle) Then Return
+        ' A delayed document notification may follow a click in the new window.
+        ' Preserve that evidence; discard only evidence belonging to another HWND.
+        If _last.WindowHandle <> windowHandle Then
+            RejectObservedInput(System.IntPtr.Zero, "watched_window_changed")
+        End If
         RemoveSelectionSubscriptions()
         Dim root As NativeElement = Nothing
         Check(_automation.ElementFromHandle(windowHandle, root))
@@ -356,8 +362,6 @@ Public NotInheritable Class WordCommentSelectionTracker
         Enqueue(Sub()
                     Try
                         If generation <> System.Threading.Volatile.Read(_generation) Then
-                            _last = Evidence.Unknown("selection_events_invalidated")
-                            _lastCard = Nothing
                             Return
                         End If
                         ' Removed-from-selection invalidates only this actual card,
@@ -454,9 +458,6 @@ Public NotInheritable Class WordCommentSelectionTracker
                     Try
                         If generation = System.Threading.Volatile.Read(_generation) Then
                             ReadFocus(sender, Observation.Focus)
-                        Else
-                            _last = Evidence.Unknown("focus_events_invalidated")
-                            _commandSurfaceWindow = System.IntPtr.Zero
                         End If
                     Finally
                         System.Threading.Interlocked.Decrement(_pendingFocusEvents)
@@ -523,7 +524,12 @@ Public NotInheritable Class WordCommentSelectionTracker
             Check(_walker.GetParentElement(node, parent))
             node = parent
         Next
+        ' Provider events can arrive after activation of another Word document.
+        ' They may neither replace nor clear the new window's evidence.
+        Dim foreground As System.IntPtr = GetAncestor(GetForegroundWindow(), 2UI)
+        If rootWindow <> System.IntPtr.Zero AndAlso rootWindow <> foreground Then Return
         If expectedWindow <> System.IntPtr.Zero AndAlso rootWindow <> expectedWindow Then
+            If source = Observation.BodyProjection OrElse source = Observation.Refresh Then Return
             If source = Observation.Pointer Then _uncertainInputWindow = expectedWindow
             _last = Evidence.Unknown("input_window_mismatch")
             _lastCard = Nothing
@@ -536,6 +542,9 @@ Public NotInheritable Class WordCommentSelectionTracker
             _lastCard = Nothing
             _commandSurfaceWindow = System.IntPtr.Zero
             Return
+        End If
+        If source = Observation.Pointer OrElse source = Observation.Focus OrElse source = Observation.Keyboard Then
+            WatchWindowCore(rootWindow)
         End If
         If (source = Observation.Selection OrElse source = Observation.TextSelection) AndAlso
            rootWindow <> _watchedWindow Then Return
@@ -613,6 +622,8 @@ Public NotInheritable Class WordCommentSelectionTracker
     End Sub
 
     Private Sub RejectObservedInput(windowHandle As System.IntPtr, reason As System.String)
+        If windowHandle <> System.IntPtr.Zero AndAlso
+           windowHandle <> GetAncestor(GetForegroundWindow(), 2UI) Then Return
         _uncertainInputWindow = windowHandle
         _last = Evidence.Unknown(reason)
         _lastCard = Nothing
@@ -792,6 +803,10 @@ Public NotInheritable Class WordCommentSelectionTracker
             End Try
         End If
     End Sub
+
+    <System.Runtime.InteropServices.DllImport("user32.dll", ExactSpelling:=True)>
+    Private Shared Function GetForegroundWindow() As System.IntPtr
+    End Function
 
     <System.Runtime.InteropServices.DllImport("user32.dll", ExactSpelling:=True)>
     Private Shared Function GetAncestor(hwnd As System.IntPtr, flags As System.UInt32) As System.IntPtr

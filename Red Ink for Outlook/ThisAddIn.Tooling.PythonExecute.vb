@@ -301,12 +301,14 @@ Partial Public Class ThisAddIn
             Return response
         End If
 
+        Dim publicationReceipts As New System.Collections.Generic.List(Of Global.SharedLibrary.Agents.OutputPublicationReceipt)()
         Dim publishedArtifactPaths As New System.Collections.Generic.List(Of System.String)()
         response.HostPublishedOutputPaths = publishedArtifactPaths
         Dim artifactPublisher As System.Action(Of Agents.RedInkPythonAgentOutput) =
             Sub(output As Agents.RedInkPythonAgentOutput)
                 Dim publishedPath As System.String = PublishPythonAgentOutputChecked(output)
                 publishedArtifactPaths.Add(System.IO.Path.GetFullPath(publishedPath))
+                publicationReceipts.Add(Global.SharedLibrary.Agents.OutputPublicationReceipt.Capture(output.PublishedSubPath, publishedPath, output.Sha256))
             End Sub
 
         ' Pre-execution guard: reject an unchanged deterministic resubmission before starting the worker, so a
@@ -508,6 +510,16 @@ Partial Public Class ThisAddIn
             End If
         End If
 
+        If response.Success AndAlso publicationReceipts.Count > 0 Then
+            response.Response = Global.SharedLibrary.Agents.OutputPublicationRegistry.AddToToolResult(response.Response, publicationReceipts)
+            If context IsNot Nothing AndAlso context.SequencingState IsNot Nothing Then
+                context.SequencingState.HostOutputPublications.Record(publicationReceipts)
+            End If
+            For Each receipt In publicationReceipts
+                context.Log("Host publication receipt: requested=" & receipt.RequestedRelativeName &
+                    "; published=" & System.IO.Path.GetFileName(receipt.PublishedPath) & "; sha256=" & receipt.Sha256, "diag")
+            Next
+        End If
         ToolingFileLogger.LogRawResponseStub("Internal tool (python_execute)", response.Response)
         Return response
     End Function

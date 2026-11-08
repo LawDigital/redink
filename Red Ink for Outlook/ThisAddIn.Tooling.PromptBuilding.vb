@@ -66,6 +66,7 @@ Partial Public Class ThisAddIn
             sb.AppendLine("</HOST_TASK_SUMMARY>")
         End If
 
+        If context.SequencingState IsNot Nothing Then sb.AppendLine(context.SequencingState.BuildOutputContractPrompt())
         sb.AppendLine("[/CURRENT_USER_REQUEST]")
         Return sb.ToString().TrimEnd()
     End Function
