@@ -452,6 +452,8 @@ Partial Public Class ThisAddIn
                     parentToolingContext.SequencingState.RegisteredDeliverableArtifacts
             End If
 
+            context.SequencingState.HostOutputPublications = parentToolingContext.SequencingState.HostOutputPublications
+
             ' ExpectedDeliverableSlots is intentionally NOT shared with nested runs.
             ' Expected output completeness is scoped to the current tooling run,
             ' whereas produced artifact state is shared across parent/nested runs.
@@ -900,6 +902,8 @@ Partial Public Class ThisAddIn
             Dim bootstrapDecision As SharedLibrary.Agents.ToolingBootstrapPreflight.Decision = Nothing
 
             If Not subAgentMode Then
+                context.SequencingState.InitializeOutputContractInputs(
+                    Global.SharedLibrary.Agents.ToolingOutputContract.CaptureInputNames(Global.SharedLibrary.Agents.PathPolicy.SessionStagingRoot))
                 Dim bootstrapAttempt As Integer = 0
                 Do
                     bootstrapAttempt += 1
@@ -1891,6 +1895,22 @@ Partial Public Class ThisAddIn
                             End If
                         End If
 
+                        Dim repairBindingError As System.String = System.String.Empty
+                        If context.SequencingState IsNot Nothing AndAlso
+                           Not context.SequencingState.TryBindRepairAttempt(tc.ToolName, tc.Arguments, tc.CallId, recoveryScopeKey, repairBindingError,
+                               SharedLibrary.Agents.ExplicitOperationToolContract.SupportsRepairReference(toolConfig)) Then
+                            AddToolResponseToHistory(context, New ToolResponse With {
+                                .CallId = tc.CallId, .ToolName = tc.ToolName, .Success = False,
+                                .ErrorCode = repairBindingError, .ErrorMessage = "The repair reference does not identify an eligible failed step. No tool ran.",
+                                .Response = Newtonsoft.Json.JsonConvert.SerializeObject(New With {.error = repairBindingError}), .ResultKind = "error"})
+                            context.PendingContinuationGuardPrompt = "Correct repair_of_failure from the host's current failure reference. Keep the original tool, step and output target. Never use a repair link for unrelated work."
+                            context.PendingGuardTitle = "HOST REPAIR REFERENCE"
+                            context.PendingRejectedAssistantTurn = If(currentResponse, System.String.Empty)
+                            stopCurrentBatchAfterTool = True
+                            Exit For
+                        End If
+                        auditRecoveryScopeKey = recoveryScopeKey
+
                         Dim toolArgumentValidationError As String = ""
 
                         If Not TryValidateToolCallArguments(tc, toolConfig, toolArgumentValidationError) Then
@@ -2447,7 +2467,8 @@ Partial Public Class ThisAddIn
                                     legacyCompatibilityRoots)
 
                             Dim executionToolCall As ToolCall = tc
-                            If SharedLibrary.Agents.ExplicitOperationToolContract.HasCapability(toolConfig) Then
+                            If SharedLibrary.Agents.ExplicitOperationToolContract.HasCapability(toolConfig) OrElse
+                               (tc.Arguments IsNot Nothing AndAlso tc.Arguments.ContainsKey("repair_of_failure")) Then
                                 executionToolCall = New ToolCall() With {
                                     .CallId = tc.CallId,
                                     .ToolName = tc.ToolName,
@@ -2540,6 +2561,8 @@ Partial Public Class ThisAddIn
                                         SharedLibrary.Agents.SkillInvokeTool.ToolName,
                                         System.StringComparison.OrdinalIgnoreCase) OrElse
                                     tc.ToolName.StartsWith("skill_", System.StringComparison.OrdinalIgnoreCase)) Then
+
+                                    If Not subAgentMode Then context.SequencingState.RequireWorkflowOutputReview()
 
                                     context.SequencingState.ApplyRequiredEffectsToExpectedDeliverables(
                                         SharedLibrary.Agents.SkillInvokeTool.GetDeclaredDeliverableRequiredEffectsFromResponse(
@@ -2648,6 +2671,12 @@ Partial Public Class ThisAddIn
                                                     retryCorrelationArguments:=tc.Arguments,
                                                     rejectedBeforeExecution:=toolResponse.RejectedBeforeExecution,
                                                     serviceErrorDetails:=toolResponse.ServiceErrorDetails)
+
+                                    Dim repairHint As System.String = context.SequencingState.BuildRepairReferenceHint(tc.ToolName, recoveryScopeKey)
+                                    If repairHint.Length > 0 Then
+                                        toolResponse.ErrorMessage &= repairHint
+                                        context.Log(repairHint, "diag")
+                                    End If
 
                                     If toolResponse.AllowCrossScopeAlternativeRecovery AndAlso
                                        Not recoverableSubAgentTaskFailure AndAlso
@@ -3506,6 +3535,12 @@ Partial Public Class ThisAddIn
                                 context.SequencingState.FinalResponseOrigin = "model_provided"
                             End If
 
+                            ' Preserve optional control metadata before user-facing egress removes the footer.
+                            ' Delivery is decided only by an opting-in host after the final run verdict.
+                            If context.SequencingState IsNot Nothing Then
+                                context.SequencingState.FinalDeliveryDirective =
+                                    Global.SharedLibrary.Agents.ToolingDeliveryContract.ParseFinalDirective(currentResponse)
+                            End If
                             currentResponse = StripTaskStatus(currentResponse)
                             acceptedFinalStatus = "complete"
                             context.Log("Final complete response accepted.")
@@ -3812,6 +3847,10 @@ Partial Public Class ThisAddIn
 
                         Select Case forcedValidation.TurnKind
                             Case SharedLibrary.Agents.ToolCallSequencing.ActiveToolingTurnKind.FinalCompleteTurn
+                                If context.SequencingState IsNot Nothing Then
+                                    context.SequencingState.FinalDeliveryDirective =
+                                        Global.SharedLibrary.Agents.ToolingDeliveryContract.ParseFinalDirective(currentResponse)
+                                End If
                                 acceptedFinalStatus = "complete"
 
                                 If context.SequencingState IsNot Nothing Then
@@ -4335,6 +4374,16 @@ Partial Public Class ThisAddIn
                 Catch snapshotError As System.Exception
                     context.LogWarn("Failed to checkpoint unfinished workflow; preserving available results.", details:=snapshotError.Message)
                 End Try
+            End If
+
+            ' Optional delivery metadata is valid only for this run's final accepted complete verdict.
+            ' A late failure, cancellation, raw response or blocked fallback must discard it.
+            If Not subAgentMode AndAlso context IsNot Nothing AndAlso context.SequencingState IsNot Nothing Then
+                If context.IsCancelled OrElse cancellationToken.IsCancellationRequested OrElse
+                   context.FinalizationBlocked OrElse context.EmptyMainModelResponse OrElse
+                   Not System.String.Equals(acceptedFinalStatus, "complete", System.StringComparison.OrdinalIgnoreCase) Then
+                    context.SequencingState.FinalDeliveryDirective = Nothing
+                End If
             End If
 
             If workflowScope IsNot Nothing Then
@@ -7336,6 +7385,7 @@ Partial Public Class ThisAddIn
             Dim normalized As New JObject()
 
             For Each key In arguments.Keys.OrderBy(Function(k) k, StringComparer.OrdinalIgnoreCase)
+                If System.String.Equals(key, "repair_of_failure", System.StringComparison.OrdinalIgnoreCase) Then Continue For
                 Dim value = arguments(key)
 
                 If TypeOf value Is JToken Then

@@ -88,6 +88,17 @@ keep_months = 0
 # Optional scheduled cleanup on scans (false = manual cleanup from Settings).
 auto_cleanup = false
 
+[log_storage]
+# Independent of licence retention. Always bound function-statistics history.
+statistics_months = 12
+# Archive fully imported closed months once per day; retain three online months.
+archive_enabled = true
+online_months = 3
+# Empty selects log-archives below the server data directory (outside import roots).
+archive_directory = ""
+# Expire verified monthly archives after twelve calendar months (current included).
+archive_months = 12
+
 [billing]
 # Leave unit_price empty for a usage-only report. No tax is calculated.
 unit_price = ""
@@ -186,6 +197,11 @@ class Settings:
     keep_months: int = 0
     auto_cleanup: bool = False
     websites: tuple[StaticWebsite, ...] = ()
+    log_storage_statistics_months: int = 12
+    log_storage_archive_enabled: bool = True
+    log_storage_online_months: int = 3
+    log_storage_archive_directory: Path | None = None
+    log_storage_archive_months: int = 12
 
     @property
     def database_path(self) -> Path:
@@ -206,6 +222,8 @@ _KNOWN = {
     "authentication": {"passwordless_mode"},
     "retention": {"cutoff_date", "keep_months", "auto_cleanup"},
     "websites": {"sites"},
+    "log_storage": {"statistics_months", "archive_enabled", "online_months",
+                    "archive_directory", "archive_months"},
 }
 
 
@@ -239,20 +257,29 @@ def load_settings(data_dir: Path) -> Settings:
         for key, value in entries.items():
             if key not in _KNOWN[section]:
                 raise ConfigError(f"Unrecognized configuration option: {section}.{key}")
-            values[("tls_" + key if section == "tls" else "publishing_" + key if section == "publishing" else key)] = value
+            values[("tls_" + key if section == "tls" else "publishing_" + key if section == "publishing" else "log_storage_" + key if section == "log_storage" else key)] = value
     ranges = {"port": (1, 65535), "threads": (1, 64), "recent_report_window_seconds": (60, 1814400),
               "maximum_clock_skew_seconds": (0, 3600), "maximum_request_bytes": (4096, 1048576),
               "scan_seconds": (5, 86400), "maximum_file_bytes": (1024, 1073741824),
-              "maximum_files_per_scan": (1, 1000000), "keep_months": (0, 1200)}
+              "maximum_files_per_scan": (1, 1000000), "keep_months": (0, 1200),
+              "log_storage_statistics_months": (1, 1200), "log_storage_online_months": (1, 1200),
+              "log_storage_archive_months": (1, 1200)}
     for key, (low, high) in ranges.items():
         if key in values and (type(values[key]) is not int or not low <= values[key] <= high):
             raise ConfigError(f"{key} must be an integer between {low} and {high}.")
-    for key in ("secure_cookies", "allow_insecure_remote", "recursive", "tls_enabled", "auto_cleanup"):
+    for key in ("secure_cookies", "allow_insecure_remote", "recursive", "tls_enabled", "auto_cleanup", "log_storage_archive_enabled"):
         if key in values and type(values[key]) is not bool:
             raise ConfigError(f"{key} must be true or false.")
     from .retention import validate_cutoff_date
     if "cutoff_date" in values:
         values["cutoff_date"] = validate_cutoff_date(values["cutoff_date"])
+    archive = values.get("log_storage_archive_directory", "")
+    if not isinstance(archive, str) or "\x00" in archive or len(archive) > 4096:
+        raise ConfigError("log_storage.archive_directory must be a directory path string.")
+    values["log_storage_archive_directory"] = ((Path(archive) if Path(archive).is_absolute()
+        else data_dir / archive).resolve() if archive.strip() else None)
+    if values.get("log_storage_archive_months", 12) < values.get("log_storage_online_months", 3):
+        raise ConfigError("Archive retention must cover at least the online months.")
     publishing = values.get("publishing_source_directory", "")
     if not isinstance(publishing, str) or "\x00" in publishing or len(publishing) > 4096:
         raise ConfigError("publishing.source_directory must be a valid directory path string.")

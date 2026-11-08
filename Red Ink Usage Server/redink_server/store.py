@@ -227,6 +227,21 @@ class Store:
         return effective_cutoff(self.settings.cutoff_date, self.settings.keep_months,
                                 self.clock().astimezone().date())
 
+    def log_retention_cutoff(self) -> str:
+        """Function statistics have their own floor; never delete licence evidence here."""
+        return max(self.retention_cutoff(), effective_cutoff("",
+            self.settings.log_storage_statistics_months, self.clock().astimezone().date()))
+
+    def metadata(self, key: str, default: str = "") -> str:
+        with self.connect() as con:
+            row = con.execute("SELECT value FROM server_meta WHERE key=?", (key,)).fetchone()
+        return row[0] if row else default
+
+    def save_metadata(self, key: str, value: str) -> None:
+        with self.connect() as con:
+            con.execute("INSERT INTO server_meta VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        (key, value))
+
     @staticmethod
     def _is_expired(event: dict, cutoff: str) -> bool:
         if not cutoff:
@@ -443,7 +458,7 @@ class Store:
     def add_log_records(self, records: list[tuple[str, dict]], source: str) -> int:
         added = 0
         with self.connect() as connection:
-            cutoff = self.retention_cutoff()
+            cutoff = self.log_retention_cutoff()
             for key, record in records:
                 if cutoff and record["date"] < cutoff:
                     continue
@@ -604,6 +619,7 @@ class Store:
                             for key,count in features.most_common(200)]
         return {
             "period": period, "host_filter": host, "from_date": date_from,
+            "retained_from_date": self.log_retention_cutoff(),
             "to_date": self.clock().date().isoformat() if days else None,
             "date_basis": "client-local; timezone not included in SharedLogger lines",
             "identity_basis": "username hash from SharedLogger, NOT a license identity",
@@ -644,7 +660,7 @@ class Store:
             # One-time migration of v1.1's occurrence-based log IDs to stable
             # line-based IDs, without double-counting previously imported data.
             # This also refreshes old parser classifications/versions in place.
-            cutoff = self.retention_cutoff()
+            cutoff = self.log_retention_cutoff()
             for old, new, record in (legacy_keys or ()):
                 if cutoff and record["date"] < cutoff:
                     connection.execute("DELETE FROM log_events WHERE record_id IN (?,?)", (old, new))
@@ -759,11 +775,35 @@ class Store:
         return {"cleaned": True, "cutoff_date": cutoff, "preview_counts": snapshot["counts"],
                 "remaining": self.retention_preview()["counts"]}
 
+    def clean_log_statistics(self) -> dict:
+        """Expire only function logs and obsolete source metadata; keep billing tables intact."""
+        cutoff = self.log_retention_cutoff()
+        with self.connect() as con:
+            deleted = con.execute("DELETE FROM log_events WHERE date < ?", (cutoff,)).rowcount
+            # Keep cursors for existing/offline sources. Deterministic event IDs and
+            # the ingestion floor prevent old copied evidence from reappearing.
+            stale = con.execute("SELECT path FROM imported_files WHERE kind='log' AND last_scan_utc < ?",
+                                (cutoff,)).fetchall()
+            for row in stale:
+                try:
+                    Path(row['path']).stat()
+                except FileNotFoundError:
+                    con.execute("DELETE FROM log_scan_cursor WHERE path=?", (row['path'],))
+                    con.execute("DELETE FROM imported_files WHERE kind='log' AND path=?", (row['path'],))
+                except OSError:
+                    pass  # Unavailable is not proof of removal.
+        return dict(cutoff_date=cutoff, deleted=deleted)
+
     def maintenance(self):
         with self.connect() as connection:
             # The former recent-report cache is no longer used for counting.
             # Preserve migrated evidence and all explicit daily/monthly history.
             connection.execute("PRAGMA optimize")
+        today = self.clock().astimezone().date().isoformat()
+        policy = today + "|" + self.log_retention_cutoff()
+        if self.metadata("log_statistics_cleanup") != policy:
+            self.clean_log_statistics()
+            self.save_metadata("log_statistics_cleanup", policy)
         if self.settings.auto_cleanup and self.retention_cutoff():
             self.clean_retention(self.retention_cutoff())
 

@@ -270,7 +270,8 @@ Public Class Ribbon1
         ByVal blockedControlNames As String,
         ByVal simpleMode As Boolean
     )
-        Dim names As String() = SplitRibbonControlNames(controlNames)
+        Dim names As String() = SplitRibbonControlNames(
+            controlNames & ";" & SharedLibrary.SharedLibrary.SharedMethods.SIMPLEMENU_HELPER_CONTROLS)
         Dim blockedNames As String() = SplitRibbonControlNames(blockedControlNames)
 
         If names.Length = 0 AndAlso blockedNames.Length = 0 Then
@@ -751,7 +752,8 @@ Public Class Ribbon2
         ByVal blockedControlNames As String,
         ByVal simpleMode As Boolean
     )
-        Dim names As String() = SplitRibbonControlNames(controlNames)
+        Dim names As String() = SplitRibbonControlNames(
+            controlNames & ";" & SharedLibrary.SharedLibrary.SharedMethods.SIMPLEMENU_HELPER_CONTROLS)
         Dim blockedNames As String() = SplitRibbonControlNames(blockedControlNames)
 
         If names.Length = 0 AndAlso blockedNames.Length = 0 Then
@@ -984,6 +986,10 @@ Public Class Ribbon2
                 frm.ShowDialog()
             End If
         End Using
+    End Sub
+
+    Private Sub RI_BatchAgentJob_Click(sender As System.Object, e As Microsoft.Office.Tools.Ribbon.RibbonControlEventArgs) Handles RI_BatchAgentJob.Click
+        Globals.ThisAddIn.ShowBatchAgentJob()
     End Sub
 
     Private Sub RI_ScanInbox_Click(sender As System.Object, e As Microsoft.Office.Tools.Ribbon.RibbonControlEventArgs) Handles RI_ScanInbox.Click

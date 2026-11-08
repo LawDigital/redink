@@ -59,8 +59,8 @@ Partial Public Class ThisAddIn
     Public Function INILoadFail() As Boolean
         If Not INIloaded Then
             If Not StartupInitialized Then
-                DelayedStartupTasks()
                 RemoveStartupHandlers()
+                DelayedStartupTasks()
                 If Not INIloaded Then Return True
                 Return False
             Else

@@ -269,6 +269,15 @@ Namespace SharedLibrary
             End Get
         End Property
 
+        ''' <summary>
+        ''' Posts the awaiting continuation itself to the registered Office STA.
+        ''' Use after an asynchronous read/model/browser wait before accessing Office
+        ''' or the modeless host form. Works even without a WinForms sync context.
+        ''' </summary>
+        Public Shared Function SwitchToHostUiThread() As OfficeUiThreadAwaitable
+            Return AwaitHostUiThread()
+        End Function
+
         Private Shared Function AwaitHostUiThread() As OfficeUiThreadAwaitable
             SyncLock _hostUiDispatchLock
                 Dim token As System.Threading.CancellationToken = System.Threading.CancellationToken.None

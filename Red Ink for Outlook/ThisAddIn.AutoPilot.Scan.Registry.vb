@@ -243,14 +243,13 @@ Namespace ScanInbox
             Require(config.Recipients.All(Function(p) p IsNot Nothing) AndAlso config.RuleSets.All(Function(p) p IsNot Nothing), "Null register entries.")
             UniqueIds(config.Recipients.Select(Function(p) p.Id), "recipient")
             UniqueIds(config.RuleSets.Select(Function(p) p.Id), "rule set")
-            Dim smtp As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
             For Each person In config.Recipients
                 Require(Not System.String.IsNullOrWhiteSpace(person.Name), "Recipient name is required.")
                 Require(person.Aliases IsNot Nothing AndAlso person.Attributes IsNot Nothing, "Recipient aliases/attributes must be arrays.")
                 ValidatePersonalSettings(person)
                 person.SmtpAddress = Address(person.SmtpAddress)
                 ValidateCopyRecipients(person)
-                Require(smtp.Add(person.SmtpAddress), "Duplicate register SMTP address.")
+                ' Multiple recipient profiles may intentionally share one transport mailbox; IDs remain unique.
             Next
             Dim combinations As New System.Collections.Generic.List(Of System.Tuple(Of System.String, System.String))()
             For Each rule In config.RuleSets
@@ -336,8 +335,10 @@ Namespace ScanInbox
             Dim bytes = System.IO.File.ReadAllText(path, System.Text.Encoding.UTF8)
             Dim config = Parse(Of Configuration)(bytes)
             Validate(config)
-            Dim person = config.Recipients.SingleOrDefault(Function(p) p.Active AndAlso p.SmtpAddress.Equals(sender, System.StringComparison.OrdinalIgnoreCase))
-            Require(person IsNot Nothing, "This sender is not an active registered scan recipient.")
+            Dim matches = config.Recipients.Where(Function(p) p.Active AndAlso p.SmtpAddress.Equals(sender, System.StringComparison.OrdinalIgnoreCase)).ToList()
+            Require(matches.Count > 0, "This sender is not an active registered scan recipient.")
+            Require(matches.Count = 1, "This mailbox belongs to multiple recipient profiles. Ask the Scan Handler administrator to update the intended profile; email alone cannot select its identity.")
+            Dim person = matches(0)
             Dim keys = New System.String() {"Instruction", "MailLanguage", "TranslateAttachments", "TranslationLanguage", "DraftReply", "ReplyOnlyWhenAppropriate", "WebResearch", "TaskInstructions"}
             Dim result As New Newtonsoft.Json.Linq.JObject()
             Dim source = Newtonsoft.Json.Linq.JObject.FromObject(person)

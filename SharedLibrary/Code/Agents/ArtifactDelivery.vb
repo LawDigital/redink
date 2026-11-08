@@ -318,6 +318,12 @@ Namespace Agents
                     parameters("properties") = properties
                 End If
 
+                If properties("repair_of_failure") Is Nothing Then
+                    properties("repair_of_failure") = New Newtonsoft.Json.Linq.JObject(
+                        New Newtonsoft.Json.Linq.JProperty("type", "integer"),
+                        New Newtonsoft.Json.Linq.JProperty("minimum", 1),
+                        New Newtonsoft.Json.Linq.JProperty("description", "For a corrected retry only: copy the exact host failure_sequence from the failed result. Repair that same work with this same tool; retain its operation/step and output slot when present. Never use this to waive unrelated work."))
+                End If
                 If properties("artifact_id") Is Nothing Then properties("artifact_id") = New Newtonsoft.Json.Linq.JObject(New Newtonsoft.Json.Linq.JProperty("type", "string"))
                 If properties("logical_deliverable_id") Is Nothing Then properties("logical_deliverable_id") = New Newtonsoft.Json.Linq.JObject(New Newtonsoft.Json.Linq.JProperty("type", "string"))
                 If properties("output_slot_id") Is Nothing Then properties("output_slot_id") = New Newtonsoft.Json.Linq.JObject(New Newtonsoft.Json.Linq.JProperty("type", "string"))
@@ -628,17 +634,43 @@ Namespace Agents
 
         Public Shared Function Register(runState As ToolCallSequencing.ToolingRunState,
                                         registration As ArtifactRegistration) As ToolCallSequencing.DeliverableArtifact
-            If runState Is Nothing OrElse registration Is Nothing Then Return Nothing
+            Dim rejection As ArtifactRegistrationRejection = Nothing
+            Return Register(runState, registration, rejection)
+        End Function
+
+        Public NotInheritable Class ArtifactRegistrationRejection
+            Public Property Code As System.String = ""
+            Public Property Field As System.String = ""
+            Public Property Detail As System.String = ""
+        End Class
+
+        Private Shared Function RejectRegistration(
+            ByRef rejection As ArtifactRegistrationRejection,
+            code As System.String, field As System.String, detail As System.String) As ToolCallSequencing.DeliverableArtifact
+            rejection = New ArtifactRegistrationRejection With {.Code = code, .Field = field, .Detail = detail}
+            Try
+                System.Diagnostics.Trace.TraceWarning("Artifact registration rejected: " & code & "; field=" & field & "; " & detail)
+            Catch
+                ' A custom trace listener must not change a registration decision.
+            End Try
+            Return Nothing
+        End Function
+
+        Public Shared Function Register(runState As ToolCallSequencing.ToolingRunState,
+                                        registration As ArtifactRegistration,
+                                        ByRef rejection As ArtifactRegistrationRejection) As ToolCallSequencing.DeliverableArtifact
+            rejection = Nothing
+            If runState Is Nothing OrElse registration Is Nothing Then Return RejectRegistration(rejection, "artifact_registry_unavailable", "registration", "The host needs a run registry and registration metadata.")
 
             Dim rawPath As String = If(registration.Path, "").Trim()
-            If rawPath = "" Then Return Nothing
+            If rawPath = "" Then Return RejectRegistration(rejection, "artifact_path_missing", "path", "The producer supplied no file path.")
 
             Dim fullPath As String
             Try
-                If Not System.IO.File.Exists(rawPath) Then Return Nothing
+                If Not System.IO.File.Exists(rawPath) Then Return RejectRegistration(rejection, "artifact_file_unavailable", "path", "The host cannot access the declared file: " & rawPath)
                 fullPath = System.IO.Path.GetFullPath(rawPath)
             Catch ex As System.Exception
-                Return Nothing
+                Return RejectRegistration(rejection, "artifact_path_invalid", "path", ex.GetType().FullName & ": " & ex.Message)
             End Try
 
             If runState.RegisteredDeliverableArtifacts Is Nothing Then
@@ -658,7 +690,7 @@ Namespace Agents
 
             If hasAnyExplicitIdentity AndAlso
                (artifactId = "" OrElse logicalId = "" OrElse slotId = "") Then
-                Return Nothing
+                Return RejectRegistration(rejection, "artifact_identity_incomplete", "artifact_id/logical_deliverable_id/output_slot_id", "The producer must supply all three identity fields together.")
             End If
 
             Dim hasUserDeliveryIntent As Boolean =
@@ -670,7 +702,7 @@ Namespace Agents
             ' never carry an instruction that would make them user-deliverable.
             If hasUserDeliveryIntent AndAlso
                registration.LifecycleState <> ArtifactLifecycleState.Final Then
-                Return Nothing
+                Return RejectRegistration(rejection, "artifact_delivery_state_conflict", "state/delivery_intent", "A user delivery intent requires a final artifact.")
             End If
 
             Dim isUserFacingFinal As Boolean =
@@ -684,13 +716,13 @@ Namespace Agents
                 artifactId = "" OrElse
                 logicalId = "" OrElse
                 slotId = "") Then
-                Return Nothing
+                Return RejectRegistration(rejection, "artifact_explicit_contract_required", "artifact_id", "A user-facing final requires a complete explicit artifact contract.")
             End If
 
             If runState.ExpectedDeliverableContractLocked AndAlso
                isUserFacingFinal AndAlso
                Not runState.IsExpectedDeliverableSlot(logicalId, slotId) Then
-                Return Nothing
+                Return RejectRegistration(rejection, "artifact_expected_slot_mismatch", "logical_deliverable_id/output_slot_id", "The locked output contract does not contain this slot.")
             End If
 
             Dim existing As ToolCallSequencing.DeliverableArtifact = Nothing
@@ -717,14 +749,14 @@ Namespace Agents
                     existingLogicalId,
                     logicalId,
                     System.StringComparison.Ordinal) Then
-                    Return Nothing
+                    Return RejectRegistration(rejection, "artifact_logical_identity_conflict", "logical_deliverable_id", "An existing artifact_id identifies a different logical deliverable.")
                 End If
 
                 If Not System.String.Equals(
                     existingSlotId,
                     slotId,
                     System.StringComparison.Ordinal) Then
-                    Return Nothing
+                    Return RejectRegistration(rejection, "artifact_slot_identity_conflict", "output_slot_id", "An existing artifact_id identifies a different output slot.")
                 End If
 
                 Dim existingPath As String = If(existing.SessionPath, "").Trim()
@@ -734,10 +766,10 @@ Namespace Agents
                             System.IO.Path.GetFullPath(existingPath),
                             fullPath,
                             System.StringComparison.OrdinalIgnoreCase) Then
-                            Return Nothing
+                            Return RejectRegistration(rejection, "artifact_path_identity_conflict", "path", "An existing artifact_id identifies a different physical path.")
                         End If
                     Catch ex As System.Exception
-                        Return Nothing
+                        Return RejectRegistration(rejection, "artifact_existing_path_invalid", "path", ex.GetType().FullName & ": " & ex.Message)
                     End Try
                 End If
 
@@ -748,7 +780,7 @@ Namespace Agents
                     existingSupersedesId,
                     supersedesId,
                     System.StringComparison.Ordinal) Then
-                    Return Nothing
+                    Return RejectRegistration(rejection, "artifact_supersession_identity_conflict", "supersedes_artifact_id", "An existing artifact_id has a different revision predecessor.")
                 End If
 
                 ' Superseded versions are terminal. Re-registering an old artifact_id must
@@ -756,14 +788,14 @@ Namespace Agents
                 If existing.LifecycleState = ArtifactLifecycleState.Superseded Then
                     If registration.LifecycleState <> ArtifactLifecycleState.Superseded OrElse
                        existing.DeliveryIntent <> registration.DeliveryIntent Then
-                        Return Nothing
+                        Return RejectRegistration(rejection, "artifact_superseded_terminal", "state", "A superseded artifact cannot regain delivery rights.")
                     End If
                 End If
 
                 ' Lifecycle is monotonic. Intermediate may never regress to Working.
                 If existing.LifecycleState = ArtifactLifecycleState.Intermediate AndAlso
                    registration.LifecycleState = ArtifactLifecycleState.Working Then
-                    Return Nothing
+                    Return RejectRegistration(rejection, "artifact_lifecycle_regression", "state", "An intermediate artifact cannot return to working state.")
                 End If
 
                 ' A current Final is terminal except for an explicit transition to Superseded.
@@ -772,19 +804,19 @@ Namespace Agents
                 If existing.LifecycleState = ArtifactLifecycleState.Final Then
                     If registration.LifecycleState <> ArtifactLifecycleState.Final AndAlso
                        registration.LifecycleState <> ArtifactLifecycleState.Superseded Then
-                        Return Nothing
+                        Return RejectRegistration(rejection, "artifact_final_state_regression", "state", "A final artifact can only remain final or become superseded.")
                     End If
 
                     If registration.LifecycleState = ArtifactLifecycleState.Final AndAlso
                        existing.DeliveryIntent <> registration.DeliveryIntent Then
-                        Return Nothing
+                        Return RejectRegistration(rejection, "artifact_final_intent_conflict", "delivery_intent", "An existing final artifact has a different delivery intent.")
                     End If
                 End If
 
                 If existing.StorageKind <> ArtifactStorageKind.Unknown AndAlso
                    registration.StorageKind <> ArtifactStorageKind.Unknown AndAlso
                    existing.StorageKind <> registration.StorageKind Then
-                    Return Nothing
+                    Return RejectRegistration(rejection, "artifact_storage_conflict", "storage_kind", "The producer supplied conflicting known storage kinds.")
                 End If
             End If
 
@@ -795,7 +827,7 @@ Namespace Agents
                     finalHash = ComputeFileSha256(fullPath)
                     If existing IsNot Nothing AndAlso existing.LifecycleState = ArtifactLifecycleState.Final AndAlso
                        existing.VerifiedContentSha256 <> "" AndAlso
-                       Not System.String.Equals(existing.VerifiedContentSha256, finalHash, System.StringComparison.Ordinal) Then Return Nothing
+                       Not System.String.Equals(existing.VerifiedContentSha256, finalHash, System.StringComparison.Ordinal) Then Return RejectRegistration(rejection, "artifact_revision_changed", "path", "The current file hash differs from the registered final revision.")
                     If existing IsNot Nothing AndAlso existing.PreservedRevisionPath <> "" AndAlso
                        System.IO.File.Exists(existing.PreservedRevisionPath) AndAlso
                        System.String.Equals(ComputeFileSha256(existing.PreservedRevisionPath), finalHash, System.StringComparison.Ordinal) Then
@@ -808,16 +840,18 @@ Namespace Agents
                                 System.IO.Path.GetDirectoryName(checkpoint), System.IO.Path.GetFileNameWithoutExtension(checkpoint) & "_artifacts",
                                 "verified_revisions", System.Guid.NewGuid().ToString("N"))
                             System.IO.Directory.CreateDirectory(revisionDirectory)
-                            preservedRevisionPath = System.IO.Path.Combine(revisionDirectory, System.IO.Path.GetFileName(fullPath))
+                            ' Keep long display names out of the private retention path. The
+                            ' public SessionPath and its filename remain unchanged.
+                            preservedRevisionPath = System.IO.Path.Combine(revisionDirectory, "content" & System.IO.Path.GetExtension(fullPath))
                             System.IO.File.Copy(fullPath, preservedRevisionPath, overwrite:=False)
                             System.IO.Directory.SetLastWriteTimeUtc(
                                 System.IO.Directory.GetParent(System.IO.Directory.GetParent(revisionDirectory).FullName).FullName,
                                 System.DateTime.UtcNow)
-                            If Not System.String.Equals(ComputeFileSha256(preservedRevisionPath), finalHash, System.StringComparison.Ordinal) Then Return Nothing
+                            If Not System.String.Equals(ComputeFileSha256(preservedRevisionPath), finalHash, System.StringComparison.Ordinal) Then Return RejectRegistration(rejection, "artifact_revision_copy_mismatch", "preserved_revision_path", "The retained copy differs from the source revision.")
                         End If
                     End If
                 Catch ex As System.Exception
-                    Return Nothing
+                    Return RejectRegistration(rejection, "artifact_revision_preservation_failed", "preserved_revision_path", ex.GetType().FullName & ": " & ex.Message)
                 End Try
             End If
 
@@ -836,7 +870,7 @@ Namespace Agents
                    logicalId = "" OrElse slotId = "" OrElse
                    Not System.String.Equals(If(supersededArtifact.LogicalDeliverableId, ""), logicalId, System.StringComparison.Ordinal) OrElse
                    Not System.String.Equals(If(supersededArtifact.OutputSlotId, ""), slotId, System.StringComparison.Ordinal) Then
-                    Return Nothing
+                    Return RejectRegistration(rejection, "artifact_supersession_invalid", "supersedes_artifact_id", "The predecessor must identify a different artifact in the same logical output slot.")
                 End If
             End If
 
@@ -959,13 +993,29 @@ Namespace Agents
                                                          rootObject As JObject,
                                                          resultObject As JObject,
                                                          sourceTool As String) As Boolean
-            If runState Is Nothing Then Return False
+            Dim rejection As ArtifactRegistrationRejection = Nothing
+            Return RegisterExplicitArtifacts(runState, rootObject, resultObject, sourceTool, rejection)
+        End Function
+
+        Public Shared Function RegisterExplicitArtifacts(runState As ToolCallSequencing.ToolingRunState,
+                                                         rootObject As JObject,
+                                                         resultObject As JObject,
+                                                         sourceTool As String,
+                                                         ByRef rejection As ArtifactRegistrationRejection) As Boolean
+            rejection = Nothing
+            If runState Is Nothing Then
+                RejectRegistration(rejection, "artifact_registry_unavailable", "registry", "The host has no run registry.")
+                Return False
+            End If
 
             Dim arrays As New List(Of JArray)()
             AddArtifactArray(arrays, rootObject)
             AddArtifactArray(arrays, resultObject)
 
-            If arrays.Count = 0 Then Return False
+            If arrays.Count = 0 Then
+                RejectRegistration(rejection, "artifact_array_invalid", "artifacts", "The producer must supply a JSON array.")
+                Return False
+            End If
 
             If runState.RegisteredDeliverableArtifacts Is Nothing Then
                 runState.RegisteredDeliverableArtifacts =
@@ -987,12 +1037,14 @@ Namespace Agents
 
                     Dim obj As JObject = TryCast(token, JObject)
                     If obj Is Nothing Then
+                        RejectRegistration(rejection, "artifact_entry_invalid", "artifacts[]", "Each artifact entry must be a JSON object.")
                         RestoreArtifactSnapshot(runState.RegisteredDeliverableArtifacts, snapshot)
                         Return False
                     End If
 
                     Dim path As String = GetString(obj, "path")
                     If String.IsNullOrWhiteSpace(path) Then
+                        RejectRegistration(rejection, "artifact_path_missing", "path", "The artifact entry has no file path.")
                         RestoreArtifactSnapshot(runState.RegisteredDeliverableArtifacts, snapshot)
                         Return False
                     End If
@@ -1001,6 +1053,7 @@ Namespace Agents
                     Dim state As ArtifactLifecycleState = ArtifactLifecycleState.Intermediate
 
                     If stateText <> "" AndAlso Not TryParseLifecycleState(stateText, state) Then
+                        RejectRegistration(rejection, "artifact_state_invalid", "state", "The artifact entry uses an unknown lifecycle state.")
                         RestoreArtifactSnapshot(runState.RegisteredDeliverableArtifacts, snapshot)
                         Return False
                     End If
@@ -1011,6 +1064,7 @@ Namespace Agents
                     Dim intent As ArtifactDeliveryIntent = ArtifactDeliveryIntent.None
 
                     If intentText <> "" AndAlso Not TryParseDeliveryIntent(intentText, intent) Then
+                        RejectRegistration(rejection, "artifact_delivery_intent_invalid", "delivery_intent", "The artifact entry uses an unknown delivery intent.")
                         RestoreArtifactSnapshot(runState.RegisteredDeliverableArtifacts, snapshot)
                         Return False
                     End If
@@ -1019,6 +1073,7 @@ Namespace Agents
                     Dim storageKind As ArtifactStorageKind = ArtifactStorageKind.Unknown
 
                     If storageText <> "" AndAlso Not TryParseStorageKind(storageText, storageKind) Then
+                        RejectRegistration(rejection, "artifact_storage_invalid", "storage_kind", "The artifact entry uses an unknown storage kind.")
                         RestoreArtifactSnapshot(runState.RegisteredDeliverableArtifacts, snapshot)
                         Return False
                     End If
@@ -1036,7 +1091,7 @@ Namespace Agents
                     }
 
                     Dim registeredArtifact As ToolCallSequencing.DeliverableArtifact =
-                        Register(runState, reg)
+                        Register(runState, reg, rejection)
 
                     If registeredArtifact Is Nothing Then
                         RestoreArtifactSnapshot(runState.RegisteredDeliverableArtifacts, snapshot)
@@ -1046,6 +1101,10 @@ Namespace Agents
                     registeredArtifact.SourceTool = If(sourceTool, "")
                 Next
             Next
+
+            If arrays.Any(Function(items) items.Count > 0) Then
+                RecordExplicitProducerSources(runState, rootObject, resultObject)
+            End If
 
             ' Presence of an explicit empty artifacts=[] array is a valid authoritative
             ' declaration of zero artifacts. It suppresses legacy fallback but registers
@@ -1066,7 +1125,7 @@ Namespace Agents
 
             If runState Is Nothing Then
                 failureCode = "artifact_registry_unavailable"
-                failureMessage = "The explicit artifact result could not be validated because the run registry is unavailable."
+                failureMessage = "The host cannot validate the explicit artifact result without a run registry."
                 Return False
             End If
 
@@ -1090,16 +1149,21 @@ Namespace Agents
 
                 RegisterExplicitArtifactProtocolOwnedPathsFromResponse(runState, rootObject, resultObject)
 
-                If Not RegisterExplicitArtifacts(runState, rootObject, resultObject, sourceTool) Then
+                Dim rejection As ArtifactRegistrationRejection = Nothing
+                If Not RegisterExplicitArtifacts(runState, rootObject, resultObject, sourceTool, rejection) Then
+                    ' Keep the public category stable for existing recovery policies.
                     failureCode = "invalid_explicit_artifact_result"
-                    failureMessage = "The tool returned a malformed or conflicting artifacts[] payload. Explicit artifact results are authoritative and cannot fall back to legacy path delivery."
+                    failureMessage = "The host rejected the explicit artifacts[] payload. " &
+                        If(rejection Is Nothing, "No registration detail is available.",
+                           "Reason=" & rejection.Code & "; field=" & rejection.Field & "; " & rejection.Detail) &
+                        " The host will not substitute legacy path delivery. Correct this registration or preserve the work and report the incomplete outcome; do not repeat a successful file mutation merely to retry delivery."
                     Return False
                 End If
 
                 Return True
             Catch ex As System.Exception
                 failureCode = "invalid_explicit_artifact_result"
-                failureMessage = "The explicit artifact result could not be parsed: " & ex.Message
+                failureMessage = "The host cannot parse the explicit artifact result: " & ex.Message
                 Return False
             End Try
         End Function
@@ -1158,6 +1222,70 @@ Namespace Agents
             End If
         End Sub
 
+        ' Detects outputs hidden by a late model-declared expected-artifact contract.
+        ' This is a completion repair obligation, not a new delivery path or identity rule.
+        ' Locked caller contracts and intentionally empty contracts remain authoritative.
+        ' Only exact successful producer provenance is used; no filename heuristics.
+        Public Shared Function GetUnreconciledLegacyOutputPaths(
+            runState As ToolCallSequencing.ToolingRunState) As System.Collections.Generic.List(Of System.String)
+
+            Dim result As New System.Collections.Generic.List(Of System.String)()
+            If runState Is Nothing OrElse runState.ExpectedDeliverableContractLocked OrElse
+               Not runState.HasExpectedDeliverableContract OrElse
+               runState.ExpectedDeliverableSlots Is Nothing OrElse runState.ExpectedDeliverableSlots.Count = 0 OrElse
+               runState.RegisteredDeliverableArtifacts Is Nothing Then Return result
+
+            Dim accounted As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            For Each item As ToolCallSequencing.DeliverableArtifact In runState.RegisteredDeliverableArtifacts
+                If item Is Nothing OrElse Not item.IsExplicitContract OrElse System.String.IsNullOrWhiteSpace(item.SessionPath) Then Continue For
+                Try
+                    accounted.Add(System.IO.Path.GetFullPath(item.SessionPath))
+                Catch ex As System.Exception
+                    System.Diagnostics.Trace.TraceWarning("Cannot normalize explicit artifact during delivery reconciliation: " & ex.Message)
+                End Try
+            Next
+            Dim seen As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            For Each item As ToolCallSequencing.DeliverableArtifact In runState.RegisteredDeliverableArtifacts
+                If item Is Nothing OrElse item.IsExplicitContract OrElse item.LegacySourceAccountedFor OrElse Not item.LegacyCompatibilityEligible OrElse
+                   item.LifecycleState <> ArtifactLifecycleState.Intermediate OrElse
+                   runState.DeliverableCapableToolNames Is Nothing OrElse
+                   Not runState.DeliverableCapableToolNames.Contains(If(item.SourceTool, "").Trim()) OrElse
+                   System.String.IsNullOrWhiteSpace(item.SessionPath) Then Continue For
+                Try
+                    Dim path As System.String = System.IO.Path.GetFullPath(item.SessionPath)
+                    If Not accounted.Contains(path) AndAlso seen.Add(path) Then result.Add(path)
+                Catch ex As System.Exception
+                    System.Diagnostics.Trace.TraceWarning("Cannot normalize legacy output during delivery reconciliation: " & ex.Message)
+                End Try
+            Next
+            Return result
+        End Function
+
+        Private Shared Sub RecordExplicitProducerSources(
+            runState As ToolCallSequencing.ToolingRunState,
+            rootObject As Newtonsoft.Json.Linq.JObject,
+            resultObject As Newtonsoft.Json.Linq.JObject)
+
+            ' Called only after the ENTIRE nonempty artifacts[] transaction succeeded.
+            ' Returned source is exact producer provenance, not path-derived supersession.
+            For Each container As Newtonsoft.Json.Linq.JObject In New Newtonsoft.Json.Linq.JObject() {rootObject, resultObject}
+                If container Is Nothing Then Continue For
+                Dim source As Newtonsoft.Json.Linq.JToken = container("source")
+                If source Is Nothing OrElse source.Type <> Newtonsoft.Json.Linq.JTokenType.String Then Continue For
+                Dim raw As System.String = source.Value(Of System.String)()
+                If System.String.IsNullOrWhiteSpace(raw) OrElse Not System.IO.Path.IsPathRooted(raw) Then Continue For
+                Try
+                    Dim full As System.String = System.IO.Path.GetFullPath(raw)
+                    For Each artifact As ToolCallSequencing.DeliverableArtifact In runState.RegisteredDeliverableArtifacts
+                        If artifact IsNot Nothing AndAlso Not artifact.IsExplicitContract AndAlso artifact.LegacyCompatibilityEligible AndAlso
+                           System.String.Equals(artifact.SessionPath, full, System.StringComparison.OrdinalIgnoreCase) Then artifact.LegacySourceAccountedFor = True
+                    Next
+                Catch ex As System.Exception
+                    System.Diagnostics.Trace.TraceWarning("Cannot record explicit producer provenance: " & ex.Message)
+                End Try
+            Next
+        End Sub
+
         Public Shared Function ResolvePathsForDelivery(
             runState As ToolCallSequencing.ToolingRunState,
             Optional legacyCandidates As IEnumerable(Of String) = Nothing,
@@ -1193,6 +1321,14 @@ Namespace Agents
                     End Try
                 Next
                 Return independentPaths
+            End If
+
+            ' Explicitly independent groups above retain their established recovery
+            ' behavior. A normal ungrouped completion must not lose an earlier output.
+            Dim unreconciled As System.Collections.Generic.List(Of System.String) = GetUnreconciledLegacyOutputPaths(runState)
+            If unreconciled.Count > 0 Then
+                Throw New System.IO.IOException("A late expected-artifact contract has not accounted for earlier outputs: " &
+                    System.String.Join(" | ", unreconciled) & ". Finalization must reconcile these outputs before delivery.")
             End If
 
             ' Preserve one transport entry per explicit current Final. Distinct sibling
@@ -2155,6 +2291,7 @@ Namespace Agents
                 .SessionPath = If(source.SessionPath, ""),
                 .SourceTool = If(source.SourceTool, ""),
                 .LegacyCompatibilityEligible = source.LegacyCompatibilityEligible,
+                .LegacySourceAccountedFor = source.LegacySourceAccountedFor,
                 .WasObservedLegacyFileDelta = source.WasObservedLegacyFileDelta,
                 .IsFinalDeliverable = source.IsFinalDeliverable,
                 .LifecycleState = source.LifecycleState,

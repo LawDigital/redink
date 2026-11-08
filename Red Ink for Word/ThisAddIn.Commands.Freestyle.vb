@@ -3920,7 +3920,7 @@ SkipPromptInput:
                     cursorOnComment = True
                     replyUsesBodySelection = False
                 End If
-                If Not IsSameProcessingDocument(replyDocument, application.ActiveDocument) Then
+                If Not IsSameCommentDocument(replyDocument, application.ActiveDocument) Then
                     Throw New WordCommandNoticeException("The active document changed. Please select the comment again and retry.")
                 End If
                 If replyNeedsCommentChoice OrElse (commentSelectionDetected AndAlso Not cursorOnComment) Then
@@ -4466,7 +4466,7 @@ SkipPromptInput:
             ' selection. Revalidate the captured comment and restore ONLY a Reply target
             ' immediately before processing; other Freestyle modes retain their selection.
             If DoPushback Then
-                If Not IsSameProcessingDocument(replyDocument, application.ActiveDocument) Then
+                If Not IsSameCommentDocument(replyDocument, application.ActiveDocument) Then
                     ShowCustomMessageBox("The active document changed. Please select your comments again.", "Inky")
                     Return
                 End If
@@ -4522,7 +4522,7 @@ SkipPromptInput:
         confirmedAtCaret As System.Collections.Generic.IReadOnlyList(Of Microsoft.Office.Interop.Word.Comment)) As System.Boolean
 
         Try
-            If original Is Nothing OrElse Not IsSameProcessingDocument(doc, original.Document) OrElse
+            If original Is Nothing OrElse Not IsSameCommentDocument(doc, original.Document) OrElse
                original.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory Then Return False
             Dim anchored As System.Collections.Generic.List(Of Microsoft.Office.Interop.Word.Comment) =
                 FindCommandCommentsInBodyRange(doc, original)
@@ -4567,7 +4567,7 @@ SkipPromptInput:
             doc.Activate()
             target.Select()
             Dim actual As Microsoft.Office.Interop.Word.Selection = Globals.ThisAddIn.Application.Selection
-            Return actual IsNot Nothing AndAlso IsSameProcessingDocument(doc, actual.Document) AndAlso
+            Return actual IsNot Nothing AndAlso IsSameCommentDocument(doc, actual.Document) AndAlso
                 actual.StoryType = Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory AndAlso
                 actual.Range.Start = target.Start AndAlso actual.Range.End = target.End AndAlso
                 actual.Range.Start < actual.Range.End
@@ -4599,7 +4599,7 @@ SkipPromptInput:
                 ' identity check below still has to prove this is a top-level comment.
                 System.Diagnostics.Debug.WriteLine("Comment ancestor unavailable: " & ex.Message)
             End Try
-            If Not IsSameProcessingDocument(doc, threadComment.Range.Document) Then Return False
+            If Not IsSameCommentDocument(doc, threadComment.Range.Document) Then Return False
             Dim index As System.Int32 = threadComment.Index
             If index <= 0 OrElse index > doc.Comments.Count Then Return False
             Dim currentThreadRange As Microsoft.Office.Interop.Word.Range = doc.Comments(index).Range
@@ -4646,7 +4646,7 @@ SkipPromptInput:
             doc.Activate()
             doc.Range(Start:=wordRangeStart, End:=wordRangeEnd).Select()
             Dim selected As Microsoft.Office.Interop.Word.Selection = Globals.ThisAddIn.Application.Selection
-            If selected Is Nothing OrElse Not IsSameProcessingDocument(doc, selected.Document) OrElse
+            If selected Is Nothing OrElse Not IsSameCommentDocument(doc, selected.Document) OrElse
                selected.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory OrElse
                selected.Range.Start <> startPos OrElse selected.Range.End <> endPos OrElse
                selected.Range.Start >= selected.Range.End OrElse

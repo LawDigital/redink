@@ -744,6 +744,10 @@ Partial Public Class ThisAddIn
 
     ''' <summary>Starts AutoPilot using the configuration dialog and saved settings.</summary>
     Public Sub StartAutoPilot()
+        If System.Threading.Volatile.Read(_batchAgentRunning) <> 0 Then
+            ShowCustomMessageBox("Finish or cancel the Batch Agent Job before starting AutoPilot.", AN)
+            Return
+        End If
         ' Distinguish license failure from user whitelist failure for a clear message
         If Not IsAutoPilotLicenseValid() Then
             Dim licenseStatus = GetLicenseStatusShort()
@@ -778,6 +782,10 @@ Partial Public Class ThisAddIn
 
     ''' <summary>Starts AutoPilot with an explicit configuration instance.</summary>
     Private Sub StartAutoPilotWithConfig(config As AutoPilotConfig)
+        If System.Threading.Volatile.Read(_batchAgentRunning) <> 0 Then
+            ShowCustomMessageBox("Finish or cancel the Batch Agent Job before starting AutoPilot.", AN)
+            Return
+        End If
         _apConfig = config
 
         ' Always persist the effective configuration on every start, regardless of which
@@ -3114,6 +3122,15 @@ Partial Public Class ThisAddIn
         Dim resumeBlockedWorkflow As System.Boolean = False
         Dim continuationInstructionLanguage As System.String = System.String.Empty
         Dim failureNoticeLanguage As System.String = System.String.Empty
+        Dim resultAccessRequested As System.Boolean = False
+        Dim resultRecoveryWorkflowId As System.String = ""
+        Dim currentRequestWorkflowId As System.String = ""
+        Dim retainedUserResponse As System.String = ""
+        Dim coachingArchivePathForOutcome As System.String = System.String.Empty
+        Dim retainedRunState As Global.SharedLibrary.Agents.ToolCallSequencing.ToolingRunState = Nothing
+        Dim retainedOutcomeAvailable As System.Boolean = False
+        Dim incompleteOutcome As System.Boolean = False
+        Dim failureReportDirectory As System.String = ""
         Dim workflowContinuationRetentionDays As System.Int32 =
             SharedLibrary.Agents.WorkflowContinuity.DefaultContinuationRetentionDays
 
@@ -3230,6 +3247,10 @@ Partial Public Class ThisAddIn
             workflowContinuationKey = BuildAutoPilotWorkflowContinuationKey(mailInfo)
             workflowContinuationRetentionDays = ResolveAutoPilotWorkflowContinuationRetentionDays()
             continuationRetryRequested = IsExplicitWorkflowContinuationRetry(mailInfo.Body)
+            resultAccessRequested = IsExplicitAutoPilotResultsRequest(mailInfo.Body)
+            If Not scanSettingsOnly AndAlso resultAccessRequested AndAlso workflowContinuationKey <> "" Then
+                resultRecoveryWorkflowId = Global.SharedLibrary.Agents.WorkflowContinuity.FindResultRecoveryWorkflowId(workflowContinuationKey, "Outlook")
+            End If
             If Not scanSettingsOnly AndAlso continuationRetryRequested AndAlso workflowContinuationKey <> "" Then
                 continuationInstructionLanguage =
                     SharedLibrary.Agents.WorkflowContinuity.GetLatestBlockedContinuationUserLanguage(
@@ -3277,6 +3298,8 @@ Partial Public Class ThisAddIn
                     ApDashboardLog("COOLDOWN BYPASS (catch-up/reprocess mail): " & mailInfo.SenderEmail, "step")
                 ElseIf resumeBlockedWorkflow Then
                     ApDashboardLog("COOLDOWN BYPASS (explicit blocked-workflow continuation): " & mailInfo.SenderEmail, "step")
+                ElseIf resultAccessRequested AndAlso Not System.String.IsNullOrWhiteSpace(resultRecoveryWorkflowId) Then
+                    ApDashboardLog("COOLDOWN BYPASS (explicit access to this sender's retained outcome): " & mailInfo.SenderEmail, "step")
                 Else
                     ApDashboardLog($"SKIP (cooldown): {mailInfo.SenderEmail} — SentOn {mailSentUtc:HH:mm:ss} UTC", "step")
                     Return
@@ -3372,6 +3395,24 @@ Partial Public Class ThisAddIn
                 Else
                     ApDashboardLog($"⏸ Already awaiting approval: {mailInfo.SenderEmail}", "step")
                 End If
+                Return
+            End If
+
+            If Not scanSettingsOnly AndAlso resultAccessRequested Then
+                Await SendAutoPilotRetainedOutcomeAsync(mi, mailInfo, resultRecoveryWorkflowId, workflowContinuationKey, ct,
+                    Sub() primaryReplySubmitted = True)
+                MarkAutoPilotQueueDeliveryCommitted(entryId)
+                outcomeHandoffEstablished = True
+                Dim outcomeSourceFinalized As System.Boolean = Await SwitchToUi(Function() TryTagOriginalMailAsProcessed(mi))
+                If outcomeSourceFinalized Then
+                    CompleteAutoPilotQueueSourceFinalization(entryId, persistImmediately:=False)
+                Else
+                    ApDashboardLog("Result reply reached submission; source-mail tagging failed. The queue keeps the delivery checkpoint.", "warn")
+                End If
+                System.Threading.Interlocked.Increment(_apSessionReplyCount)
+                RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
+                RecordLastProcessedTime()
+                TrackAutoPilotConversation(mi)
                 Return
             End If
 
@@ -3478,6 +3519,33 @@ Partial Public Class ThisAddIn
                 Catch exRetain As System.Exception
                     ApDashboardLog($"⚠ Could not load retained conversation files: {exRetain.Message}", "warn")
                 End Try
+
+                ' Explicit reference to a missing source attachment is an intake problem,
+                ' not an occasion for a delayed critique of the user. No tooling session
+                ' or coaching job is created; report it directly and only once.
+                If Not scanSettingsOnly AndAlso Not resumeBlockedWorkflow AndAlso
+                   Not continuationRetryRequested AndAlso Not resultAccessRequested AndAlso
+                   mailInfo.AttachmentCount = 0 AndAlso attachmentPaths.Count = 0 AndAlso
+                   AutoPilotRequestClearlyReferencesMissingAttachment(mailInfo.Subject, GetLatestMailBody(If(mailInfo.Body, System.String.Empty))) Then
+                    Dim missingNotice As System.String = Await BuildAutoPilotMissingAttachmentReplyAsync(
+                        mailInfo.Subject, mailInfo.Body, ct)
+                    Await SwitchToUi(Sub() SendReplyToSender(mi, missingNotice, Nothing, tagAsAutoReply:=True,
+                                                              onPrimarySubmitted:=Sub() primaryReplySubmitted = True))
+                    MarkAutoPilotQueueDeliveryCommitted(entryId)
+                    outcomeHandoffEstablished = True
+                    Dim missingInputFinalized As System.Boolean = Await SwitchToUi(Function() TryTagOriginalMailAsProcessed(mi))
+                    If missingInputFinalized Then
+                        CompleteAutoPilotQueueSourceFinalization(entryId, persistImmediately:=False)
+                    Else
+                        ApDashboardLog("Missing-input reply submitted, but source finalization is pending; delivery checkpoint retained.", "warn")
+                    End If
+                    System.Threading.Interlocked.Increment(_apSessionReplyCount)
+                    RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
+                    RecordLastProcessedTime()
+                    TrackAutoPilotConversation(mi)
+                    ApDashboardLog("Missing source attachment explained directly without running an agent or queueing later advice.", "info")
+                    Return
+                End If
 
                 ' This mail owns its delivery state. Never let a no-tool mail fall back
                 ' to the completed registry of the previous AutoPilot mail/dialog.
@@ -3661,6 +3729,7 @@ Partial Public Class ThisAddIn
                             senderTools.RemoveAll(Function(t) t.ToolName = AP_Tool_ScanSettings)
                         End If
                         Dim toolingWorkflowId As System.String = If(resumeBlockedWorkflow, continuationWorkflowId, SharedLibrary.Agents.WorkflowContinuity.CreateWorkflowId())
+                        currentRequestWorkflowId = toolingWorkflowId
                         Dim originalRequest As New Global.SharedLibrary.Agents.ToolingOriginalRequestLog.Record(
                             requestText:=originalMailRequestText, subject:=originalMailRequestSubject,
                             senderEmail:=mailInfo.SenderEmail, source:="autopilot_mail", messageId:=mailInfo.EntryID,
@@ -3668,6 +3737,7 @@ Partial Public Class ThisAddIn
                         Dim coachingArchivePath As System.String = BuildAutoPilotToolingLogArchivePath(
                             If(System.String.IsNullOrWhiteSpace(mailInfo.SenderName), mailInfo.SenderEmail, mailInfo.SenderName),
                             originalMailRequestSubject, originalRequest)
+                        coachingArchivePathForOutcome = If(coachingArchivePath, System.String.Empty)
                         Try
                             response = Await ExecuteToolingLoop(
                                 systemPrompt, userPrompt,
@@ -3689,6 +3759,10 @@ Partial Public Class ThisAddIn
                                 semanticArchivePrepared:=archivePrepared,
                                 transportRetryProfile:=Global.SharedLibrary.SharedLibrary.LlmTransportRetryProfile.Unattended)
                         Finally
+                            If System.String.Equals(_lastCompletedToolingWorkflowId, currentRequestWorkflowId, System.StringComparison.Ordinal) Then
+                                retainedRunState = _lastCompletedToolingRunState
+                                retainedUserResponse = StripInkyMemoryBlock(If(response, ""))
+                            End If
                             CompleteAutoPilotPromptCoachingRun(coachingArchivePath)
                         End Try
                     Else
@@ -3796,7 +3870,7 @@ Partial Public Class ThisAddIn
                         Dim attachmentsToSend = If(hasPartialOutput, resultAttachmentsAbort, Nothing)
                         Await SwitchToUi(Sub() SendReplyToSender(mi, abortMessage, attachmentsToSend, tagAsAutoReply:=True, isHoldingOnly:=True, onPrimarySubmitted:=Sub() primaryReplySubmitted = True, hostNotices:=mandatoryHostNotices, hostNoticeLanguage:=hostNoticeLanguage))
                         outcomeHandoffEstablished = True
-                        deliverableHandoffCompletedOrDiscarded = True
+                        deliverableHandoffCompletedOrDiscarded = Not incompleteOutcome
                         Await SwitchToUi(Sub() MarkMailGroupRepliesAsAnsweredAndEligible(mi))
                         ' Do NOT tag the original mail as processed — allow catch-up to pick it up again.
                         ' Only the sent reply copies are promoted to cleanup-eligible status.
@@ -3825,6 +3899,8 @@ Partial Public Class ThisAddIn
                             mailInfo, attachmentPaths, "The AI model returned an empty response.", ct)
                     End If
                     Await SwitchToUi(Sub() SendReplyToSender(mi, errorMessage, Nothing, tagAsAutoReply:=True, onPrimarySubmitted:=Sub() primaryReplySubmitted = True, hostNotices:=mandatoryHostNotices, hostNoticeLanguage:=hostNoticeLanguage))
+                    RecordAutoPilotPromptCoachingDeliveredOutcome(coachingArchivePathForOutcome, True,
+                        New System.String() {"new_request", "review_with_operator"}, errorMessage)
                     outcomeHandoffEstablished = True
                     Interlocked.Increment(_apSessionReplyCount)
                     RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
@@ -3858,13 +3934,35 @@ Partial Public Class ThisAddIn
                     response = StripInkyMemoryBlock(response)
                 End If
 
+                retainedUserResponse = response
                 ' Remove knowledge-store source files not cited by the LLM
                 RemoveUncitedKnowledgeSourceCopies(response)
-
-                ' Collect registry-backed and bounded legacy-compatible result attachments.
-                Dim resultAttachments As List(Of String) = CollectResultAttachments(tempDir, attachmentPaths)
-                AddSemanticArchiveEvidenceAttachments(resultAttachments, archiveScope, tempDir)
-                preparedDeliverablesPresent = (resultAttachments IsNot Nothing AndAlso resultAttachments.Count > 0)
+                ' A delivery-validation error must not erase the user answer. Keep the
+                ' strict registry contract; return a host report instead of guessing paths.
+                Dim resultAttachments As New System.Collections.Generic.List(Of System.String)()
+                incompleteOutcome = _lastCompletedToolingWasBlocked AndAlso retainedRunState IsNot Nothing
+                Try
+                    resultAttachments = CollectResultAttachments(tempDir, attachmentPaths)
+                    AddSemanticArchiveEvidenceAttachments(resultAttachments, archiveScope, tempDir)
+                Catch deliveryEx As System.Exception
+                    incompleteOutcome = True
+                    resultAttachments.Clear()
+                    ApDashboardLog("Result delivery validation failed: " & deliveryEx.ToString(), "error")
+                    RecordAutoPilotError("Result delivery validation failed: " & deliveryEx.Message)
+                End Try
+                preparedDeliverablesPresent = resultAttachments.Count > 0
+                If incompleteOutcome Then
+                    retainedOutcomeAvailable = Global.SharedLibrary.Agents.WorkflowContinuity.PreserveDeliveryOutcome(
+                        currentRequestWorkflowId, "Outlook", retainedRunState, originalMailRequestText, retainedUserResponse,
+                        workflowContinuationKey, workflowContinuationRetentionDays)
+                    Dim outcomeLanguage = If(retainedRunState IsNot Nothing AndAlso Not System.String.IsNullOrWhiteSpace(retainedRunState.UserLanguage), retainedRunState.UserLanguage,
+                                             If(hostNoticeLanguage <> "", hostNoticeLanguage, If(failureNoticeLanguage <> "", failureNoticeLanguage, continuationInstructionLanguage)))
+                    response = Await BuildAutoPilotOutcomeReportAsync(retainedRunState, retainedUserResponse,
+                        resultAttachments.Select(Function(path) System.IO.Path.GetFileName(path)), retainedOutcomeAvailable,
+                        currentRequestWorkflowId, outcomeLanguage, ct)
+                    Dim statusAttachment = TryWriteAutoPilotOutcomeReport(tempDir, response)
+                    If Not System.String.IsNullOrWhiteSpace(statusAttachment) Then resultAttachments.Add(statusAttachment)
+                End If
 
                 If resultAttachments.Count > 0 Then
                     ApDashboardLog($"Result attachments to send: {resultAttachments.Count}", "info")
@@ -3936,13 +4034,15 @@ Partial Public Class ThisAddIn
                     RunDeferredApprovalAsync(deferredEntryId, deferredMailInfo, deferredResponse,
                                              deferredAttachments, deferredSourcesHtml, deferredMailSentUtc,
                                              deferredHostNotices, deferredHostNoticeLanguage,
-                                             deferredRejectionMessage)
+                                             deferredRejectionMessage, coachingArchivePathForOutcome,
+                                             incompleteOutcome, retainedOutcomeAvailable,
+                                             currentRequestWorkflowId)
 
                         ' The per-mail originals can now be cleaned: every prepared deliverable
                         ' has been copied into the deferred-approval staging directory, whose own
                         ' lifecycle preserves it on approval/send failure.
-                        deliverableHandoffCompletedOrDiscarded = True
-                        ClearAutoPilotError()
+                        deliverableHandoffCompletedOrDiscarded = Not incompleteOutcome
+                        If Not incompleteOutcome Then ClearAutoPilotError()
 
                         ApDashboardLog($"Reply for {mailInfo.SenderEmail} is awaiting operator approval — queue continues.", "info")
                         _apCurrentJobTimingCompleted = True
@@ -3951,9 +4051,17 @@ Partial Public Class ThisAddIn
                             ApDashboardLog($"⚡ Unattended mode — auto-approving reply for non-whitelisted sender: {mailInfo.SenderEmail}", "info")
                         End If
                         Await SwitchToUi(Sub() SendReplyToSender(mi, response, resultAttachments, tagAsAutoReply:=True, sourcesHtml:=sourcesHtml, onPrimarySubmitted:=Sub() primaryReplySubmitted = True, hostNotices:=mandatoryHostNotices, hostNoticeLanguage:=hostNoticeLanguage))
+                        RecordAutoPilotPromptCoachingDeliveredOutcome(coachingArchivePathForOutcome, incompleteOutcome,
+                            If(incompleteOutcome,
+                               If(retainedOutcomeAvailable,
+                                  If(Global.SharedLibrary.Agents.WorkflowContinuity.CanOfferContinuationRetry(currentRequestWorkflowId),
+                                     New System.String() {"retrieve_results", "resume_checkpoint"},
+                                     New System.String() {"retrieve_results"}),
+                                  New System.String() {"new_request"}),
+                               System.Array.Empty(Of System.String)()), response)
                         MarkAutoPilotQueueDeliveryCommitted(entryId)
                         outcomeHandoffEstablished = True
-                        deliverableHandoffCompletedOrDiscarded = True
+                        deliverableHandoffCompletedOrDiscarded = Not incompleteOutcome
                         Dim sourceFinalized As Boolean = Await SwitchToUi(Function() TryTagOriginalMailAsProcessed(mi))
 
                         If sourceFinalized Then
@@ -3978,7 +4086,7 @@ Partial Public Class ThisAddIn
                         Interlocked.Increment(_apSessionReplyCount)
                         RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
                         RecordLastProcessedTime()
-                        ClearAutoPilotError()
+                        If Not incompleteOutcome Then ClearAutoPilotError()
                         TrackAutoPilotConversation(mi)
                         Dim dummyBool As Boolean
                         _apHoldingOnlyEntryIds.TryRemove(entryId, dummyBool)
@@ -3986,6 +4094,11 @@ Partial Public Class ThisAddIn
                         _apCurrentJobTimingCompleted = True
                     End If
                 Finally
+                If Not outcomeHandoffEstablished AndAlso retainedRunState IsNot Nothing AndAlso currentRequestWorkflowId <> "" Then
+                    retainedOutcomeAvailable = Global.SharedLibrary.Agents.WorkflowContinuity.PreserveDeliveryOutcome(
+                        currentRequestWorkflowId, "Outlook", retainedRunState, originalMailRequestText, retainedUserResponse,
+                        workflowContinuationKey, workflowContinuationRetentionDays)
+                End If
                 ' ── SECURITY / RECOVERY: clean only after a successful handoff/discard,
                 ' or when no known generated deliverable remains in this per-mail staging
                 ' directory. A send/materialization/finalization failure must not destroy
@@ -4032,25 +4145,34 @@ Partial Public Class ThisAddIn
                mailInfo IsNot Nothing Then
 
                 Try
-                    Dim failureNotice As System.String =
-                        If(primaryReplySubmitted,
-                           BuildAutoPilotPostSendFailureNotice(If(failureNoticeLanguage <> "", failureNoticeLanguage, continuationInstructionLanguage)),
-                           BuildAutoPilotProcessingFailureNotice(If(failureNoticeLanguage <> "", failureNoticeLanguage, continuationInstructionLanguage)))
-                    If mandatoryHostNotices.Count > 0 Then
-                        failureNotice = Await LocalizeAutoPilotRequiredMessageAsync(
-                            If(primaryReplySubmitted,
-                               BuildAutoPilotPostSendFailureNotice(),
-                               BuildAutoPilotProcessingFailureNotice()),
-                            hostNoticeLanguage, System.Threading.CancellationToken.None)
-                    End If
+                    Dim recoveryLanguage = If(retainedRunState IsNot Nothing AndAlso Not System.String.IsNullOrWhiteSpace(retainedRunState.UserLanguage), retainedRunState.UserLanguage,
+                                              If(failureNoticeLanguage <> "", failureNoticeLanguage, If(hostNoticeLanguage <> "", hostNoticeLanguage, continuationInstructionLanguage)))
+                    Dim failureNotice = Await BuildAutoPilotOutcomeReportAsync(retainedRunState, retainedUserResponse,
+                        System.Array.Empty(Of System.String)(), retainedOutcomeAvailable, currentRequestWorkflowId,
+                        recoveryLanguage, System.Threading.CancellationToken.None,
+                        If(primaryReplySubmitted, BuildAutoPilotPostSendFailureNotice(), BuildAutoPilotProcessingFailureNotice()))
+                    failureReportDirectory = System.IO.Path.Combine(System.IO.Path.GetTempPath(), AP_TempPrefix & System.Guid.NewGuid().ToString("N"))
+                    Dim failureReport = TryWriteAutoPilotOutcomeReport(failureReportDirectory, failureNotice)
+                    Dim failureAttachments As New System.Collections.Generic.List(Of System.String)()
+                    If Not System.String.IsNullOrWhiteSpace(failureReport) Then failureAttachments.Add(failureReport)
                     Await SwitchToUi(
                         Sub() SendReplyToSender(
                             mi,
                             failureNotice,
-                            Nothing,
+                            failureAttachments,
                             tagAsAutoReply:=True,
+                            onPrimarySubmitted:=Sub() primaryReplySubmitted = True,
                             hostNotices:=mandatoryHostNotices, hostNoticeLanguage:=hostNoticeLanguage))
+                    RecordAutoPilotPromptCoachingDeliveredOutcome(coachingArchivePathForOutcome, True,
+                        If(retainedOutcomeAvailable,
+                           If(Global.SharedLibrary.Agents.WorkflowContinuity.CanOfferContinuationRetry(currentRequestWorkflowId),
+                              New System.String() {"retrieve_results", "resume_checkpoint"}, New System.String() {"retrieve_results"}),
+                           New System.String() {"new_request"}), failureNotice)
+                    MarkAutoPilotQueueDeliveryCommitted(entryId)
                     outcomeHandoffEstablished = True
+                    Dim failureSourceFinalized As System.Boolean = Await SwitchToUi(Function() TryTagOriginalMailAsProcessed(mi))
+                    If failureSourceFinalized Then CompleteAutoPilotQueueSourceFinalization(entryId, persistImmediately:=False)
+                    TrackAutoPilotConversation(mi)
                     System.Threading.Interlocked.Increment(_apSessionReplyCount)
                     If mailSentUtc <> System.DateTime.MinValue Then
                         RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
@@ -4063,6 +4185,13 @@ Partial Public Class ThisAddIn
                 End Try
             End If
         Finally
+            If failureReportDirectory <> "" Then
+                Try
+                    If System.IO.Directory.Exists(failureReportDirectory) Then System.IO.Directory.Delete(failureReportDirectory, True)
+                Catch cleanupEx As System.Exception
+                    System.Diagnostics.Trace.TraceWarning("Outcome-report cleanup: " & cleanupEx.Message)
+                End Try
+            End If
             If mi IsNot Nothing Then Try : Marshal.ReleaseComObject(mi) : Catch : End Try
 
             If runIsolationOwned Then
@@ -4226,7 +4355,11 @@ Partial Public Class ThisAddIn
                                                     mailSentUtc As DateTime,
                                                     hostNotices As System.Collections.Generic.IReadOnlyList(Of AutoPilotHostNotice),
                                                     hostNoticeLanguage As System.String,
-                                                    rejectionResponse As System.String) As Task
+                                                    rejectionResponse As System.String,
+                                                    coachingArchivePath As System.String,
+                                                    outcomeIncomplete As System.Boolean,
+                                                    retainedAvailable As System.Boolean,
+                                                    workflowId As System.String) As System.Threading.Tasks.Task
         Dim stagingDir As String = Nothing
         If resultAttachments IsNot Nothing AndAlso resultAttachments.Count > 0 Then
             Try : stagingDir = Path.GetDirectoryName(resultAttachments(0)) : Catch : End Try
@@ -4261,6 +4394,9 @@ Partial Public Class ThisAddIn
                         Try
                             Dim rejectionMessage As System.String = rejectionResponse
                             Await SwitchToUi(Sub() SendReplyToSender(rejectMail, rejectionMessage, Nothing, tagAsAutoReply:=True, hostNotices:=hostNotices, hostNoticeLanguage:=hostNoticeLanguage))
+                            ' Rejected by operator, not a user-instruction problem.
+                            ' Do not queue a post-hoc request critique.
+                            SuppressAutoPilotPromptCoachingRun(coachingArchivePath)
                             MarkAutoPilotQueueDeliveryCommitted(entryId)
                             Dim rejectionSourceFinalized As Boolean = Await SwitchToUi(Function() TryTagOriginalMailAsProcessed(rejectMail))
                             If rejectionSourceFinalized Then
@@ -4306,6 +4442,13 @@ Partial Public Class ThisAddIn
 
             Try
                 Await SwitchToUi(Sub() SendReplyToSender(mi, response, resultAttachments, tagAsAutoReply:=True, sourcesHtml:=sourcesHtml, hostNotices:=hostNotices, hostNoticeLanguage:=hostNoticeLanguage))
+                RecordAutoPilotPromptCoachingDeliveredOutcome(coachingArchivePath, outcomeIncomplete,
+                    If(outcomeIncomplete,
+                       If(retainedAvailable,
+                          If(Global.SharedLibrary.Agents.WorkflowContinuity.CanOfferContinuationRetry(workflowId),
+                             New System.String() {"retrieve_results", "resume_checkpoint"}, New System.String() {"retrieve_results"}),
+                          New System.String() {"new_request"}),
+                       System.Array.Empty(Of System.String)()), response)
                 MarkAutoPilotQueueDeliveryCommitted(entryId)
                 cleanupDeferredStaging = True
                 Dim approvedSourceFinalized As Boolean = Await SwitchToUi(Function() TryTagOriginalMailAsProcessed(mi))
@@ -4582,9 +4725,19 @@ Partial Public Class ThisAddIn
     '  ATTACHMENT HANDLING (save + improved collect)
     ' ═══════════════════════════════════════════════════════════════════════════
 
+    ' Use the existing host sanitizer only for physical copies; preserve the full
+    ' logical attachment name for tool lookup and provenance.
+    Private Function AllocateAttachmentCopyPath(tempDir As System.String, ByRef logicalFileName As System.String,
+                                                logicalNames As System.Collections.Generic.ISet(Of System.String)) As System.String
+        Dim physicalName As System.String = MakeSafeFileName(logicalFileName).TrimEnd("."c, " "c)
+        physicalName = MakeSafeFileName(physicalName)
+        Return Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(tempDir, physicalName, logicalFileName, occupiedLogicalNames:=logicalNames)
+    End Function
+
     ''' <summary>Saves attachments to a per-mail temporary directory.</summary>
     Private Function SaveAttachmentsToTemp(mi As MailItem, tempDir As String) As List(Of AutoPilotAttachmentInfo)
         Dim result As New List(Of AutoPilotAttachmentInfo)()
+        Dim logicalNames As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
         For i As Integer = 1 To mi.Attachments.Count
             Dim att = mi.Attachments(i)
             Try
@@ -4599,16 +4752,12 @@ Partial Public Class ThisAddIn
                             embeddedFileName = Path.GetFileNameWithoutExtension(embeddedFileName) & ".msg"
                         End If
 
-                        Dim savePath = Path.Combine(tempDir, embeddedFileName)
-                        Dim counter = 1
-                        While File.Exists(savePath)
-                            savePath = Path.Combine(tempDir, Path.GetFileNameWithoutExtension(embeddedFileName) & $"_{counter}.msg")
-                            counter += 1
-                        End While
+                        Dim logicalEmbeddedName As System.String = embeddedFileName
+                        Dim savePath As System.String = AllocateAttachmentCopyPath(tempDir, logicalEmbeddedName, logicalNames)
                         att.SaveAsFile(savePath)
 
                         ' Unpack the .msg recursively into the temp directory
-                        Dim unpackedInfos = UnpackEmbeddedMailFile(savePath, tempDir, Path.GetFileNameWithoutExtension(savePath), 0)
+                        Dim unpackedInfos = UnpackEmbeddedMailFile(savePath, tempDir, Path.GetFileNameWithoutExtension(logicalEmbeddedName), 0, originalFileName:=logicalEmbeddedName, sourceDisplayName:=embeddedFileName, logicalNames:=logicalNames)
                         result.AddRange(unpackedInfos)
                     Catch ex As System.Exception
                         result.Add(New AutoPilotAttachmentInfo() With {
@@ -4645,15 +4794,12 @@ Partial Public Class ThisAddIn
                     info.TempFilePath = Nothing
                     info.StatusMessage = $"Skipped (size {size / 1024 / 1024:F1} MB exceeds limit)"
                 Else
-                    Dim savePath = Path.Combine(tempDir, fileName)
-                    Dim counter = 1
-                    While File.Exists(savePath)
-                        savePath = Path.Combine(tempDir, Path.GetFileNameWithoutExtension(fileName) & $"_{counter}" & Path.GetExtension(fileName))
-                        counter += 1
-                    End While
+                    Dim logicalAttachmentName As System.String = fileName
+                    Dim savePath As System.String = AllocateAttachmentCopyPath(tempDir, logicalAttachmentName, logicalNames)
                     att.SaveAsFile(savePath)
+                    info.OriginalFileName = logicalAttachmentName
                     info.TempFilePath = savePath
-                    info.StatusMessage = "Saved"
+                    info.StatusMessage = If(System.String.Equals(logicalAttachmentName, fileName, System.StringComparison.Ordinal), "Saved", "Saved; original attachment: " & fileName)
 
                     ' ── Extract PDF page metadata (page count, orientation, page size) ──
                     If info.Extension = ".pdf" Then
@@ -4696,7 +4842,7 @@ Partial Public Class ThisAddIn
                     If ext = ".msg" OrElse ext = ".eml" Then
                         Try
                             Dim unpackedInfos = UnpackEmbeddedMailFile(info.TempFilePath, tempDir,
-                                Path.GetFileNameWithoutExtension(info.OriginalFileName), 0)
+                                Path.GetFileNameWithoutExtension(info.OriginalFileName), 0, originalFileName:=info.OriginalFileName, sourceDisplayName:=fileName, logicalNames:=logicalNames)
                             result.AddRange(unpackedInfos)
                             ' Skip adding the raw .msg/.eml itself — the unpacked text + attachments replace it
                             Continue For
@@ -4707,7 +4853,7 @@ Partial Public Class ThisAddIn
                     ElseIf ext = ".zip" Then
                         Try
                             Dim unpackedInfos = UnpackZipFile(info.TempFilePath, tempDir,
-                                Path.GetFileNameWithoutExtension(info.OriginalFileName), 0)
+                                Path.GetFileNameWithoutExtension(info.OriginalFileName), 0, originalFileName:=info.OriginalFileName, sourceDisplayName:=fileName, logicalNames:=logicalNames)
                             result.AddRange(unpackedInfos)
                             ' Skip adding the raw .zip itself — the unpacked files replace it
                             Continue For
@@ -4746,17 +4892,23 @@ Partial Public Class ThisAddIn
             zipFilePath As String,
             tempDir As String,
             baseName As String,
-            depth As Integer) As List(Of AutoPilotAttachmentInfo)
+            depth As Integer,
+            Optional originalFileName As System.String = Nothing,
+            Optional sourceDisplayName As System.String = Nothing,
+            Optional logicalNames As System.Collections.Generic.ISet(Of System.String) = Nothing) As List(Of AutoPilotAttachmentInfo)
 
+        If logicalNames Is Nothing Then logicalNames = New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+        Dim sourceName As System.String = If(System.String.IsNullOrWhiteSpace(originalFileName), System.IO.Path.GetFileName(zipFilePath), originalFileName)
+        Dim sourceDescription As System.String = If(System.String.IsNullOrWhiteSpace(sourceDisplayName), sourceName, sourceDisplayName)
         Dim results As New List(Of AutoPilotAttachmentInfo)()
 
         If depth > AP_MaxArchiveDepth Then
             results.Add(New AutoPilotAttachmentInfo() With {
-                .OriginalFileName = Path.GetFileName(zipFilePath),
+                .OriginalFileName = sourceName,
                 .TempFilePath = zipFilePath,
                 .Extension = ".zip",
                 .SizeBytes = If(File.Exists(zipFilePath), New FileInfo(zipFilePath).Length, 0),
-                .StatusMessage = $"Max archive nesting depth ({AP_MaxArchiveDepth}) reached — not unpacked"
+                .StatusMessage = $"Max archive nesting depth ({AP_MaxArchiveDepth}) reached — not unpacked: {sourceDescription}"
             })
             Return results
         End If
@@ -4765,13 +4917,13 @@ Partial Public Class ThisAddIn
             Using archive = ZipFile.OpenRead(zipFilePath)
                 ' ── Zip bomb check: entry count ──
                 If archive.Entries.Count > AP_MaxZipEntries Then
-                    ApDashboardLog($"  ⚠ Zip has {archive.Entries.Count} entries (limit {AP_MaxZipEntries}) — not unpacked: {Path.GetFileName(zipFilePath)}", "warn")
+                    ApDashboardLog($"  ⚠ Zip has {archive.Entries.Count} entries (limit {AP_MaxZipEntries}) — not unpacked: {sourceDescription}", "warn")
                     results.Add(New AutoPilotAttachmentInfo() With {
-                        .OriginalFileName = Path.GetFileName(zipFilePath),
+                        .OriginalFileName = sourceName,
                         .TempFilePath = zipFilePath,
                         .Extension = ".zip",
                         .SizeBytes = New FileInfo(zipFilePath).Length,
-                        .StatusMessage = $"Skipped (zip contains {archive.Entries.Count} entries, limit is {AP_MaxZipEntries})"
+                        .StatusMessage = $"Skipped (zip contains {archive.Entries.Count} entries, limit is {AP_MaxZipEntries}): {sourceDescription}"
                     })
                     Return results
                 End If
@@ -4782,20 +4934,20 @@ Partial Public Class ThisAddIn
                     totalUncompressed += entry.Length
                 Next
                 If totalUncompressed > AP_MaxZipTotalBytes Then
-                    ApDashboardLog($"  ⚠ Zip uncompressed size {totalUncompressed / 1024 / 1024:F1} MB exceeds limit — not unpacked: {Path.GetFileName(zipFilePath)}", "warn")
+                    ApDashboardLog($"  ⚠ Zip uncompressed size {totalUncompressed / 1024 / 1024:F1} MB exceeds limit — not unpacked: {sourceDescription}", "warn")
                     results.Add(New AutoPilotAttachmentInfo() With {
-                        .OriginalFileName = Path.GetFileName(zipFilePath),
+                        .OriginalFileName = sourceName,
                         .TempFilePath = zipFilePath,
                         .Extension = ".zip",
                         .SizeBytes = New FileInfo(zipFilePath).Length,
-                        .StatusMessage = $"Skipped (uncompressed size {totalUncompressed / 1024 / 1024:F1} MB exceeds limit)"
+                        .StatusMessage = $"Skipped (uncompressed size {totalUncompressed / 1024 / 1024:F1} MB exceeds limit): {sourceDescription}"
                     })
                     Return results
                 End If
 
-                ApDashboardLog($"  📦 Unpacking zip: {Path.GetFileName(zipFilePath)} ({archive.Entries.Count} entries)", "info")
+                ApDashboardLog($"  📦 Unpacking zip: {sourceDescription} ({archive.Entries.Count} entries)", "info")
 
-                Dim tempDirFull = Path.GetFullPath(tempDir)
+                Dim tempDirFull As System.String = System.IO.Path.GetFullPath(tempDir).TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar) & System.IO.Path.DirectorySeparatorChar
 
                 For Each entry In archive.Entries
                     Try
@@ -4814,20 +4966,13 @@ Partial Public Class ThisAddIn
                         End If
 
                         ' Build safe output path and validate against zip-slip
-                        Dim outputPath = Path.Combine(tempDir, entryFileName)
+                        Dim logicalEntryName As System.String = entryFileName
+                        Dim outputPath As System.String = AllocateAttachmentCopyPath(tempDir, logicalEntryName, logicalNames)
                         Dim outputPathFull = Path.GetFullPath(outputPath)
                         If Not outputPathFull.StartsWith(tempDirFull, StringComparison.OrdinalIgnoreCase) Then
                             ' Zip-slip attempt — skip this entry
                             Continue For
                         End If
-
-                        ' Prevent filename collision
-                        Dim counter = 1
-                        While File.Exists(outputPath)
-                            outputPath = Path.Combine(tempDir, Path.GetFileNameWithoutExtension(entryFileName) &
-                                $"_{counter}" & Path.GetExtension(entryFileName))
-                            counter += 1
-                        End While
 
                         Dim entryExt = Path.GetExtension(entryFileName).ToLowerInvariant()
                         Dim entrySize = entry.Length
@@ -4846,22 +4991,22 @@ Partial Public Class ThisAddIn
                         End If
 
                         ' Extract the entry
-                        entry.ExtractToFile(outputPath, True)
+                        entry.ExtractToFile(outputPath, False)
 
                         Dim info As New AutoPilotAttachmentInfo() With {
-                            .OriginalFileName = Path.GetFileName(outputPath),
+                            .OriginalFileName = logicalEntryName,
                             .TempFilePath = outputPath,
                             .Extension = entryExt,
                             .SizeBytes = New FileInfo(outputPath).Length,
                             .IsOverSizeLimit = False,
-                            .StatusMessage = $"Extracted from zip: {Path.GetFileName(zipFilePath)}"
+                            .StatusMessage = $"Extracted from zip: {sourceDescription}; original entry: {entry.FullName}"
                         }
 
                         ' Recursively unpack nested containers
                         If entryExt = ".msg" OrElse entryExt = ".eml" Then
                             Try
                                 Dim subResults = UnpackEmbeddedMailFile(outputPath, tempDir,
-                                    Path.GetFileNameWithoutExtension(entryFileName), depth + 1)
+                                    Path.GetFileNameWithoutExtension(logicalEntryName), depth + 1, originalFileName:=logicalEntryName, sourceDisplayName:=sourceDescription & " > " & entry.FullName, logicalNames:=logicalNames)
                                 results.AddRange(subResults)
                                 Continue For
                             Catch
@@ -4870,7 +5015,7 @@ Partial Public Class ThisAddIn
                         ElseIf entryExt = ".zip" Then
                             Try
                                 Dim subResults = UnpackZipFile(outputPath, tempDir,
-                                    Path.GetFileNameWithoutExtension(entryFileName), depth + 1)
+                                    Path.GetFileNameWithoutExtension(logicalEntryName), depth + 1, originalFileName:=logicalEntryName, sourceDisplayName:=sourceDescription & " > " & entry.FullName, logicalNames:=logicalNames)
                                 results.AddRange(subResults)
                                 Continue For
                             Catch
@@ -4888,16 +5033,16 @@ Partial Public Class ThisAddIn
                 Next
             End Using
 
-            ApDashboardLog($"  ✓ Zip unpacked: {Path.GetFileName(zipFilePath)} → {results.Count} file(s)", "info")
+            ApDashboardLog($"  ✓ Zip unpacked: {sourceDescription} → {results.Count} file(s)", "info")
 
         Catch ex As System.Exception
             ApDashboardLog($"  ⚠ Failed to unpack zip: {ex.Message}", "warn")
             results.Add(New AutoPilotAttachmentInfo() With {
-                .OriginalFileName = Path.GetFileName(zipFilePath),
+                .OriginalFileName = sourceName,
                 .TempFilePath = zipFilePath,
                 .Extension = ".zip",
                 .SizeBytes = If(File.Exists(zipFilePath), New FileInfo(zipFilePath).Length, 0),
-                .StatusMessage = $"Saved (zip unpack failed: {ex.Message})"
+                .StatusMessage = $"Saved (zip unpack failed for {sourceDescription}: {ex.Message})"
             })
         End Try
 
@@ -4922,16 +5067,22 @@ Partial Public Class ThisAddIn
             mailFilePath As String,
             tempDir As String,
             baseName As String,
-            depth As Integer) As List(Of AutoPilotAttachmentInfo)
+            depth As Integer,
+            Optional originalFileName As System.String = Nothing,
+            Optional sourceDisplayName As System.String = Nothing,
+            Optional logicalNames As System.Collections.Generic.ISet(Of System.String) = Nothing) As List(Of AutoPilotAttachmentInfo)
 
+        If logicalNames Is Nothing Then logicalNames = New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+        Dim sourceName As System.String = If(System.String.IsNullOrWhiteSpace(originalFileName), System.IO.Path.GetFileName(mailFilePath), originalFileName)
+        Dim sourceDescription As System.String = If(System.String.IsNullOrWhiteSpace(sourceDisplayName), sourceName, sourceDisplayName)
         Dim results As New List(Of AutoPilotAttachmentInfo)()
         If depth > AP_MaxEmbeddedMailDepth Then
             results.Add(New AutoPilotAttachmentInfo() With {
-                .OriginalFileName = Path.GetFileName(mailFilePath),
+                .OriginalFileName = sourceName,
                 .TempFilePath = mailFilePath,
                 .Extension = Path.GetExtension(mailFilePath).ToLowerInvariant(),
                 .SizeBytes = If(File.Exists(mailFilePath), New FileInfo(mailFilePath).Length, 0),
-                .StatusMessage = $"Max nesting depth ({AP_MaxEmbeddedMailDepth}) reached — not unpacked"
+                .StatusMessage = $"Max nesting depth ({AP_MaxEmbeddedMailDepth}) reached — not unpacked: {sourceDescription}"
             })
             Return results
         End If
@@ -4939,17 +5090,17 @@ Partial Public Class ThisAddIn
         Dim ext = Path.GetExtension(mailFilePath).ToLowerInvariant()
 
         If ext = ".msg" Then
-            Return UnpackMsgFile(mailFilePath, tempDir, baseName, depth)
+            Return UnpackMsgFile(mailFilePath, tempDir, baseName, depth, originalFileName:=sourceName, sourceDisplayName:=sourceDescription, logicalNames:=logicalNames)
         ElseIf ext = ".eml" Then
-            Return UnpackEmlFile(mailFilePath, tempDir, baseName, depth)
+            Return UnpackEmlFile(mailFilePath, tempDir, baseName, depth, originalFileName:=sourceName, sourceDisplayName:=sourceDescription, logicalNames:=logicalNames)
         Else
             ' Unknown extension — return as-is
             results.Add(New AutoPilotAttachmentInfo() With {
-                .OriginalFileName = Path.GetFileName(mailFilePath),
+                .OriginalFileName = sourceName,
                 .TempFilePath = mailFilePath,
                 .Extension = ext,
                 .SizeBytes = If(File.Exists(mailFilePath), New FileInfo(mailFilePath).Length, 0),
-                .StatusMessage = "Saved"
+                .StatusMessage = "Saved; original container: " & sourceDescription
             })
             Return results
         End If
@@ -4964,8 +5115,14 @@ Partial Public Class ThisAddIn
             msgFilePath As String,
             tempDir As String,
             baseName As String,
-            depth As Integer) As List(Of AutoPilotAttachmentInfo)
+            depth As Integer,
+            Optional originalFileName As System.String = Nothing,
+            Optional sourceDisplayName As System.String = Nothing,
+            Optional logicalNames As System.Collections.Generic.ISet(Of System.String) = Nothing) As List(Of AutoPilotAttachmentInfo)
 
+        If logicalNames Is Nothing Then logicalNames = New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+        Dim sourceName As System.String = If(System.String.IsNullOrWhiteSpace(originalFileName), System.IO.Path.GetFileName(msgFilePath), originalFileName)
+        Dim sourceDescription As System.String = If(System.String.IsNullOrWhiteSpace(sourceDisplayName), sourceName, sourceDisplayName)
         Dim results As New List(Of AutoPilotAttachmentInfo)()
         Dim msgItem As MailItem = Nothing
 
@@ -4978,11 +5135,11 @@ Partial Public Class ThisAddIn
             If msgItem Is Nothing Then
                 ' Not a MailItem (could be a meeting request, etc.) — return the raw file
                 results.Add(New AutoPilotAttachmentInfo() With {
-                    .OriginalFileName = Path.GetFileName(msgFilePath),
+                    .OriginalFileName = sourceName,
                     .TempFilePath = msgFilePath,
                     .Extension = ".msg",
                     .SizeBytes = New FileInfo(msgFilePath).Length,
-                    .StatusMessage = "Saved (not a standard mail message)"
+                    .StatusMessage = $"Saved (not a standard mail message: {sourceDescription})"
                 })
                 If sharedItem IsNot Nothing Then Try : Marshal.ReleaseComObject(sharedItem) : Catch : End Try
                 Return results
@@ -4991,13 +5148,7 @@ Partial Public Class ThisAddIn
             ' Extract metadata + body as text
             Dim textContent = BuildEmbeddedMailText(msgItem)
             Dim textFileName = baseName & "_content.txt"
-            Dim textFilePath = Path.Combine(tempDir, textFileName)
-            Dim counter = 1
-            While File.Exists(textFilePath)
-                textFilePath = Path.Combine(tempDir, baseName & $"_content_{counter}.txt")
-                textFileName = Path.GetFileName(textFilePath)
-                counter += 1
-            End While
+            Dim textFilePath As System.String = AllocateAttachmentCopyPath(tempDir, textFileName, logicalNames)
             File.WriteAllText(textFilePath, textContent, Encoding.UTF8)
 
             results.Add(New AutoPilotAttachmentInfo() With {
@@ -5006,10 +5157,10 @@ Partial Public Class ThisAddIn
                 .Extension = ".txt",
                 .SizeBytes = New FileInfo(textFilePath).Length,
                 .IsOverSizeLimit = False,
-                .StatusMessage = $"Extracted from embedded mail: {Path.GetFileName(msgFilePath)}"
+                .StatusMessage = $"Extracted from embedded mail: {sourceDescription}"
             })
 
-            ApDashboardLog($"  📧 Unpacked embedded mail: {Path.GetFileName(msgFilePath)} → {textFileName}" &
+            ApDashboardLog($"  📧 Unpacked embedded mail: {sourceDescription} → {textFileName}" &
                            If(msgItem.Attachments.Count > 0, $" + {msgItem.Attachments.Count} attachment(s)", ""), "info")
 
             ' Extract nested attachments
@@ -5023,15 +5174,11 @@ Partial Public Class ThisAddIn
                             If Not nestedName.EndsWith(".msg", StringComparison.OrdinalIgnoreCase) Then
                                 nestedName = Path.GetFileNameWithoutExtension(nestedName) & ".msg"
                             End If
-                            Dim nestedPath = Path.Combine(tempDir, nestedName)
-                            Dim nc = 1
-                            While File.Exists(nestedPath)
-                                nestedPath = Path.Combine(tempDir, Path.GetFileNameWithoutExtension(nestedName) & $"_{nc}.msg")
-                                nc += 1
-                            End While
+                            Dim logicalNestedName As System.String = nestedName
+                            Dim nestedPath As System.String = AllocateAttachmentCopyPath(tempDir, logicalNestedName, logicalNames)
                             nestedAtt.SaveAsFile(nestedPath)
                             results.AddRange(UnpackEmbeddedMailFile(nestedPath, tempDir,
-                                Path.GetFileNameWithoutExtension(nestedPath), depth + 1))
+                                Path.GetFileNameWithoutExtension(logicalNestedName), depth + 1, originalFileName:=logicalNestedName, sourceDisplayName:=sourceDescription & " > " & nestedName, logicalNames:=logicalNames))
                         Catch ex As System.Exception
                             results.Add(New AutoPilotAttachmentInfo() With {
                                 .OriginalFileName = If(nestedAtt.FileName, $"nested_{depth}_{j}"),
@@ -5053,21 +5200,18 @@ Partial Public Class ThisAddIn
                             nestedInfo.TempFilePath = Nothing
                             nestedInfo.StatusMessage = $"Skipped (from embedded mail, size {nestedSize / 1024 / 1024:F1} MB exceeds limit)"
                         Else
-                            Dim nestedSavePath = Path.Combine(tempDir, nestedFileName)
-                            Dim nc = 1
-                            While File.Exists(nestedSavePath)
-                                nestedSavePath = Path.Combine(tempDir, Path.GetFileNameWithoutExtension(nestedFileName) & $"_{nc}" & Path.GetExtension(nestedFileName))
-                                nc += 1
-                            End While
+                            Dim logicalNestedName As System.String = nestedFileName
+                            Dim nestedSavePath As System.String = AllocateAttachmentCopyPath(tempDir, logicalNestedName, logicalNames)
                             nestedAtt.SaveAsFile(nestedSavePath)
+                            nestedInfo.OriginalFileName = logicalNestedName
                             nestedInfo.TempFilePath = nestedSavePath
-                            nestedInfo.StatusMessage = $"Saved (from embedded mail: {Path.GetFileName(msgFilePath)})"
+                            nestedInfo.StatusMessage = $"Saved (from embedded mail: {sourceDescription}; original attachment: {nestedFileName})"
 
                             ' If this nested attachment is itself a .msg, .eml, or .zip, recurse
                             If nestedInfo.Extension = ".msg" OrElse nestedInfo.Extension = ".eml" Then
                                 Try
                                     Dim subResults = UnpackEmbeddedMailFile(nestedSavePath, tempDir,
-                                        Path.GetFileNameWithoutExtension(nestedFileName), depth + 1)
+                                        Path.GetFileNameWithoutExtension(logicalNestedName), depth + 1, originalFileName:=logicalNestedName, sourceDisplayName:=sourceDescription & " > " & nestedFileName, logicalNames:=logicalNames)
                                     results.AddRange(subResults)
                                     Continue For ' Don't add the raw file — the unpacked results replace it
                                 Catch
@@ -5076,7 +5220,7 @@ Partial Public Class ThisAddIn
                             ElseIf nestedInfo.Extension = ".zip" Then
                                 Try
                                     Dim subResults = UnpackZipFile(nestedSavePath, tempDir,
-                                        Path.GetFileNameWithoutExtension(nestedFileName), depth + 1)
+                                        Path.GetFileNameWithoutExtension(logicalNestedName), depth + 1, originalFileName:=logicalNestedName, sourceDisplayName:=sourceDescription & " > " & nestedFileName, logicalNames:=logicalNames)
                                     results.AddRange(subResults)
                                     Continue For
                                 Catch
@@ -5097,11 +5241,11 @@ Partial Public Class ThisAddIn
             ' OpenSharedItem failed — return the raw .msg as a fallback
             ApDashboardLog($"  ⚠ Failed to unpack .msg: {ex.Message}", "warn")
             results.Add(New AutoPilotAttachmentInfo() With {
-                .OriginalFileName = Path.GetFileName(msgFilePath),
+                .OriginalFileName = sourceName,
                 .TempFilePath = msgFilePath,
                 .Extension = ".msg",
                 .SizeBytes = If(File.Exists(msgFilePath), New FileInfo(msgFilePath).Length, 0),
-                .StatusMessage = $"Saved (unpack failed: {ex.Message})"
+                .StatusMessage = $"Saved (unpack failed for {sourceDescription}: {ex.Message})"
             })
         Finally
             If msgItem IsNot Nothing Then Try : Marshal.ReleaseComObject(msgItem) : Catch : End Try
@@ -5119,8 +5263,14 @@ Partial Public Class ThisAddIn
             emlFilePath As String,
             tempDir As String,
             baseName As String,
-            depth As Integer) As List(Of AutoPilotAttachmentInfo)
+            depth As Integer,
+            Optional originalFileName As System.String = Nothing,
+            Optional sourceDisplayName As System.String = Nothing,
+            Optional logicalNames As System.Collections.Generic.ISet(Of System.String) = Nothing) As List(Of AutoPilotAttachmentInfo)
 
+        If logicalNames Is Nothing Then logicalNames = New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+        Dim sourceName As System.String = If(System.String.IsNullOrWhiteSpace(originalFileName), System.IO.Path.GetFileName(emlFilePath), originalFileName)
+        Dim sourceDescription As System.String = If(System.String.IsNullOrWhiteSpace(sourceDisplayName), sourceName, sourceDisplayName)
         Dim results As New List(Of AutoPilotAttachmentInfo)()
 
         Try
@@ -5134,13 +5284,7 @@ Partial Public Class ThisAddIn
                     ' Successfully opened as MailItem — use the same logic as .msg
                     Dim textContent = BuildEmbeddedMailText(emlMail)
                     Dim textFileName = baseName & "_content.txt"
-                    Dim textFilePath = Path.Combine(tempDir, textFileName)
-                    Dim counter = 1
-                    While File.Exists(textFilePath)
-                        textFilePath = Path.Combine(tempDir, baseName & $"_content_{counter}.txt")
-                        textFileName = Path.GetFileName(textFilePath)
-                        counter += 1
-                    End While
+                    Dim textFilePath As System.String = AllocateAttachmentCopyPath(tempDir, textFileName, logicalNames)
                     File.WriteAllText(textFilePath, textContent, Encoding.UTF8)
 
                     results.Add(New AutoPilotAttachmentInfo() With {
@@ -5149,10 +5293,10 @@ Partial Public Class ThisAddIn
                         .Extension = ".txt",
                         .SizeBytes = New FileInfo(textFilePath).Length,
                         .IsOverSizeLimit = False,
-                        .StatusMessage = $"Extracted from embedded mail: {Path.GetFileName(emlFilePath)}"
+                        .StatusMessage = $"Extracted from embedded mail: {sourceDescription}"
                     })
 
-                    ApDashboardLog($"  📧 Unpacked .eml via Outlook: {Path.GetFileName(emlFilePath)} → {textFileName}" &
+                    ApDashboardLog($"  📧 Unpacked .eml via Outlook: {sourceDescription} → {textFileName}" &
                                    If(emlMail.Attachments.Count > 0, $" + {emlMail.Attachments.Count} attachment(s)", ""), "info")
 
                     ' Extract nested attachments (same logic as .msg)
@@ -5165,15 +5309,11 @@ Partial Public Class ThisAddIn
                                     If Not nestedName.EndsWith(".msg", StringComparison.OrdinalIgnoreCase) Then
                                         nestedName = Path.GetFileNameWithoutExtension(nestedName) & ".msg"
                                     End If
-                                    Dim nestedPath = Path.Combine(tempDir, nestedName)
-                                    Dim nc = 1
-                                    While File.Exists(nestedPath)
-                                        nestedPath = Path.Combine(tempDir, Path.GetFileNameWithoutExtension(nestedName) & $"_{nc}.msg")
-                                        nc += 1
-                                    End While
+                                    Dim logicalNestedName As System.String = nestedName
+                                    Dim nestedPath As System.String = AllocateAttachmentCopyPath(tempDir, logicalNestedName, logicalNames)
                                     nestedAtt.SaveAsFile(nestedPath)
                                     results.AddRange(UnpackEmbeddedMailFile(nestedPath, tempDir,
-                                        Path.GetFileNameWithoutExtension(nestedPath), depth + 1))
+                                        Path.GetFileNameWithoutExtension(logicalNestedName), depth + 1, originalFileName:=logicalNestedName, sourceDisplayName:=sourceDescription & " > " & nestedName, logicalNames:=logicalNames))
                                 Catch ex As System.Exception
                                     results.Add(New AutoPilotAttachmentInfo() With {
                                         .OriginalFileName = If(nestedAtt.FileName, $"nested_{depth}_{j}"),
@@ -5191,20 +5331,17 @@ Partial Public Class ThisAddIn
                                     .IsOverSizeLimit = (nestedSize > _apConfig.MaxAttachmentBytes)
                                 }
                                 If Not nestedInfo.IsOverSizeLimit Then
-                                    Dim nestedSavePath = Path.Combine(tempDir, nestedFileName)
-                                    Dim nc = 1
-                                    While File.Exists(nestedSavePath)
-                                        nestedSavePath = Path.Combine(tempDir, Path.GetFileNameWithoutExtension(nestedFileName) & $"_{nc}" & Path.GetExtension(nestedFileName))
-                                        nc += 1
-                                    End While
+                                    Dim logicalNestedName As System.String = nestedFileName
+                                    Dim nestedSavePath As System.String = AllocateAttachmentCopyPath(tempDir, logicalNestedName, logicalNames)
                                     nestedAtt.SaveAsFile(nestedSavePath)
+                                    nestedInfo.OriginalFileName = logicalNestedName
                                     nestedInfo.TempFilePath = nestedSavePath
-                                    nestedInfo.StatusMessage = $"Saved (from embedded .eml: {Path.GetFileName(emlFilePath)})"
+                                    nestedInfo.StatusMessage = $"Saved (from embedded .eml: {sourceDescription}; original attachment: {nestedFileName})"
 
                                     If nestedInfo.Extension = ".msg" OrElse nestedInfo.Extension = ".eml" Then
                                         Try
                                             Dim subResults = UnpackEmbeddedMailFile(nestedSavePath, tempDir,
-                                                Path.GetFileNameWithoutExtension(nestedFileName), depth + 1)
+                                                Path.GetFileNameWithoutExtension(logicalNestedName), depth + 1, originalFileName:=logicalNestedName, sourceDisplayName:=sourceDescription & " > " & nestedFileName, logicalNames:=logicalNames)
                                             results.AddRange(subResults)
                                             Continue For
                                         Catch
@@ -5212,7 +5349,7 @@ Partial Public Class ThisAddIn
                                     ElseIf nestedInfo.Extension = ".zip" Then
                                         Try
                                             Dim subResults = UnpackZipFile(nestedSavePath, tempDir,
-                                                Path.GetFileNameWithoutExtension(nestedFileName), depth + 1)
+                                                Path.GetFileNameWithoutExtension(logicalNestedName), depth + 1, originalFileName:=logicalNestedName, sourceDisplayName:=sourceDescription & " > " & nestedFileName, logicalNames:=logicalNames)
                                             results.AddRange(subResults)
                                             Continue For
                                         Catch
@@ -5242,18 +5379,12 @@ Partial Public Class ThisAddIn
             End Try
 
             ' Fallback: parse .eml as plain text (RFC 2822)
-            ApDashboardLog($"  📧 Parsing .eml as text: {Path.GetFileName(emlFilePath)}", "step")
+            ApDashboardLog($"  📧 Parsing .eml as text: {sourceDescription}", "step")
             Dim emlContent = File.ReadAllText(emlFilePath, Encoding.UTF8)
-            Dim textResult = ParseEmlAsText(emlContent, Path.GetFileName(emlFilePath))
+            Dim textResult = ParseEmlAsText(emlContent, sourceDescription)
 
             Dim fallbackTextFileName = baseName & "_content.txt"
-            Dim fallbackTextFilePath = Path.Combine(tempDir, fallbackTextFileName)
-            Dim fallbackCounter = 1
-            While File.Exists(fallbackTextFilePath)
-                fallbackTextFilePath = Path.Combine(tempDir, baseName & $"_content_{fallbackCounter}.txt")
-                fallbackTextFileName = Path.GetFileName(fallbackTextFilePath)
-                fallbackCounter += 1
-            End While
+            Dim fallbackTextFilePath As System.String = AllocateAttachmentCopyPath(tempDir, fallbackTextFileName, logicalNames)
             File.WriteAllText(fallbackTextFilePath, textResult, Encoding.UTF8)
 
             results.Add(New AutoPilotAttachmentInfo() With {
@@ -5262,17 +5393,17 @@ Partial Public Class ThisAddIn
                 .Extension = ".txt",
                 .SizeBytes = New FileInfo(fallbackTextFilePath).Length,
                 .IsOverSizeLimit = False,
-                .StatusMessage = $"Extracted from .eml (text parse): {Path.GetFileName(emlFilePath)}"
+                .StatusMessage = $"Extracted from .eml (text parse): {sourceDescription}"
             })
 
         Catch ex As System.Exception
             ApDashboardLog($"  ⚠ Failed to unpack .eml: {ex.Message}", "warn")
             results.Add(New AutoPilotAttachmentInfo() With {
-                .OriginalFileName = Path.GetFileName(emlFilePath),
+                .OriginalFileName = sourceName,
                 .TempFilePath = emlFilePath,
                 .Extension = ".eml",
                 .SizeBytes = If(File.Exists(emlFilePath), New FileInfo(emlFilePath).Length, 0),
-                .StatusMessage = $"Saved (unpack failed: {ex.Message})"
+                .StatusMessage = $"Saved (unpack failed for {sourceDescription}: {ex.Message})"
             })
         End Try
 
@@ -5471,6 +5602,19 @@ Partial Public Class ThisAddIn
                         Return True
                     End If
                 Catch ex As System.Exception
+                End Try
+            Next
+        End If
+
+        ' Explicit protocol ownership already suppresses legacy delivery. It also
+        ' identifies work to retain after a rejected registration; it grants no delivery right.
+        If runState IsNot Nothing AndAlso runState.ExplicitArtifactProtocolOwnedPaths IsNot Nothing Then
+            For Each claimedPath As System.String In runState.ExplicitArtifactProtocolOwnedPaths
+                Try
+                    Dim fullPath = System.IO.Path.GetFullPath(claimedPath)
+                    If fullPath.StartsWith(tempRoot, System.StringComparison.OrdinalIgnoreCase) AndAlso System.IO.File.Exists(fullPath) Then Return True
+                Catch ex As System.Exception
+                    System.Diagnostics.Trace.TraceWarning("Cannot check retained work path: " & ex.Message)
                 End Try
             Next
         End If
@@ -5766,6 +5910,12 @@ Partial Public Class ThisAddIn
                 End Try
             Next
         End If
+
+        ' A current-turn forced declaration is fresh delivery evidence even for an
+        ' already surfaced input edited in place. Work on a copy, keeping host history
+        ' intact and retaining all protocol-owned/session/knowledge-source exclusions.
+        alreadySurfaced = New System.Collections.Generic.HashSet(Of System.String)(alreadySurfaced, System.StringComparer.OrdinalIgnoreCase)
+        alreadySurfaced.ExceptWith(forcedDeliverables)
 
         Dim originalPaths As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
         Dim processedLegacySourcePaths As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
@@ -7543,14 +7693,140 @@ Partial Public Class ThisAddIn
     '  Conversation Detection
     ' ═══════════════════════════════════════════════════════════════════════════
 
-    ''' <summary>
-    ''' Checks whether the incoming mail is part of an existing AutoPilot conversation,
-    ''' even if it is a second (or subsequent) user reply to a previous AutoPilot response.
-    ''' This fixes the issue where a user replies to an already-responded-to mail and the
-    ''' AutoPilot does not detect it as part of an active conversation.
-    ''' </summary>
-    ''' <param name="mi">The incoming MailItem to check.</param>
-    ''' <returns>True if this mail is part of an AutoPilot-managed conversation.</returns>
+    Private Function IsExplicitAutoPilotResultsRequest(body As System.String) As System.Boolean
+        Dim normalized = If(body, "").Replace(Microsoft.VisualBasic.vbCrLf, Microsoft.VisualBasic.vbLf).Replace(Microsoft.VisualBasic.vbCr, Microsoft.VisualBasic.vbLf)
+        For Each rawLine In normalized.Split(Microsoft.VisualBasic.ControlChars.Lf)
+            Dim line = rawLine.Trim()
+            If line.Length = 0 Then Continue For
+            Return System.String.Equals(line, "results", System.StringComparison.OrdinalIgnoreCase) OrElse System.String.Equals(line, "#results", System.StringComparison.OrdinalIgnoreCase)
+        Next
+        Return False
+    End Function
+
+    Private Function BuildAutoPilotResultAccessHint(available As System.Boolean) As System.String
+        Return If(available,
+            "Reply in this conversation with `{{OUTCOME_RESULTS_COMMAND}}` as the first line. I will send the saved status report and any results that pass the delivery checks, without rerunning the agent work. Save the reply and attachments before the retention period ends.",
+            "Save this reply and any attachments as your current record. I have no accessible checkpoint for this run. For new processing, send a new request with the source files and identify the unfinished steps. You may explicitly request the answer in the message body.")
+    End Function
+
+    Private Async Function BuildAutoPilotOutcomeReportAsync(
+        state As Global.SharedLibrary.Agents.ToolCallSequencing.ToolingRunState, answer As System.String,
+        names As System.Collections.Generic.IEnumerable(Of System.String), available As System.Boolean,
+        workflowId As System.String, targetLanguage As System.String, ct As System.Threading.CancellationToken,
+        Optional additionalNotice As System.String = "", Optional readOnlyRetrieval As System.Boolean = False) As System.Threading.Tasks.Task(Of System.String)
+        Dim nextAction = BuildAutoPilotResultAccessHint(available)
+        Dim canRetry = available AndAlso Global.SharedLibrary.Agents.WorkflowContinuity.CanOfferContinuationRetry(workflowId)
+        If canRetry Then nextAction &= System.Environment.NewLine & System.Environment.NewLine &
+            "To continue the unfinished agent work instead, reply with `{{OUTCOME_RETRY_COMMAND}}` as the first line. I will resume from the checkpoint and reuse suitable verified results."
+        Dim report = Global.SharedLibrary.Agents.WorkflowContinuity.BuildOutcomeReport(state, answer, names, nextAction, additionalNotice, readOnlyRetrieval)
+        If available Then report.Literals.Add("{{OUTCOME_RESULTS_COMMAND}}", "results")
+        If canRetry Then report.Literals.Add("{{OUTCOME_RETRY_COMMAND}}", "retry")
+        Try
+            If System.String.IsNullOrWhiteSpace(targetLanguage) Then Throw New System.IO.InvalidDataException("The run has no explicit response-language contract.")
+            Dim localized = Await LocalizeHostMessageIfNeededAsync(report.Template, targetLanguage, _apUseSecondApi, True, ct, strictTranslation:=True)
+            Return report.Render(localized)
+        Catch ex As System.OperationCanceledException
+            Throw
+        Catch ex As System.Exception
+            ' Disclosure belongs in the response as well as the detail log. Keep every
+            ' literal and the original agent answer; never pretend translation succeeded.
+            ApDashboardLog("Outcome-report translation failed; explicit English fallback: " & ex.ToString(), "warn")
+            Return "The host could not translate this status report. The host text below uses English; the agent answer keeps its original language." &
+                System.Environment.NewLine & System.Environment.NewLine & report.Render(report.Template)
+        End Try
+    End Function
+
+    Private Function TryWriteAutoPilotOutcomeReport(directory As System.String, report As System.String) As System.String
+        Try
+            Dim reportDirectory = System.IO.Path.Combine(directory, "host-status-" & System.Guid.NewGuid().ToString("N"))
+            System.IO.Directory.CreateDirectory(reportDirectory)
+            Dim path = System.IO.Path.Combine(reportDirectory, "Status.md")
+            System.IO.File.WriteAllText(path, report, New System.Text.UTF8Encoding(False))
+            Return path
+        Catch ex As System.Exception
+            ApDashboardLog("Cannot save the Markdown status attachment; the reply body still contains the report: " & ex.ToString(), "warn")
+            Return ""
+        End Try
+    End Function
+
+    Private Async Function SendAutoPilotRetainedOutcomeAsync(
+        mail As Microsoft.Office.Interop.Outlook.MailItem, info As AutoPilotMailInfo,
+        workflowId As System.String, continuationKey As System.String, ct As System.Threading.CancellationToken,
+        onSubmitted As System.Action) As System.Threading.Tasks.Task
+        Dim snapshot As Global.SharedLibrary.Agents.ToolCallSequencing.ToolingRunContinuationSnapshot = Nothing
+        Dim hasSnapshot = Global.SharedLibrary.Agents.WorkflowContinuity.TryGetResultRecoverySnapshot(workflowId, continuationKey, "Outlook", snapshot)
+        Dim state As Global.SharedLibrary.Agents.ToolCallSequencing.ToolingRunState = Nothing
+        Dim language As System.String = ""
+        Dim answer As System.String = ""
+        Dim paths As New System.Collections.Generic.List(Of System.String)()
+        Dim temp = System.IO.Path.Combine(System.IO.Path.GetTempPath(), AP_TempPrefix & System.Guid.NewGuid().ToString("N"))
+        Try
+            ct.ThrowIfCancellationRequested()
+            If hasSnapshot Then
+                state = New Global.SharedLibrary.Agents.ToolCallSequencing.ToolingRunState()
+                state.ApplyContinuationSnapshot(snapshot)
+                language = state.UserLanguage
+                answer = StripInkyMemoryBlock(If(snapshot.LastUserFacingResponse, ""))
+                ' Restore only the exact hash-verified revision, never a file discovered
+                ' by name or directory scanning. Keep the original display name.
+                Dim displayNames As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.OrdinalIgnoreCase)
+                For Each artifact In state.RegisteredDeliverableArtifacts
+                    If artifact Is Nothing Then Continue For
+                    Dim name = System.IO.Path.GetFileName(If(artifact.SessionPath, ""))
+                    If Not Global.SharedLibrary.Agents.ArtifactDelivery.IsVerifiedArtifactRevisionCurrent(artifact) AndAlso
+                       Not System.String.IsNullOrWhiteSpace(artifact.PreservedRevisionPath) AndAlso
+                       Not System.String.IsNullOrWhiteSpace(artifact.VerifiedContentSha256) Then
+                        Dim retainedPath = artifact.PreservedRevisionPath
+                        Dim originalPath = artifact.SessionPath
+                        artifact.SessionPath = retainedPath
+                        If Not Global.SharedLibrary.Agents.ArtifactDelivery.IsVerifiedArtifactRevisionCurrent(artifact) Then artifact.SessionPath = originalPath
+                    End If
+                    If Not System.String.IsNullOrWhiteSpace(artifact.SessionPath) AndAlso name <> "" Then displayNames(artifact.SessionPath) = name
+                Next
+                Try
+                    Dim qualified = Global.SharedLibrary.Agents.ArtifactDelivery.ResolvePathsForDelivery(state)
+                    For Each source In qualified
+                        ct.ThrowIfCancellationRequested()
+                        Dim name As System.String = Nothing
+                        If Not displayNames.TryGetValue(source, name) Then name = System.IO.Path.GetFileName(source)
+                        Dim directory = System.IO.Path.Combine(temp, System.Guid.NewGuid().ToString("N"))
+                        System.IO.Directory.CreateDirectory(directory)
+                        Dim target = System.IO.Path.Combine(directory, name)
+                        Dim evidence = state.RegisteredDeliverableArtifacts.FirstOrDefault(Function(artifact) artifact IsNot Nothing AndAlso
+                            System.String.Equals(artifact.SessionPath, source, System.StringComparison.OrdinalIgnoreCase) AndAlso
+                            artifact.LifecycleState = Global.SharedLibrary.Agents.ArtifactLifecycleState.Final AndAlso artifact.IsFinalDeliverable)
+                        If evidence Is Nothing OrElse Not System.Text.RegularExpressions.Regex.IsMatch(If(evidence.VerifiedContentSha256, ""), "\A[0-9A-Fa-f]{64}\z") Then
+                            Throw New System.IO.InvalidDataException("The retained result has no verified content hash; read-only recovery will not infer one.")
+                        End If
+                        System.IO.File.Copy(source, target, False)
+                        If Not System.String.Equals(evidence.VerifiedContentSha256, GetSha256Hex(target), System.StringComparison.OrdinalIgnoreCase) Then
+                            Throw New System.IO.IOException("The retained output no longer matches its verified revision.")
+                        End If
+                        paths.Add(target)
+                    Next
+                Catch ex As System.OperationCanceledException
+                    Throw
+                Catch ex As System.Exception
+                    paths.Clear()
+                    ApDashboardLog("Read-only outcome delivery retained the strict artifact checks: " & ex.ToString(), "warn")
+                End Try
+            End If
+            Dim report = Await BuildAutoPilotOutcomeReportAsync(state, answer,
+                paths.Select(Function(path) System.IO.Path.GetFileName(path)), hasSnapshot, workflowId, language, ct, readOnlyRetrieval:=hasSnapshot)
+            Dim attachment = TryWriteAutoPilotOutcomeReport(temp, report)
+            If attachment <> "" Then paths.Add(attachment)
+            ct.ThrowIfCancellationRequested()
+            Await SwitchToUi(Sub() SendReplyToSender(mail, report, paths, tagAsAutoReply:=True, onPrimarySubmitted:=onSubmitted))
+            ApDashboardLog("Submitted retained outcome without agent execution or business-tool calls to " & info.SenderEmail, "info")
+        Finally
+            Try
+                If System.IO.Directory.Exists(temp) Then System.IO.Directory.Delete(temp, True)
+            Catch ex As System.Exception
+                System.Diagnostics.Trace.TraceWarning("Retained-outcome staging cleanup: " & ex.Message)
+            End Try
+        End Try
+    End Function
+
     Private Function IsExplicitWorkflowContinuationRetry(body As System.String) As System.Boolean
         Dim normalized As System.String = If(body, System.String.Empty).Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
         For Each rawLine As System.String In normalized.Split(ControlChars.Lf)
@@ -7601,6 +7877,14 @@ Partial Public Class ThisAddIn
         Return SharedLibrary.Agents.WorkflowContinuity.PrependContinuationNotice(text, hint)
     End Function
 
+    ''' <summary>
+    ''' Checks whether the incoming mail is part of an existing AutoPilot conversation,
+    ''' even if it is a second (or subsequent) user reply to a previous AutoPilot response.
+    ''' This fixes the issue where a user replies to an already-responded-to mail and the
+    ''' AutoPilot does not detect it as part of an active conversation.
+    ''' </summary>
+    ''' <param name="mi">The incoming MailItem to check.</param>
+    ''' <returns>True if this mail is part of an AutoPilot-managed conversation.</returns>
     Private Function IsPartOfAutoPilotConversation(mi As MailItem) As Boolean
         Try
             ' 1. Check the incoming mail itself for the header (any value: "true" or "holding")
@@ -8159,27 +8443,11 @@ Partial Public Class ThisAddIn
     End Function
 
     Private Function BuildAutoPilotDeliveryFailureNotice(userLanguage As System.String, submitted As System.Boolean) As System.String
-        Dim language As System.String = If(userLanguage, System.String.Empty).Trim().ToLowerInvariant().Split("-"c, "_"c)(0)
-        Dim first As System.String
-        Dim second As System.String
-        Select Case language
-            Case "de"
-                first = If(submitted, "Eine Antwort auf Ihre Anfrage wurde zum Versand übergeben. Bei den verbleibenden Zustellungsschritten ist jedoch ein interner Fehler aufgetreten.", "Ein interner Fehler hat verhindert, dass ich Ihre Anfrage sicher abschliessen konnte.")
-                second = If(submitted, "Daher können angeforderte Ergebnisdateien fehlen. Bitte senden Sie Ihre Anfrage erneut oder kontaktieren Sie den Betreiber, wenn Sie das vollständige Ergebnis benötigen.", "Es wurden keine unvollständigen oder ungeprüften Ergebnisdateien versandt. Bitte senden Sie Ihre Anfrage erneut oder kontaktieren Sie den Betreiber, falls das Problem weiterhin besteht.")
-            Case "fr"
-                first = If(submitted, "Une réponse à votre demande a été soumise à l’envoi, mais une erreur interne est survenue pendant les étapes de livraison restantes.", "Une erreur interne a empêché de terminer votre demande de manière sûre.")
-                second = If(submitted, "Certains fichiers demandés peuvent donc manquer. Veuillez renvoyer votre demande ou contacter l’opérateur pour obtenir le résultat complet.", "Aucun fichier de résultat incomplet ou non validé n’a été envoyé. Veuillez renvoyer votre demande ou contacter l’opérateur si le problème persiste.")
-            Case "it"
-                first = If(submitted, "Una risposta alla richiesta è stata inoltrata per l’invio, ma si è verificato un errore interno durante le restanti fasi di consegna.", "Un errore interno ha impedito di completare la richiesta in modo sicuro.")
-                second = If(submitted, "Potrebbero quindi mancare alcuni file richiesti. Invia nuovamente la richiesta o contatta il gestore per ottenere il risultato completo.", "Non sono stati inviati file di risultato incompleti o non verificati. Invia nuovamente la richiesta o contatta il gestore se il problema persiste.")
-            Case "es"
-                first = If(submitted, "Se ha enviado una respuesta a su solicitud, pero se produjo un error interno durante los pasos restantes de la entrega.", "Un error interno ha impedido completar su solicitud de forma segura.")
-                second = If(submitted, "Por lo tanto, es posible que falten algunos archivos solicitados. Vuelva a enviar su solicitud o póngase en contacto con el operador si necesita los resultados completos.", "No se han enviado archivos de resultado incompletos ni sin validar. Vuelva a enviar su solicitud o contacte al operador si el problema persiste.")
-            Case Else
-                first = If(submitted, "A reply to your request was submitted, but an internal error occurred while completing the remaining delivery steps.", "I'm sorry, but an internal error prevented me from completing your request safely.")
-                second = If(submitted, "One or more requested result files may therefore be missing. Please resend your request or contact the operator if you need the complete result set.", "No incomplete or unvalidated result files have been sent. Please resend your request or contact the operator if the problem persists.")
-        End Select
-        Return first & System.Environment.NewLine & System.Environment.NewLine & second & System.Environment.NewLine & System.Environment.NewLine & "— " & AN6
+        Dim first = If(submitted,
+            "I submitted a reply to Outlook. An error interrupted the remaining delivery steps, so files may be missing.",
+            "A technical error stopped me from completing your request.")
+        Return first & System.Environment.NewLine & System.Environment.NewLine & "I do not send unchecked working files as finished results." &
+            System.Environment.NewLine & System.Environment.NewLine & "— " & AN6
     End Function
 
     ''' <summary>
@@ -8250,9 +8518,9 @@ Partial Public Class ThisAddIn
         End If
 
         ' ── Closing ──
-        If String.IsNullOrWhiteSpace(redInkSuggestion) AndAlso String.IsNullOrWhiteSpace(internetSuggestion) Then
-            sb.AppendLine("Please try again, rephrase your request, or contact the operator for assistance.")
-        End If
+        ' A model/host/tool failure does not imply the request was badly worded.
+        ' This host-owned recovery option is present even if suggestion models fail.
+        sb.AppendLine("You can send the same request again if processing is temporarily unavailable. If the problem persists, contact the Inky operator for assistance. You do not need to rephrase an already clear request.")
 
         sb.Append($"— {AN6}")
         Return sb.ToString()
@@ -8874,7 +9142,7 @@ Partial Public Class ThisAddIn
             Dim previousSessionStagingRoot As String = SharedLibrary.Agents.PathPolicy.SessionStagingRoot
 
             Dim response As String
-
+            Dim coachingArchivePathForVoicemail As System.String = System.String.Empty
             Dim previousMaxToolIterations = INI_ToolingMaximumIterations
             INI_ToolingMaximumIterations = AP_MaxToolIterations
 
@@ -8960,6 +9228,7 @@ Partial Public Class ThisAddIn
                         senderEmail:=recipientEmail, source:="autopilot_voicemail", messageId:=entryId,
                         workflowId:=toolingWorkflowId)
                     Dim coachingArchivePath As System.String = BuildAutoPilotToolingLogArchivePath(recipientName, voicemailMailInfo.Subject, originalRequest)
+                    coachingArchivePathForVoicemail = If(coachingArchivePath, System.String.Empty)
                     Try
                         response = Await ExecuteToolingLoop(
                             systemPrompt, userPrompt,
@@ -9030,6 +9299,8 @@ Partial Public Class ThisAddIn
                             "",
                             $"This notice relates to a voicemail received on {mailInfo.ReceivedTime:yyyy-MM-dd HH:mm} from caller {rawCallerId}.")
                     End Sub)
+                RecordAutoPilotPromptCoachingDeliveredOutcome(coachingArchivePathForVoicemail, True,
+                    New System.String() {"new_request", "review_with_operator"}, errorMessage)
                 MarkAutoPilotQueueDeliveryCommitted(entryId)
                 Dim voicemailProcessingFailureSourceFinalized As Boolean = Await SwitchToUi(Function() TryTagOriginalMailAsProcessed(mi))
                 If voicemailProcessingFailureSourceFinalized Then
@@ -9085,6 +9356,13 @@ Partial Public Class ThisAddIn
                                                     sourcesHtml, voicemailNote)
                              End Sub)
             voicemailDeliverableHandoffCompleted = True
+            ' Preserve a host-observed tooling block even when the LLM supplied
+            ' nonempty prose. This is an incomplete outcome, not a user wording flaw.
+            ' The second review still checks whether the mailed text already covered
+            ' the proposed action before any follow-up can be submitted.
+            RecordAutoPilotPromptCoachingDeliveredOutcome(coachingArchivePathForVoicemail,
+                _lastCompletedToolingWasBlocked,
+                System.Array.Empty(Of System.String)(), response)
             MarkAutoPilotQueueDeliveryCommitted(entryId)
 
             Dim voicemailSourceFinalized As Boolean = Await SwitchToUi(Function() TryTagOriginalMailAsProcessed(mi))

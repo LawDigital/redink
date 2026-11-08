@@ -312,20 +312,32 @@ The analyser recognises Red Ink SharedLogger records, incrementally scans growin
 
 ## 8. Data retention and controlling growth
 
-The server and the clients have different storage locations and policies.
+The server keeps licence evidence separately from function statistics.
 
-**Server database:** In **Settings → Data retention and cleaning**, choose an earliest retention date (`YYYY-MM-DD`), a rolling period in months (`keep_months`) or both; the *newer* floor applies. Preview the affected counts and explicitly confirm before deleting. `auto_cleanup` can enforce the policy on scheduled scans. Inbound offline reports **older than the effective cutoff** are acknowledged as discarded but not stored, preventing old events from reappearing after cleaning. The boundary month is evaluated using actual client dates where available; do not assume a monthly-only marker proves activity on or after the boundary day.
+**Function statistics:** `log_storage.statistics_months` enforces a rolling calendar-date window, twelve months by default. Daily maintenance removes expired `log_events`; imports reject older function events so offline replay cannot restore them. This cleanup never deletes monthly licence identities, explicit licence load days, host membership, billing revisions or report snapshots. SQLite reuses freed pages; its physical file need not shrink immediately. This bounds history, not the number of operations within the retained window.
 
-**Client marker files:** A reporter retains unacknowledged markers. The server cannot erase files on each employee's PC. Configure endpoint availability and retries; do not promise unlimited offline retention and bounded storage simultaneously.
+**Log files:** Daily maintenance packs fully imported closed segments older than `log_storage.online_months` (default 3, current month included) into one verified `redink-YYYY-MM.zip` per month. `log_storage.archive_months` expires verified monthly bundles after twelve calendar months by default. The server first captures the source, validates complete import, commits and verifies the ZIP, and only then removes the captured original. On failures it retains the source or a named `.archive-hold-...` file. The next maintenance recovers an interrupted capture only when it can restore the original name without overwriting a writer. Settings shows held files and conflicts for review. During archival, evidence before the explicitly configured statistics floor may already have expired; the archive still requires a complete error-free import cursor, validates every source record and verifies every byte in the ZIP. Newer records require their exact SQLite evidence.
 
-**SharedLogger logs:** Monthly segmentation limits the size/time scope of individual files but not cumulative disk usage. Use the CLI `archive-logs` **preview** to identify fully imported closed monthly files, then archive only after review. An optional `--apply` saves and verifies the archive before removing eligible source files. The current month, legacy unsplit logs and incomplete/unimported segments are held. Example:
+In **Settings → log_storage**, configure:
 
-```powershell
-.\RedInkUsageServer.exe archive-logs --data-dir "C:\ProgramData\RedInkUsageServer" --keep-months 6 --destination "D:\RedInkLogArchive"
-# Review the output before repeating the command with --apply.
+```toml
+[log_storage]
+statistics_months = 12
+archive_enabled = true
+online_months = 3
+archive_directory = ""
+archive_months = 12
 ```
 
-Archive **before** database retention deletes evidence required to verify an archive. Protect exported archives: they are not automatically encrypted. Set a separate expiry for backups and archived ZIPs under your organisation's records policy. Never delete old client data just because the usage chart already includes it.
+An empty archive directory selects `data/log-archives`. It must be outside every import and publishing root. If an import root includes the entire data directory, select a protected folder outside that root. Save applies these fields without restarting. The first scan after startup or a policy change runs maintenance; later runs occur daily in the server's local calendar. **Function statistics and log storage** displays the last result, retained-for-review count and unsplit legacy-file count. Refresh this status after the scan. The existing `archive-logs` CLI remains available for previews and explicit apply; it now also writes monthly bundles. Its default strict mode refuses evidence already pruned from SQLite.
+
+Current writable months, unimported/incomplete/malformed sources and conflicting captures stay in place. Offline clients may deliver older segments later; a later scan imports them and maintenance handles them. Unsplit legacy files have no reliable closed-month boundary: the server imports them and reports their count but does not automatically rename, truncate or delete them. Retire them only after all writers have migrated, verify their import and backup, then move them outside the import roots. Existing per-file ZIP archives from older releases require a separate expiry policy; automatic expiry covers the new verified monthly-bundle format only. Archives are not encrypted. Protect archives and backups separately and test restoration. No finite policy can guarantee a hard disk quota while retaining indefinitely unavailable or invalid sources without loss.
+
+**Licence history:** Keep `retention.cutoff_date = ""`, `retention.keep_months = 0` and `retention.auto_cleanup = false` to retain licence figures indefinitely. Existing installations keep their existing explicit licence-retention settings; the upgrade does not silently undo an administrator's policy. The older **Data retention and cleaning** controls can still explicitly remove licence evidence and impose an ingestion floor. Review their preview before use. Function-log maintenance does not enable or change that licence policy.
+
+**Client marker files:** A reporter retains unacknowledged markers. The server cannot erase files on each employee's PC. Configure endpoint availability and retries.
+
+**Large source folders:** Import scans persist a separate round-robin file position per source and import kind. The next scan continues past the last examined file and wraps after the end. The default 10,000-file work budget no longer permanently hides later files. A limit warning means deferred work, not discarded records. Existing source-byte cursors, event identities and idempotent replays remain unchanged. The scanner enumerates the inventory to establish deterministic order; the file budget bounds processing, not directory listing.
 
 ## 9. Publishing `redink.ini` and companion files
 
@@ -443,3 +455,14 @@ From the unpacked source tree run
 contains application sources, build configuration, tests, included assets
 and documentation. It does **not** contain the running database, tokens,
 server.toml, certificates, signing keys or generated EXE distributions.
+
+### Transport diagnostics (1.4.9)
+
+The former generic “Transport reported a connection or request-processing error” could describe different conditions. New records report `category`, exception class, nested cause class, numeric OS error, symbolic OpenSSL reason and code locations where available. They never log request URLs, tokens, source lines, exception text or local variables.
+
+- `http-on-https-port`: use `https://` for this port; inspect client, proxy and health-check URLs.
+- `tls-handshake-aborted`: inspect the symbolic reason. For example, `TLSV1_ALERT_UNKNOWN_CA` means the peer rejected certificate trust. Check the client trust store, server hostname and full certificate chain. A probe that abandons negotiation can also cause a handshake notice.
+- `request-processing-error`: the exception class and code locations identify the failing handler/transport stage. Genuine processing failures retain their error severity.
+- `client-disconnected`: known reset/broken-pipe/timeout conditions use DEBUG. The server does not reinterpret these as successful requests.
+
+For each distinct diagnostic signature the server emits the first occurrence, then at most one per minute with `suppressed_since_previous`. This throttle bounds repeated noise without exposing sensitive messages; the existing 2 MiB/five-backup operational log rotation remains. Certificate validation, TLS 1.2 minimum and refusal to fall back to HTTP remain unchanged. A historical generic line alone cannot establish which condition occurred. Reproduce the issue after upgrade and inspect the new category/reason.

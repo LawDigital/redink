@@ -2445,13 +2445,14 @@ Namespace SharedLibrary
                 Else
                     Dim stringValue As String = rawValue.ToString()
                     Dim useMultiline As Boolean =
-                        TypeOf rawValue Is String AndAlso
+                        Not param.MaskInput AndAlso TypeOf rawValue Is String AndAlso
                         (param.Multiline OrElse
                          stringValue.Contains(vbCr) OrElse
                          stringValue.Contains(vbLf))
 
                     Dim txt As New TextBox() With {
                         .Text = stringValue,
+                        .UseSystemPasswordChar = param.MaskInput,
                         .Anchor = If(useMultiline,
                                      AnchorStyles.Top Or AnchorStyles.Left Or AnchorStyles.Right,
                                      AnchorStyles.Left Or AnchorStyles.Right),
@@ -3083,6 +3084,7 @@ Namespace SharedLibrary
         ''' including the UI control created to edit the parameter.
         ''' </summary>
         Public Class InputParameter
+            Public Property MaskInput As System.Boolean
             ''' <summary>Optional explanatory tooltip for both the label and its input.</summary>
             Public Property ToolTipText As System.String
             ''' <summary>

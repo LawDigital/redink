@@ -258,6 +258,8 @@ LIVE_FIELDS = {
                 'recursive': 'recursive', 'scan_seconds': 'scan_seconds',
                 'maximum_file_bytes': 'maximum_file_bytes',
                 'maximum_files_per_scan': 'maximum_files_per_scan'},
+    'log_storage': {key: 'log_storage_' + key for key in (
+        'statistics_months', 'archive_enabled', 'online_months', 'archive_directory', 'archive_months')},
     'publishing': {'source_directory': 'publishing_source_directory'},
     'billing': {'unit_price': 'unit_price', 'currency': 'currency'},
     'retention': {'cutoff_date': 'cutoff_date', 'keep_months': 'keep_months',

@@ -572,6 +572,11 @@ Public Class Ribbon1
         Globals.ThisAddIn.OpenCollectionAnalyzer()
     End Sub
 
+    Private Sub RI_TabularReview_Click(sender As System.Object, e As Microsoft.Office.Tools.Ribbon.RibbonControlEventArgs) Handles RI_TabularReview.Click
+        Global.SharedLibrary.SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "TabularReview_Excel invoked")
+        Globals.ThisAddIn.OpenTabularReview()
+    End Sub
+
     Private Sub RI_Renamer_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Renamer.Click
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Renamer_Excel invoked")
         Globals.ThisAddIn.RenameDocumentsWithAi()

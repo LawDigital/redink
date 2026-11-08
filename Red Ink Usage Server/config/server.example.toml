@@ -52,6 +52,17 @@ keep_months = 0
 # Optional scheduled cleanup on scans (false = manual cleanup from Settings).
 auto_cleanup = false
 
+[log_storage]
+# Independent of licence retention. Always bound function-statistics history.
+statistics_months = 12
+# Archive fully imported closed months once per day; retain three online months.
+archive_enabled = true
+online_months = 3
+# Empty selects log-archives below the server data directory (outside import roots).
+archive_directory = ""
+# Expire verified monthly archives after twelve calendar months (current included).
+archive_months = 12
+
 [billing]
 # Leave unit_price empty for a usage-only report. No tax is calculated.
 unit_price = ""

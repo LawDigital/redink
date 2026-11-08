@@ -299,15 +299,17 @@ Partial Public Class ThisAddIn
 
             End If
 
-            ' ── Call LLM (or SSE transport for MCP servers) ──────────────
+            ' ── Call LLM or the configured MCP transport ──────────────
             Dim llmresult As String
 
-            If INI_Endpoint_2.StartsWith(SharedMethods.MCP_SSE_PREFIX, StringComparison.OrdinalIgnoreCase) Then
-                Dim sseBase = INI_Endpoint_2.Substring(SharedMethods.MCP_SSE_PREFIX.Length)
+            Dim streamable As System.Boolean = INI_Endpoint_2.StartsWith(SharedMethods.MCP_STREAMABLE_PREFIX, System.StringComparison.OrdinalIgnoreCase)
+            If streamable OrElse INI_Endpoint_2.StartsWith(SharedMethods.MCP_SSE_PREFIX, System.StringComparison.OrdinalIgnoreCase) Then
+                Dim prefix As System.String = If(streamable, SharedMethods.MCP_STREAMABLE_PREFIX, SharedMethods.MCP_SSE_PREFIX)
+                Dim mcpUrl As System.String = INI_Endpoint_2.Substring(prefix.Length)
                 Dim resolvedHeaderB = INI_HeaderB_2.Replace("{apikey}", _context.DecodedAPI_2)
 
-                Dim sseRequestBody As String = INI_APICall_2
-                sseRequestBody = sseRequestBody.Replace("{promptuser}", SLib.CleanString(SelectedText))
+                Dim mcpRequestBody As String = INI_APICall_2
+                mcpRequestBody = mcpRequestBody.Replace("{promptuser}", SLib.CleanString(SelectedText))
 
                 Dim splash As SharedLibrary.SharedLibrary.SplashScreenCountDown = Nothing
 
@@ -320,20 +322,21 @@ Partial Public Class ThisAddIn
                         Return
                     End Try
 
-                    llmresult = Await SharedMethods.ExecuteMCPSSEToolCall(
-                        _context,
-                        sseBase,
-                        sseRequestBody,
-                        INI_HeaderA_2,
-                        resolvedHeaderB,
-                        CInt(Math.Min(INI_Timeout_2, Integer.MaxValue)))
+                    Dim timeoutMs As System.Int32 = CInt(Math.Min(INI_Timeout_2, Integer.MaxValue))
+                    If streamable Then
+                        llmresult = Await SharedMethods.ExecuteMCPStreamableToolCall(
+                            mcpUrl, mcpRequestBody, INI_HeaderA_2, resolvedHeaderB, timeoutMs)
+                    Else
+                        llmresult = Await SharedMethods.ExecuteMCPSSEToolCall(
+                            _context, mcpUrl, mcpRequestBody, INI_HeaderA_2, resolvedHeaderB, timeoutMs)
+                    End If
                     splash.ThrowIfFailed()
                 Catch ex As Global.SharedLibrary.SharedLibrary.SplashScreenCountDown.SplashDisplayException
                     ' Technical details are already in the shared diagnostic log.
                     ShowCustomMessageBox(ex.Message)
                     Return
                 Catch ex As System.Exception
-                    ShowCustomMessageBox($"SSE tool call failed: {ex.Message}")
+                    ShowCustomMessageBox($"MCP tool call failed: {ex.Message}")
                     Return
                 Finally
                     If splash IsNot Nothing Then

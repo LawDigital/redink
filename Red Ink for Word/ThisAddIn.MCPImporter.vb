@@ -100,8 +100,6 @@ Partial Public Class ThisAddIn
         End Sub
     End Class
 
-    ''' <summary>Active SSE session, Nothing when using Streamable HTTP transport.</summary>
-    Private _mcpSseSession As MCPSSESession = Nothing
 
     ' ─────────────────────────────────────────────────────────────────────────
     '  Entry point – called from ribbon / menu
@@ -112,6 +110,7 @@ Partial Public Class ThisAddIn
     ''' discovers server tools and writes generated INI sections to a user-selected file.
     ''' </summary>
     Public Async Sub ImportMCPServer()
+        Dim authParams As MCPAuthInfo = Nothing
         Try
             ' ── 1. Collect MCP endpoint URL ──────────────────────────────────
             Dim mcpUrl As String = ShowCustomInputBox(
@@ -119,10 +118,16 @@ Partial Public Class ThisAddIn
                 $"{AN} MCP Import", True).Trim()
 
             If String.IsNullOrWhiteSpace(mcpUrl) Then Return
-            mcpUrl = mcpUrl.TrimEnd("/"c)
+            Dim endpointUri As System.Uri = Nothing
+            If Not System.Uri.TryCreate(mcpUrl, System.UriKind.Absolute, endpointUri) OrElse
+               (endpointUri.Scheme <> System.Uri.UriSchemeHttp AndAlso endpointUri.Scheme <> System.Uri.UriSchemeHttps) Then
+                ShowCustomMessageBox("Enter an absolute HTTP or HTTPS endpoint URL.", $"{AN} MCP Import")
+                Return
+            End If
 
             ' ── 2. Initialize + discover tools; if needed, bootstrap OAuth and retry ──
-            Dim authParams As New MCPAuthInfo()
+            authParams = CollectMCPAuthInfo()
+            If authParams Is Nothing Then Return
 
             Dim tools As List(Of MCPToolInfo) = Nothing
             Dim serverName As String = ""
@@ -143,18 +148,17 @@ Partial Public Class ThisAddIn
             Catch ex As Exception
                 firstDiscoveryError = ex
             Finally
-                If _mcpSseSession IsNot Nothing Then
-                    _mcpSseSession.Dispose()
-                    _mcpSseSession = Nothing
+                If authParams?.SseSession IsNot Nothing Then
+                    authParams.SseSession.Dispose()
+                    authParams.SseSession = Nothing
                 End If
             End Try
 
             If firstDiscoveryError IsNot Nothing Then
                 Dim httpError As SLib.MCPHttpRequestException = TryCast(firstDiscoveryError, SLib.MCPHttpRequestException)
-                If httpError IsNot Nothing AndAlso
-                   httpError.ResponseStatusCode <> System.Net.HttpStatusCode.Unauthorized AndAlso
-                   httpError.ResponseStatusCode <> System.Net.HttpStatusCode.Forbidden Then
-                    ShowCustomMessageBox("Failed to query the MCP server:" & vbCrLf & vbCrLf & firstDiscoveryError.Message, $"{AN} MCP Import")
+                If authParams.LiveAPIKey.Length > 0 OrElse Not IsMCPAccessDenied(httpError) Then
+                    Dim hint As System.String = If(IsMCPAccessDenied(httpError), " Check the API key, header name and access rights.", "")
+                    Await SwitchToUi(Sub() ShowCustomMessageBox("Failed to query the MCP server:" & vbCrLf & firstDiscoveryError.Message & hint, $"{AN} MCP Import"))
                     Return
                 End If
                 Dim discoveredOAuth As SLib.MCPProtectedResourceOAuthResult = Nothing
@@ -163,7 +167,7 @@ Partial Public Class ThisAddIn
                 SLib.SetMCPOAuthDebugEnabled(INI_APIDebug)
 
                 Try
-                    discoveredOAuth = Await SLib.AcquireMCPProtectedResourceOAuthAsync(mcpUrl).ConfigureAwait(False)
+                    discoveredOAuth = Await SLib.AcquireMCPProtectedResourceOAuthAsync(authParams.DiscoveryEndpoint).ConfigureAwait(False)
                 Catch ex As Exception
                     oauthBootstrapError = ex
                 End Try
@@ -221,9 +225,9 @@ Partial Public Class ThisAddIn
                 Catch ex As Exception
                     secondDiscoveryError = ex
                 Finally
-                    If _mcpSseSession IsNot Nothing Then
-                        _mcpSseSession.Dispose()
-                        _mcpSseSession = Nothing
+                    If authParams?.SseSession IsNot Nothing Then
+                        authParams.SseSession.Dispose()
+                        authParams.SseSession = Nothing
                     End If
                 End Try
 
@@ -285,7 +289,15 @@ Partial Public Class ThisAddIn
 
             ' ── 5. Detect response key ───────────────────────────────────────
             Dim detectedResponseKey As String = "result.content[0].text"
+            Dim probeResponse As System.Boolean = False
             If detectedTransport = "streamable-http" Then
+                Await SwitchToUi(Sub()
+                                     probeResponse = ShowCustomYesNoBox(
+                                         $"Run '{selectedTools(0).Name}' with sample arguments to detect the response path?",
+                                         "Run tool", "Skip", $"{AN} MCP Import") = 1
+                                 End Sub)
+            End If
+            If probeResponse Then
                 detectedResponseKey = Await ProbeMCPResponseKey(resolvedUrl, authParams, selectedTools(0))
                 If String.IsNullOrWhiteSpace(detectedResponseKey) Then
                     detectedResponseKey = "result.content[0].text"
@@ -324,9 +336,9 @@ Partial Public Class ThisAddIn
             ' ── 7. Build INI sections (no UI needed) ─────────────────────────
             Dim sb As New StringBuilder()
             sb.AppendLine("; MCP Server: " & resolvedUrl)
-            sb.AppendLine($"; Server: {serverName}")
+            sb.AppendLine($"; Server: {MCPSanitizeINIValue(serverName)}")
             sb.AppendLine($"; Transport: {detectedTransport}")
-            sb.AppendLine($"; Protocol: {MCP_PROTOCOL_VERSION}")
+            sb.AppendLine($"; Protocol: {MCPSanitizeINIValue(initResult.ProtocolVersion)}")
             sb.AppendLine($"; Schema mode: {If(normalizeSchemas, "normalized", "original")}")
             sb.AppendLine($"; Generated: {DateTime.Now:yyyy-MM-dd HH:mm:ss}")
             sb.AppendLine($"; Tools imported: {selectedTools.Count} of {tools.Count} discovered (using Freestyle 'MCP' command)")
@@ -337,6 +349,9 @@ Partial Public Class ThisAddIn
             End If
             sb.AppendLine()
 
+            If authParams.LiveAPIKey.Length > 0 AndAlso Not authParams.OAuth2 AndAlso Not authParams.APIKeyEncrypted Then
+                sb.AppendLine("; Replace [[Your API Key]] in the APIKey settings before using these services.")
+            End If
             Dim paramWarnings As New List(Of String)()
             Dim toolOnly As Boolean = True
 
@@ -356,7 +371,7 @@ Partial Public Class ThisAddIn
 
                 Dim section As String = BuildINISectionForTool(
                     tool, sectionName, resolvedUrl, sseBaseUrl, authParams,
-                    responseKey, mergePrompt, timeoutVal, paramWarnings, toolOnly, normalizeSchemas)
+                    responseKey, mergePrompt, timeoutVal, paramWarnings, toolOnly, normalizeSchemas, initResult.Instructions)
 
                 sb.AppendLine(section)
             Next
@@ -411,9 +426,9 @@ Partial Public Class ThisAddIn
             End Try
         Finally
             ' Dispose directly (Await not allowed in Finally)
-            If _mcpSseSession IsNot Nothing Then
-                _mcpSseSession.Dispose()
-                _mcpSseSession = Nothing
+            If authParams?.SseSession IsNot Nothing Then
+                authParams.SseSession.Dispose()
+                authParams.SseSession = Nothing
             End If
         End Try
     End Sub
@@ -423,6 +438,8 @@ Partial Public Class ThisAddIn
     ' ─────────────────────────────────────────────────────────────────────────
 
     Private Class MCPAuthInfo
+        Public Property SseSession As MCPSSESession
+        Public Property DiscoveryEndpoint As System.String
         Public Property StreamableSession As New SLib.MCPStreamableSessionState()
         Public Property APIKeyPlaceholder As String = ""
         Public Property LiveAPIKey As String = ""
@@ -444,6 +461,7 @@ Partial Public Class ThisAddIn
     End Class
 
     Private Class MCPInitResult
+        Public Property Instructions As System.String = ""
         Public Property ServerName As String = ""
         Public Property ProtocolVersion As String = ""
         Public Property ResolvedUrl As String = ""
@@ -484,31 +502,39 @@ Partial Public Class ThisAddIn
     ''' Auth settings object, or <c>Nothing</c> when user cancels.
     ''' </returns>
     Private Function CollectMCPAuthInfo() As MCPAuthInfo
-        Dim paramDefs As New List(Of InputParameter)()
-        paramDefs.Add(New InputParameter("API Key placeholder for INI (e.g. [[Your API Key]], or blank for open servers)", ""))
-        paramDefs.Add(New InputParameter("Actual API Key for probing the server now (blank for open servers)", ""))
-        paramDefs.Add(New InputParameter("API Key Encrypted?", False))
-        paramDefs.Add(New InputParameter("API Key Prefix (leave blank if none)", ""))
-        paramDefs.Add(New InputParameter("Header Name (e.g. Authorization, or blank for no auth)", ""))
-        paramDefs.Add(New InputParameter("Header Value template (use {apikey} as placeholder, or blank)", ""))
-
-        Dim params() As InputParameter = paramDefs.ToArray()
-        If Not ShowCustomVariableInputForm("Configure MCP server authentication (leave all blank for open servers):", $"{AN} MCP Import", params) Then
-            Return Nothing
+        Dim fields As New System.Collections.Generic.List(Of InputParameter) From {
+            New InputParameter("Discovery API key", "") With {.MaskInput = True},
+            New InputParameter("Header name", "x-api-key"),
+            New InputParameter("Header value template", "{apikey}")
+        }
+        Dim codeBasis As System.String = If(_context.Codebasis, "")
+        If Not System.String.IsNullOrWhiteSpace(codeBasis) Then
+            fields.Add(New InputParameter("Save this key encrypted in the INI", False))
         End If
+        Dim inputs As InputParameter() = fields.ToArray()
+        If Not ShowCustomVariableInputForm(
+            "Enter a key to authenticate the first request. Leave it empty for public servers or automatic OAuth." &
+            vbCrLf & "By default the INI contains a placeholder for the key.", $"{AN} MCP Import", inputs) Then Return Nothing
 
         Dim info As New MCPAuthInfo()
-        info.APIKeyPlaceholder = If(params(0).Value?.ToString(), "").Trim()
-        info.LiveAPIKey = If(params(1).Value?.ToString(), "").Trim()
-        info.APIKeyEncrypted = If(TypeOf params(2).Value Is Boolean, CBool(params(2).Value), False)
-        info.APIKeyPrefix = If(params(3).Value?.ToString(), "").Trim()
-        info.HeaderA = If(params(4).Value?.ToString(), "").Trim()
-        info.HeaderB = If(params(5).Value?.ToString(), "").Trim()
-
-        If String.IsNullOrWhiteSpace(info.LiveAPIKey) AndAlso
-           Not String.IsNullOrWhiteSpace(info.APIKeyPlaceholder) AndAlso
-           Not info.APIKeyPlaceholder.StartsWith("[[") Then
-            info.LiveAPIKey = info.APIKeyPlaceholder
+        info.LiveAPIKey = CStr(inputs(0).Value).Trim()
+        If info.LiveAPIKey.Length > 0 Then
+            info.HeaderA = CStr(inputs(1).Value).Trim()
+            info.HeaderB = CStr(inputs(2).Value).Trim()
+            If Not System.Text.RegularExpressions.Regex.IsMatch(info.HeaderA, "\A[!#$%&'*+.^_`|~0-9A-Za-z-]+\z") OrElse
+               Not info.HeaderB.Contains("{apikey}") OrElse info.HeaderB.Any(AddressOf System.Char.IsControl) OrElse
+               info.LiveAPIKey.Any(AddressOf System.Char.IsControl) Then
+                Throw New System.ArgumentException("Enter a valid HTTP header name and a single-line template containing {apikey}.")
+            End If
+            If inputs.Length > 3 AndAlso CBool(inputs(3).Value) Then
+                info.APIKeyPlaceholder = SLib.CodeString(info.LiveAPIKey, codeBasis)
+                If info.APIKeyPlaceholder.StartsWith("Error:", System.StringComparison.Ordinal) Then
+                    Throw New System.InvalidOperationException("Red Ink could not encrypt the key. Check your CodeBasis or export with a placeholder.")
+                End If
+                info.APIKeyEncrypted = True
+            Else
+                info.APIKeyPlaceholder = "[[Your API Key]]"
+            End If
         End If
         Return info
     End Function
@@ -608,59 +634,46 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Discovers the transport type and initialises the MCP session.
-    ''' Strategy:
-    '''   1. Try SSE transport GET to the exact URL.
-    '''   2. Try SSE transport GET to common sub-paths (/sse, /events).
-    '''   3. Try Streamable HTTP POST to the exact URL.
-    '''   4. Try Streamable HTTP POST to common sub-paths (/mcp, /rpc, …).
+    ''' Tries both transports on the supplied URL before probing common sub-paths.
     ''' </summary>
-    Private Async Function MCPInitializeWithDiscovery(mcpUrl As String, auth As MCPAuthInfo) As Task(Of MCPInitResult)
-        Dim baseUrl As String = mcpUrl.TrimEnd("/"c)
-
-        ' ── Phase 1: Try SSE transport on the exact URL ──────────────────
-        Try
-            Dim r = Await MCPInitializeSSE(baseUrl, auth)
-            r.Transport = "sse"
-            Return r
-        Catch
-        End Try
-
-        ' ── Phase 2: Try SSE transport on common sub-paths ───────────────
-        For Each suffix In MCP_SSE_SUFFIXES
-            Try
-                Dim r = Await MCPInitializeSSE(baseUrl & suffix, auth)
-                r.Transport = "sse"
-                Return r
-            Catch
-            End Try
+    Private Async Function MCPInitializeWithDiscovery(mcpUrl As String, auth As MCPAuthInfo) As System.Threading.Tasks.Task(Of MCPInitResult)
+        Dim baseUri As New System.Uri(mcpUrl)
+        Dim firstError As System.Exception = Nothing
+        For Each suffix As System.String In New System.String() {""}.Concat(MCP_PATH_SUFFIXES).Concat(MCP_SSE_SUFFIXES)
+            Dim candidate As System.String = mcpUrl
+            If suffix.Length > 0 Then
+                Dim builder As New System.UriBuilder(baseUri)
+                builder.Path = builder.Path.TrimEnd("/"c) & suffix
+                candidate = builder.Uri.AbsoluteUri
+            End If
+            For Each legacy As Boolean In {False, True}
+                If suffix.Length > 0 AndAlso legacy <> MCP_SSE_SUFFIXES.Contains(suffix) Then Continue For
+                auth.DiscoveryEndpoint = candidate
+                Try
+                    If legacy Then
+                        Dim result = Await MCPInitializeSSE(candidate, auth)
+                        result.Transport = "sse"
+                        Return result
+                    End If
+                    Return Await MCPInitializeStreamableHTTP(candidate, auth)
+                Catch ex As SLib.MCPHttpRequestException When IsMCPAccessDenied(ex)
+                    Throw
+                Catch ex As System.Exception
+                    If firstError Is Nothing Then firstError = ex
+                    If auth.SseSession IsNot Nothing Then
+                        auth.SseSession.Dispose()
+                        auth.SseSession = Nothing
+                    End If
+                End Try
+            Next
         Next
+        Throw New System.InvalidOperationException("MCP discovery failed. Check the endpoint URL. " & firstError?.Message, firstError)
+    End Function
 
-        ' ── Phase 3: Try Streamable HTTP on the exact URL ────────────────
-        Try
-            Dim r = Await MCPInitializeStreamableHTTP(baseUrl, auth)
-            r.ResolvedUrl = baseUrl
-            r.Transport = "streamable-http"
-            Return r
-        Catch
-        End Try
-
-        ' ── Phase 4: Try Streamable HTTP on common sub-paths ─────────────
-        For Each suffix In MCP_PATH_SUFFIXES
-            Try
-                Dim candidate = baseUrl & suffix
-                Dim r = Await MCPInitializeStreamableHTTP(candidate, auth)
-                r.ResolvedUrl = candidate
-                r.Transport = "streamable-http"
-                Return r
-            Catch
-            End Try
-        Next
-
-        Throw New Exception(
-            $"Could not connect to MCP server at {mcpUrl}.{vbCrLf}{vbCrLf}" &
-            $"Tried SSE transport on: {baseUrl}, {String.Join(", ", MCP_SSE_SUFFIXES.Select(Function(s) baseUrl & s))}{vbCrLf}" &
-            $"Tried Streamable HTTP on: {baseUrl}, {String.Join(", ", MCP_PATH_SUFFIXES.Select(Function(s) baseUrl & s))}{vbCrLf}{vbCrLf}" &
-            $"Please verify the correct endpoint URL with the server provider.")
+    Private Shared Function IsMCPAccessDenied(errorResponse As SLib.MCPHttpRequestException) As System.Boolean
+        Return errorResponse IsNot Nothing AndAlso
+            (errorResponse.ResponseStatusCode = System.Net.HttpStatusCode.Unauthorized OrElse
+             errorResponse.ResponseStatusCode = System.Net.HttpStatusCode.Forbidden)
     End Function
 
     ' ─────────────────────────────────────────────────────────────────────────
@@ -684,6 +697,7 @@ Partial Public Class ThisAddIn
         Dim responseJson = Await SendStreamableHTTPRequest(mcpUrl, payload, auth)
 
         Dim result As New MCPInitResult() With {.ResolvedUrl = mcpUrl}
+        result.Instructions = If(responseJson.SelectToken("result.instructions")?.ToString(), "")
         Dim serverInfo = responseJson.SelectToken("result.serverInfo")
         If serverInfo IsNot Nothing Then
             result.ServerName = If(serverInfo("name")?.ToString(), "")
@@ -703,33 +717,14 @@ Partial Public Class ThisAddIn
         EnsureTls12()
 
         Using handler As New HttpClientHandler()
-            ConfigureHandler(handler)
+            ConfigureHandler(handler, auth)
             Using client As New HttpClient(handler)
                 client.Timeout = TimeSpan.FromMilliseconds(MCP_DEFAULT_TIMEOUT)
                 SetAcceptHeaders(client)
                 SetAuthHeaders(client, auth)
-                auth.StreamableSession.ApplyHeaders(client, mcpUrl)
-
-                Dim content As New StringContent(payload.ToString(Formatting.None), Encoding.UTF8, "application/json")
-                Dim response = Await client.PostAsync(mcpUrl, content).ConfigureAwait(False)
-
-                Dim responseText = Await response.Content.ReadAsStringAsync().ConfigureAwait(False)
-
-                If Not response.IsSuccessStatusCode Then
-                    Throw New SLib.MCPHttpRequestException(response.StatusCode, $"HTTP {CInt(response.StatusCode)} ({response.ReasonPhrase}): {If(responseText.Length > 500, responseText.Substring(0, 500) & "...", responseText)}")
-                End If
-
-                If Not expectResponse Then Return New JObject()
-                responseText = ExtractJsonFromSSE(responseText, response.Content.Headers.ContentType?.MediaType)
-
-                If String.IsNullOrWhiteSpace(responseText) Then Throw New System.IO.InvalidDataException("MCP returned an empty response.")
-
-                Dim result = JObject.Parse(responseText)
-                CheckJsonRpcError(result)
-                If System.String.Equals(payload.Value(Of System.String)("method"), "initialize", System.StringComparison.Ordinal) Then
-                    auth.StreamableSession.CaptureInitialization(mcpUrl, response, result)
-                End If
-                Return result
+                Return Await SLib.PostMCPStreamableRequest(
+                    client, mcpUrl, payload, MCP_DEFAULT_TIMEOUT, expectResponse:=expectResponse,
+                    session:=auth.StreamableSession).ConfigureAwait(False)
             End Using
         End Using
     End Function
@@ -746,15 +741,15 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Async Function MCPInitializeSSE(sseUrl As String, auth As MCPAuthInfo) As Task(Of MCPInitResult)
         ' Clean up any prior session
-        If _mcpSseSession IsNot Nothing Then
-            _mcpSseSession.Dispose()
-            _mcpSseSession = Nothing
+        If auth.SseSession IsNot Nothing Then
+            auth.SseSession.Dispose()
+            auth.SseSession = Nothing
         End If
 
         EnsureTls12()
 
         Dim handler As New HttpClientHandler()
-        ConfigureHandler(handler)
+        ConfigureHandler(handler, auth)
         Dim client As New HttpClient(handler)
         client.Timeout = TimeSpan.FromMilliseconds(MCP_DEFAULT_TIMEOUT)
         SetAuthHeaders(client, auth)
@@ -767,10 +762,10 @@ Partial Public Class ThisAddIn
         Dim sseResponse = Await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(False)
 
         If Not sseResponse.IsSuccessStatusCode Then
-            Dim preview = Await sseResponse.Content.ReadAsStringAsync().ConfigureAwait(False)
+            Dim status As System.Net.HttpStatusCode = sseResponse.StatusCode
+            sseResponse.Dispose()
             client.Dispose()
-            handler.Dispose()
-            Throw New Exception($"SSE GET {CInt(sseResponse.StatusCode)} ({sseResponse.ReasonPhrase}): {If(preview.Length > 300, preview.Substring(0, 300), preview)}")
+            Throw New SLib.MCPHttpRequestException(status, $"SSE GET returned HTTP {CInt(status)}.")
         End If
 
         Dim stream = Await sseResponse.Content.ReadAsStreamAsync().ConfigureAwait(False)
@@ -811,8 +806,19 @@ Partial Public Class ThisAddIn
             postEndpoint = sseUrl.TrimEnd("/"c) & "/" & postEndpoint
         End If
 
+        If auth.HeaderA.Length > 0 Then
+            Try
+                SLib.ValidateMCPCredentialOrigin(sseUrl, postEndpoint)
+            Catch
+                reader.Dispose()
+                sseResponse.Dispose()
+                client.Dispose()
+                Throw
+            End Try
+        End If
+
         ' Store the session
-        _mcpSseSession = New MCPSSESession() With {
+        auth.SseSession = New MCPSSESession() With {
             .SseUrl = sseUrl,
             .PostEndpoint = postEndpoint,
             .Client = client,
@@ -841,6 +847,7 @@ Partial Public Class ThisAddIn
             .ResolvedUrl = stablePostUrl,
             .SseBaseUrl = sseUrl
         }
+        result.Instructions = If(initResponse.SelectToken("result.instructions")?.ToString(), "")
         Dim serverInfo = initResponse.SelectToken("result.serverInfo")
         If serverInfo IsNot Nothing Then
             result.ServerName = If(serverInfo("name")?.ToString(), "")
@@ -863,24 +870,23 @@ Partial Public Class ThisAddIn
     ''' POST to the session endpoint, then read the response from the SSE GET stream.
     ''' </summary>
     Private Async Function SendSSERequest(payload As JObject, auth As MCPAuthInfo, Optional expectResponse As Boolean = True) As Task(Of JObject)
-        If _mcpSseSession Is Nothing OrElse Not _mcpSseSession.IsConnected Then
+        If auth.SseSession Is Nothing OrElse Not auth.SseSession.IsConnected Then
             Throw New Exception("No active SSE session.")
         End If
 
         ' POST the payload using a separate HttpClient (the session client is busy with GET)
         Using postHandler As New HttpClientHandler()
-            ConfigureHandler(postHandler)
+            ConfigureHandler(postHandler, auth)
             Using postClient As New HttpClient(postHandler)
                 postClient.Timeout = TimeSpan.FromMilliseconds(MCP_DEFAULT_TIMEOUT)
                 SetAuthHeaders(postClient, auth)
 
                 Dim content As New StringContent(payload.ToString(Formatting.None), Encoding.UTF8, "application/json")
-                Dim postResponse = Await postClient.PostAsync(_mcpSseSession.PostEndpoint, content).ConfigureAwait(False)
+                Dim postResponse = Await postClient.PostAsync(auth.SseSession.PostEndpoint, content).ConfigureAwait(False)
 
                 ' Some SSE servers return 200/202 on POST with empty body; the real response comes via SSE
                 If Not postResponse.IsSuccessStatusCode Then
-                    Dim errorText = Await postResponse.Content.ReadAsStringAsync().ConfigureAwait(False)
-                    Throw New Exception($"SSE POST {CInt(postResponse.StatusCode)}: {If(errorText.Length > 300, errorText.Substring(0, 300), errorText)}")
+                    Throw New SLib.MCPHttpRequestException(postResponse.StatusCode, $"SSE POST returned HTTP {CInt(postResponse.StatusCode)}.")
                 End If
 
                 ' Check if the POST response itself contains a JSON-RPC result (some servers do this)
@@ -905,8 +911,8 @@ Partial Public Class ThisAddIn
         Dim deadline = DateTime.UtcNow.AddMilliseconds(MCP_DEFAULT_TIMEOUT)
         Dim currentEvent As String = ""
 
-        While DateTime.UtcNow < deadline AndAlso _mcpSseSession.IsConnected
-            Dim line = Await ReadLineWithTimeout(_mcpSseSession.StreamReader, 30000).ConfigureAwait(False)
+        While DateTime.UtcNow < deadline AndAlso auth.SseSession.IsConnected
+            Dim line = Await ReadLineWithTimeout(auth.SseSession.StreamReader, 30000).ConfigureAwait(False)
             If line Is Nothing Then Exit While
 
             If line.StartsWith("event:", StringComparison.OrdinalIgnoreCase) Then
@@ -970,7 +976,7 @@ Partial Public Class ThisAddIn
     ''' If an SSE session exists, uses it; otherwise uses Streamable HTTP POST.
     ''' </summary>
     Private Async Function SendMCPRequest(mcpUrl As String, payload As JObject, auth As MCPAuthInfo, Optional expectResponse As Boolean = True) As Task(Of JObject)
-        If _mcpSseSession IsNot Nothing AndAlso _mcpSseSession.IsConnected Then
+        If auth.SseSession IsNot Nothing AndAlso auth.SseSession.IsConnected Then
             Return Await SendSSERequest(payload, auth, expectResponse)
         Else
             Return Await SendStreamableHTTPRequest(mcpUrl, payload, auth, expectResponse)
@@ -984,6 +990,7 @@ Partial Public Class ThisAddIn
     Private Async Function MCPListTools(mcpUrl As String, auth As MCPAuthInfo) As Task(Of List(Of MCPToolInfo))
         Dim tools As New List(Of MCPToolInfo)()
         Dim cursor As String = Nothing
+        Dim seenCursors As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
         Dim requestId As Integer = 2
 
         Do
@@ -997,20 +1004,24 @@ Partial Public Class ThisAddIn
             Dim responseJson = Await SendMCPRequest(mcpUrl, payload, auth)
 
             Dim toolsArray = responseJson.SelectToken("result.tools")
-            If toolsArray IsNot Nothing AndAlso toolsArray.Type = JTokenType.Array Then
-                For Each t As JToken In toolsArray
-                    Dim info As New MCPToolInfo()
-                    info.Name = If(t("name")?.ToString(), "")
-                    info.Description = If(t("description")?.ToString(), "")
-                    Dim schema = t("inputSchema")
-                    If schema IsNot Nothing AndAlso schema.Type = JTokenType.Object Then
-                        info.InputSchema = CType(schema, JObject)
-                    End If
-                    tools.Add(info)
-                Next
+            If toolsArray Is Nothing OrElse toolsArray.Type <> JTokenType.Array Then
+                Throw New System.IO.InvalidDataException("MCP tools/list returned no tools array.")
             End If
+            For Each t As JToken In toolsArray
+                Dim info As New MCPToolInfo()
+                info.Name = If(t("name")?.ToString(), "")
+                info.Description = If(t("description")?.ToString(), "")
+                Dim schema = t("inputSchema")
+                If schema IsNot Nothing AndAlso schema.Type = JTokenType.Object Then
+                    info.InputSchema = CType(schema, JObject)
+                End If
+                tools.Add(info)
+            Next
 
             cursor = responseJson.SelectToken("result.nextCursor")?.ToString()
+            If Not System.String.IsNullOrWhiteSpace(cursor) AndAlso Not seenCursors.Add(cursor) Then
+                Throw New System.IO.InvalidDataException("MCP tools/list returned a repeated cursor.")
+            End If
             requestId += 1
         Loop While Not String.IsNullOrWhiteSpace(cursor)
 
@@ -1087,7 +1098,8 @@ Partial Public Class ThisAddIn
         End If
     End Sub
 
-    Private Shared Sub ConfigureHandler(handler As HttpClientHandler)
+    Private Shared Sub ConfigureHandler(handler As HttpClientHandler, auth As MCPAuthInfo)
+        handler.AllowAutoRedirect = String.IsNullOrEmpty(auth.HeaderA)
         handler.AutomaticDecompression = System.Net.DecompressionMethods.GZip Or System.Net.DecompressionMethods.Deflate
         handler.UseProxy = True
         handler.Proxy = System.Net.WebRequest.DefaultWebProxy
@@ -1105,7 +1117,9 @@ Partial Public Class ThisAddIn
     Private Shared Sub SetAuthHeaders(client As HttpClient, auth As MCPAuthInfo)
         If Not String.IsNullOrWhiteSpace(auth.HeaderA) AndAlso Not String.IsNullOrWhiteSpace(auth.HeaderB) Then
             Dim headerValue As String = auth.HeaderB.Replace("{apikey}", If(auth.LiveAPIKey, ""))
-            client.DefaultRequestHeaders.TryAddWithoutValidation(auth.HeaderA, headerValue)
+            If Not client.DefaultRequestHeaders.TryAddWithoutValidation(auth.HeaderA, headerValue) Then
+                Throw New System.ArgumentException("This HTTP header cannot carry the MCP credential.")
+            End If
         End If
     End Sub
 
@@ -1115,35 +1129,6 @@ Partial Public Class ThisAddIn
             Throw New Exception($"JSON-RPC error {If(err("code")?.ToString(), "")}: {If(err("message")?.ToString(), "Unknown error")}")
         End If
     End Sub
-
-    ''' <summary>
-    ''' Extracts the JSON-RPC message from an SSE-wrapped response body.
-    ''' If the body is plain JSON, returns it unchanged.
-    ''' </summary>
-    Private Shared Function ExtractJsonFromSSE(responseText As String, contentType As String) As String
-        Dim isSSE = (contentType IsNot Nothing AndAlso contentType.Equals("text/event-stream", StringComparison.OrdinalIgnoreCase)) OrElse
-                    responseText.TrimStart().StartsWith("data:", StringComparison.OrdinalIgnoreCase)
-        If Not isSSE Then Return responseText
-
-        ' Find the last data: line that contains a JSON-RPC result or error
-        Dim lastJson As String = Nothing
-        For Each line In responseText.Split({vbCrLf, vbLf, vbCr}, StringSplitOptions.None)
-            Dim trimmed = line.Trim()
-            If trimmed.StartsWith("data:", StringComparison.OrdinalIgnoreCase) Then
-                Dim data = trimmed.Substring(5).Trim()
-                If data.Length > 0 AndAlso Not data.Equals("[DONE]", StringComparison.OrdinalIgnoreCase) AndAlso data.TrimStart().StartsWith("{") Then
-                    Try
-                        Dim candidate = JObject.Parse(data)
-                        If candidate("result") IsNot Nothing OrElse candidate("error") IsNot Nothing Then
-                            lastJson = data
-                        End If
-                    Catch
-                    End Try
-                End If
-            End If
-        Next
-        Return If(lastJson, responseText)
-    End Function
 
     ' ─────────────────────────────────────────────────────────────────────────
     '  Parameter extraction from JSON Schema
@@ -1565,7 +1550,7 @@ Partial Public Class ThisAddIn
                                             sseBaseUrl As String, auth As MCPAuthInfo, responseKey As String,
                                             mergePrompt As String, timeout As Long,
                                             warnings As List(Of String), toolOnly As Boolean,
-                                            normalizeSchema As Boolean) As String
+                                            normalizeSchema As Boolean, serverInstructions As System.String) As String
         Dim sb As New StringBuilder()
         Dim effectiveSchema As JObject = PrepareToolDefinitionSchema(tool.InputSchema, normalizeSchema)
 
@@ -1695,6 +1680,11 @@ Partial Public Class ThisAddIn
             If p.EnumValues IsNot Nothing AndAlso p.EnumValues.Count > 0 Then instrPrompt.Append($" [values: {String.Join(", ", p.EnumValues)}]")
             instrPrompt.Append(". ")
         Next
+        If Not System.String.IsNullOrWhiteSpace(serverInstructions) Then
+            Dim guidance As System.String = "Server instructions: " & MCPSanitizeINIValue(serverInstructions)
+            instrPrompt.Append(" ").Append(guidance)
+            safeDescription = (safeDescription & " " & guidance).Trim()
+        End If
         sb.AppendLine($"ToolInstructionsPrompt = {instrPrompt.ToString().Trim()}")
 
         Dim safeInputSchema As JObject =

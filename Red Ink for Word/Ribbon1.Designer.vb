@@ -496,7 +496,6 @@ Partial Class Ribbon1
         '
         'Menu3
         '
-        Me.Menu3.Items.Add(Me.RI_SemanticArchives)
         Me.Menu3.Items.Add(Me.RI_Summarize)
         Me.Menu3.Items.Add(Me.RI_Explain)
         Me.Menu3.Items.Add(Me.RI_ArgueAgainst)
@@ -514,6 +513,7 @@ Partial Class Ribbon1
         Me.Menu3.Items.Add(Me.RI_EditWebAgent)
         Me.Menu3.Items.Add(Me.RI_Snapshot)
         Me.Menu3.Items.Add(Me.RI_FindHidden)
+        Me.Menu3.Items.Add(Me.RI_SemanticArchives)
         Me.Menu3.Label = "Analyze"
         Me.Menu3.Name = "Menu3"
         Me.Menu3.OfficeImageId = "PivotTableNonVisualTotals"

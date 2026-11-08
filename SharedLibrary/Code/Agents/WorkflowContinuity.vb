@@ -418,7 +418,17 @@ Namespace Agents
         Public Shared Function FindBlockedContinuationWorkflowId(
             continuationKey As String,
             Optional hostPipeline As String = "") As String
+            Return FindRetainedOutcomeWorkflowId(continuationKey, hostPipeline, True)
+        End Function
 
+        Public Shared Function FindResultRecoveryWorkflowId(continuationKey As System.String,
+                                                           hostPipeline As System.String) As System.String
+            Return FindRetainedOutcomeWorkflowId(continuationKey, hostPipeline, False)
+        End Function
+
+        Private Shared Function FindRetainedOutcomeWorkflowId(continuationKey As System.String,
+                                                             hostPipeline As System.String,
+                                                             requireRetryEligibility As System.Boolean) As System.String
             Dim key As String = If(continuationKey, "").Trim()
             If key = "" Then Return ""
 
@@ -434,8 +444,14 @@ Namespace Agents
                     For Each checkpointPath As String In Directory.GetFiles(dir, "*.json", SearchOption.TopDirectoryOnly)
                         Dim envelope As WorkflowCheckpointEnvelope = LoadCheckpointEnvelopeFromPathUnlocked(checkpointPath)
                         If envelope Is Nothing OrElse envelope.RuntimeState Is Nothing OrElse envelope.ContinuationState Is Nothing Then Continue For
-                        If Not String.Equals(envelope.RuntimeState.CurrentPhase, "final_blocked", StringComparison.OrdinalIgnoreCase) Then Continue For
-                        If Not envelope.RuntimeState.ContinuationRetryAllowed Then Continue For
+                        If Not requireRetryEligibility AndAlso (envelope.ContinuationState.SchemaVersion <> 1 OrElse System.String.IsNullOrWhiteSpace(envelope.ContinuationState.SequencingStateJson)) Then Continue For
+                        Dim blocked = System.String.Equals(envelope.RuntimeState.CurrentPhase, "final_blocked", System.StringComparison.OrdinalIgnoreCase)
+                        Dim deliveryPending = System.String.Equals(envelope.RuntimeState.CurrentPhase, "delivery_pending", System.StringComparison.OrdinalIgnoreCase)
+                        If requireRetryEligibility Then
+                            If Not blocked OrElse Not envelope.RuntimeState.ContinuationRetryAllowed Then Continue For
+                        ElseIf Not blocked AndAlso Not deliveryPending Then
+                            Continue For
+                        End If
                         If IsContinuationExpired(envelope.ContinuationState) Then Continue For
                         If Not String.Equals(If(envelope.ContinuationState.ContinuationKey, "").Trim(), key, StringComparison.Ordinal) Then Continue For
                         If Not String.IsNullOrWhiteSpace(hostPipeline) AndAlso
@@ -452,6 +468,153 @@ Namespace Agents
                     Return ""
                 End Try
             End SyncLock
+        End Function
+
+        ' Read-only result access uses the same identity, expiry and private checkpoint
+        ' boundary as continuation. It never grants permission to execute tools again.
+        Public Shared Function TryGetResultRecoverySnapshot(
+            workflowId As System.String, continuationKey As System.String, hostPipeline As System.String,
+            ByRef snapshot As ToolCallSequencing.ToolingRunContinuationSnapshot) As System.Boolean
+            snapshot = Nothing
+            If System.String.IsNullOrWhiteSpace(workflowId) OrElse System.String.IsNullOrWhiteSpace(continuationKey) OrElse System.String.IsNullOrWhiteSpace(hostPipeline) Then Return False
+            SyncLock _sync
+                Dim envelope = LoadCheckpointEnvelopeUnlocked(workflowId)
+                If envelope Is Nothing OrElse envelope.RuntimeState Is Nothing OrElse envelope.ContinuationState Is Nothing Then Return False
+                If envelope.ContinuationState.SchemaVersion <> 1 OrElse System.String.IsNullOrWhiteSpace(envelope.ContinuationState.SequencingStateJson) Then Return False
+                If Not System.String.Equals(envelope.WorkflowId, workflowId, System.StringComparison.Ordinal) OrElse
+                   Not System.String.Equals(envelope.RuntimeState.HostPipeline, hostPipeline, System.StringComparison.OrdinalIgnoreCase) OrElse
+                   Not System.String.Equals(envelope.ContinuationState.ContinuationKey, continuationKey, System.StringComparison.Ordinal) OrElse
+                   IsContinuationExpired(envelope.ContinuationState) Then Return False
+                If Not System.String.Equals(envelope.RuntimeState.CurrentPhase, "final_blocked", System.StringComparison.OrdinalIgnoreCase) AndAlso
+                   Not System.String.Equals(envelope.RuntimeState.CurrentPhase, "delivery_pending", System.StringComparison.OrdinalIgnoreCase) Then Return False
+                snapshot = CloneContinuationSnapshot(envelope.ContinuationState)
+                Return snapshot IsNot Nothing
+            End SyncLock
+        End Function
+
+        Public Shared Function PreserveDeliveryOutcome(
+            workflowId As System.String, hostPipeline As System.String,
+            sequencingState As ToolCallSequencing.ToolingRunState,
+            originalRequest As System.String, userResponse As System.String,
+            continuationKey As System.String, retentionDays As System.Int32) As System.Boolean
+            If System.String.IsNullOrWhiteSpace(workflowId) OrElse System.String.IsNullOrWhiteSpace(hostPipeline) OrElse sequencingState Is Nothing OrElse System.String.IsNullOrWhiteSpace(continuationKey) Then Return False
+            SyncLock _sync
+                Try
+                    ' Check persisted identity before the legacy loader applies its host label.
+                    Dim existingEnvelope = LoadCheckpointEnvelopeUnlocked(workflowId)
+                    If existingEnvelope IsNot Nothing Then
+                        If existingEnvelope.RuntimeState Is Nothing OrElse Not System.String.Equals(existingEnvelope.RuntimeState.HostPipeline, hostPipeline, System.StringComparison.OrdinalIgnoreCase) Then Return False
+                        If existingEnvelope.ContinuationState IsNot Nothing AndAlso Not System.String.Equals(existingEnvelope.ContinuationState.ContinuationKey, continuationKey, System.StringComparison.Ordinal) Then Return False
+                    End If
+                    Dim state = GetOrLoadUnlocked(workflowId, hostPipeline)
+                    If state Is Nothing OrElse Not System.String.Equals(state.HostPipeline, hostPipeline, System.StringComparison.OrdinalIgnoreCase) Then Return False
+                    Dim prior As ToolCallSequencing.ToolingRunContinuationSnapshot = Nothing
+                    _continuations.TryGetValue(workflowId, prior)
+                    If prior IsNot Nothing AndAlso Not System.String.Equals(prior.ContinuationKey, continuationKey, System.StringComparison.Ordinal) Then Return False
+                    Dim snapshot = sequencingState.CreateContinuationSnapshot(
+                        If(prior IsNot Nothing AndAlso Not System.String.IsNullOrWhiteSpace(prior.OriginalUserRequestRaw), prior.OriginalUserRequestRaw, If(originalRequest, "")),
+                        If(Not System.String.IsNullOrWhiteSpace(userResponse), userResponse, If(prior IsNot Nothing, prior.LastUserFacingResponse, "")), continuationKey)
+                    If prior IsNot Nothing Then
+                        snapshot.CreatedUtc = prior.CreatedUtc
+                        snapshot.ResumeCount = prior.ResumeCount
+                        snapshot.ToolResultReferences = prior.ToolResultReferences
+                    End If
+                    RefreshContinuationExpiryUnlocked(snapshot, retentionDays)
+                    CacheContinuationArtifactsUnlocked(workflowId, snapshot)
+                    _continuations(workflowId) = snapshot
+                    If System.String.Equals(state.CurrentPhase, "final_complete", System.StringComparison.OrdinalIgnoreCase) OrElse
+                       System.String.Equals(state.CurrentPhase, "delivery_pending", System.StringComparison.OrdinalIgnoreCase) Then
+                        state.CurrentPhase = "delivery_pending"
+                        state.ContinuationRetryAllowed = False
+                    ElseIf Not System.String.Equals(state.CurrentPhase, "final_blocked", System.StringComparison.OrdinalIgnoreCase) Then
+                        state.CurrentPhase = "final_blocked"
+                        state.ContinuationRetryAllowed = False
+                    End If
+                    state.UpdatedAt = System.DateTime.UtcNow
+                    Return WriteCheckpointUnlocked(state, state.CurrentPhase)
+                Catch ex As System.Exception
+                    System.Diagnostics.Trace.TraceWarning("Cannot retain delivery outcome: " & ex.ToString())
+                    Return False
+                End Try
+            End SyncLock
+        End Function
+
+        Public NotInheritable Class OutcomeReport
+            Public Property Template As System.String = ""
+            Public ReadOnly Property Literals As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.Ordinal)
+
+            Public Function Render(templateText As System.String) As System.String
+                Dim source = If(templateText, "")
+                For Each literal In Literals
+                    If System.Text.RegularExpressions.Regex.Matches(source, System.Text.RegularExpressions.Regex.Escape(literal.Key)).Count <> 1 Then
+                        Throw New System.IO.InvalidDataException("The outcome translation changed a required literal placeholder: " & literal.Key)
+                    End If
+                Next
+                Const pattern As System.String = "\{\{OUTCOME_[A-Z_]+\}\}"
+                For Each token As System.Text.RegularExpressions.Match In System.Text.RegularExpressions.Regex.Matches(source, pattern)
+                    If Not Literals.ContainsKey(token.Value) Then Throw New System.IO.InvalidDataException("The outcome translation added an unknown placeholder.")
+                Next
+                ' One substitution pass: never interpret placeholders inside user content.
+                Return System.Text.RegularExpressions.Regex.Replace(source, pattern, Function(token) Literals(token.Value))
+            End Function
+        End Class
+
+        Public Shared Function BuildOutcomeReport(
+            runState As ToolCallSequencing.ToolingRunState, userResponse As System.String,
+            deliveredNames As System.Collections.Generic.IEnumerable(Of System.String),
+            nextAction As System.String, Optional additionalNotice As System.String = "",
+            Optional readOnlyRetrieval As System.Boolean = False) As OutcomeReport
+            Dim result As New OutcomeReport()
+            Dim sb As New System.Text.StringBuilder()
+            sb.AppendLine("# Work status").AppendLine()
+            sb.AppendLine("**Status: {{OUTCOME_STATUS}}**").AppendLine()
+            sb.AppendLine(If(readOnlyRetrieval,
+                "I retrieved the saved outcome without rerunning the work. This does not change the original task's completion status. The agent answer alone does not prove completion.",
+                "The task remains incomplete. The agent answer alone does not prove completion.")).AppendLine()
+            sb.AppendLine("UTC: {{OUTCOME_TIME}}").AppendLine()
+            result.Literals.Add("{{OUTCOME_STATUS}}", If(readOnlyRetrieval, "RETAINED_OUTCOME", "INCOMPLETE"))
+            result.Literals.Add("{{OUTCOME_TIME}}", System.DateTime.UtcNow.ToString("o"))
+            If additionalNotice <> "" Then sb.AppendLine(additionalNotice).AppendLine()
+            If runState IsNot Nothing AndAlso runState.HasExpectedDeliverableContract AndAlso runState.ExpectedDeliverableSlots IsNot Nothing Then
+                sb.AppendLine("Expected output slots: {{OUTCOME_EXPECTED_COUNT}}").AppendLine()
+                result.Literals.Add("{{OUTCOME_EXPECTED_COUNT}}", runState.ExpectedDeliverableSlots.Count.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            End If
+            If runState IsNot Nothing AndAlso Not System.String.IsNullOrWhiteSpace(runState.LastErrorCode) Then
+                sb.AppendLine("Last technical issue: {{OUTCOME_ERROR_CODE}}").AppendLine()
+                result.Literals.Add("{{OUTCOME_ERROR_CODE}}", OutcomeLabel(runState.LastErrorCode))
+            End If
+            sb.AppendLine("## Files in this reply").AppendLine()
+            Dim names = If(deliveredNames, System.Linq.Enumerable.Empty(Of System.String)()).Select(Function(name) System.IO.Path.GetFileName(name)).ToList()
+            If names.Count = 0 Then
+                sb.AppendLine("This reply contains no result files.")
+            Else
+                sb.AppendLine("{{OUTCOME_FILES}}")
+                result.Literals.Add("{{OUTCOME_FILES}}", System.String.Join(System.Environment.NewLine, names.Select(Function(name) "- " & OutcomeLabel(name))))
+            End If
+            sb.AppendLine().AppendLine("## Next step").AppendLine().AppendLine(If(nextAction, "")).AppendLine()
+            If runState IsNot Nothing AndAlso runState.RegisteredDeliverableArtifacts IsNot Nothing Then
+                Dim withheld = runState.RegisteredDeliverableArtifacts.Where(Function(artifact) artifact IsNot Nothing AndAlso
+                    artifact.LifecycleState <> ArtifactLifecycleState.Superseded AndAlso
+                    Not names.Contains(System.IO.Path.GetFileName(If(artifact.SessionPath, "")), System.StringComparer.OrdinalIgnoreCase)).ToList()
+                If withheld.Count > 0 Then
+                    sb.AppendLine("## Working files not ready for delivery").AppendLine()
+                    sb.AppendLine("I do not present these working files as finished results.").AppendLine()
+                    sb.AppendLine("{{OUTCOME_WORKING_FILES}}").AppendLine()
+                    result.Literals.Add("{{OUTCOME_WORKING_FILES}}", System.String.Join(System.Environment.NewLine, withheld.Select(Function(artifact) "- " & OutcomeLabel(System.IO.Path.GetFileName(If(artifact.SessionPath, ""))))))
+                End If
+            End If
+            If Not System.String.IsNullOrWhiteSpace(userResponse) Then
+                sb.AppendLine("## Agent answer").AppendLine().AppendLine("{{OUTCOME_ANSWER}}")
+                result.Literals.Add("{{OUTCOME_ANSWER}}", userResponse)
+            End If
+            result.Template = sb.ToString()
+            Return result
+        End Function
+
+        Private Shared Function OutcomeLabel(value As System.String) As System.String
+            Return If(value, "").Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;").
+                Replace("[", "\[").Replace("]", "\]").Replace("*", "\*").Replace("_", "\_").Replace("`", "\`").
+                Replace(Microsoft.VisualBasic.vbCr, " ").Replace(Microsoft.VisualBasic.vbLf, " ")
         End Function
 
         Public Shared Function GetLatestBlockedContinuationUserLanguage(
@@ -520,24 +683,24 @@ Namespace Agents
         Public Shared Function BuildContinuationRetryHint(userLanguage As String) As String
             Select Case NormalizeUserLanguageKey(userLanguage)
                 Case "de"
-                    Return "Wenn Sie diesen technisch blockierten Vorgang fortsetzen möchten, ohne bereits erfolgreich erledigte Arbeit absichtlich neu zu erzeugen, antworten Sie auf diese E-Mail mit `retry` als erster Zeile. Darunter können Sie weitere Anweisungen ergänzen. Bereits verifizierte Ergebnisse werden nach Möglichkeit wiederverwendet."
+                    Return "Antworten Sie auf diese E-Mail mit `retry` als erster Zeile. Ich setze den Vorgang am gespeicherten Stand fort und nutze passende, verifizierte Ergebnisse weiter. Darunter können Sie weitere Anweisungen ergänzen."
                 Case "fr"
-                    Return "Si vous souhaitez poursuivre cette exécution techniquement bloquée sans recréer délibérément le travail déjà effectué avec succès, répondez à cet e-mail avec `retry` sur la première ligne. Vous pouvez ajouter d’autres instructions en dessous. Les résultats déjà vérifiés seront réutilisés dans la mesure du possible."
+                    Return "Répondez à cet e-mail avec `retry` sur la première ligne. Je reprendrai le travail à partir du point de reprise et réutiliserai les résultats vérifiés appropriés. Vous pouvez ajouter des instructions en dessous."
                 Case "it"
-                    Return "Se desideri continuare questa esecuzione tecnicamente bloccata senza ricreare deliberatamente il lavoro già completato con successo, rispondi a questa e-mail inserendo `retry` nella prima riga. Puoi aggiungere ulteriori istruzioni nelle righe successive. I risultati già verificati verranno riutilizzati ove possibile."
+                    Return "Rispondi a questa e-mail con `retry` nella prima riga. Riprenderò il lavoro dal punto di ripresa e riutilizzerò i risultati verificati appropriati. Puoi aggiungere istruzioni nelle righe successive."
                 Case Else
-                    Return "If you want me to continue this technically blocked run without deliberately recreating work that already succeeded, reply to this email with `retry` as the first line. You may add further instructions below it. Existing verified results will be reused where possible."
+                    Return "Reply to this email with `retry` as the first line. I will continue from the checkpoint and reuse suitable verified results. You may add further instructions below it."
             End Select
         End Function
 
         Public Shared Function BuildContinuationUnavailableNotice(userLanguage As String) As String
             Select Case NormalizeUserLanguageKey(userLanguage)
                 Case "de"
-                    Return "Für diese Unterhaltung konnte kein fortsetzbarer blockierter Vorgang mehr gefunden werden. Ich habe keinen neuen Lauf gestartet, weil dadurch Dateien oder andere bereits erfolgreich ausgeführte Aktionen doppelt erzeugt werden könnten. Wenn Sie die Aufgabe neu starten möchten, senden oder formulieren Sie sie bitte erneut als neue Anfrage."
+                    Return "Ich finde für diese Unterhaltung keinen nutzbaren Fortsetzungspunkt. Ich habe keinen neuen Lauf gestartet, damit ich keine Dateien oder andere bereits erledigte Aktionen wiederhole. Wenn Sie die Aufgabe neu starten möchten, senden oder formulieren Sie sie bitte erneut als neue Anfrage."
                 Case "fr"
                     Return "Je n’ai plus trouvé d’exécution bloquée pouvant être reprise pour cette conversation. Je n’ai pas lancé une nouvelle exécution, car cela pourrait recréer des fichiers ou répéter d’autres actions déjà effectuées avec succès. Si vous souhaitez recommencer la tâche, veuillez la renvoyer ou la reformuler comme une nouvelle demande."
                 Case "it"
-                    Return "Non è stato possibile trovare per questa conversazione un’esecuzione bloccata ancora riprendibile. Non ho avviato una nuova esecuzione, perché ciò potrebbe ricreare file o ripetere altre azioni già completate con successo. Se desideri ricominciare l’attività, inviala o formulala nuovamente come nuova richiesta."
+                    Return "Non trovo un punto di ripresa valido per questa conversazione. Non ho avviato una nuova esecuzione, perché ciò potrebbe ricreare file o ripetere altre azioni già completate con successo. Se desideri ricominciare l’attività, inviala o formulala nuovamente come nuova richiesta."
                 Case Else
                     Return "I could not find a resumable blocked workflow checkpoint for this conversation. I have not started a fresh run, because doing so could repeat file creation or other actions that may already have succeeded. Please resend or restate the task if you want to start it again as a new request."
             End Select
@@ -1128,10 +1291,28 @@ Namespace Agents
                     .ContinuationState = CloneContinuationSnapshot(continuation)
                 }
 
-                File.WriteAllText(
-                    GetCheckpointPath(state.WorkflowId),
-                    JsonConvert.SerializeObject(envelope, Formatting.None),
-                    Encoding.UTF8)
+                Dim checkpointPath = GetCheckpointPath(state.WorkflowId)
+                Dim pendingPath = System.IO.Path.Combine(dir, "cp_" & System.Guid.NewGuid().ToString("N") & ".pending")
+                Try
+                    Dim bytes = System.Text.Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(envelope, Formatting.None))
+                    Using stream As New System.IO.FileStream(pendingPath, System.IO.FileMode.CreateNew, System.IO.FileAccess.Write, System.IO.FileShare.None)
+                        stream.Write(bytes, 0, bytes.Length)
+                        stream.Flush(True)
+                    End Using
+                    If System.IO.File.Exists(checkpointPath) Then
+                        System.IO.File.Replace(pendingPath, checkpointPath, Nothing)
+                    Else
+                        System.IO.File.Move(pendingPath, checkpointPath)
+                    End If
+                Finally
+                    If System.IO.File.Exists(pendingPath) Then
+                        Try
+                            System.IO.File.Delete(pendingPath)
+                        Catch cleanupEx As System.Exception
+                            System.Diagnostics.Trace.TraceWarning("Checkpoint staging cleanup: " & cleanupEx.Message)
+                        End Try
+                    End If
+                End Try
 
                 Debug.WriteLine(
                     ComposeWorkflowLogMessage(

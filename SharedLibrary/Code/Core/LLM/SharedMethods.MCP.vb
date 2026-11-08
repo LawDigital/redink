@@ -81,7 +81,7 @@ Namespace SharedLibrary
             EnsureTls12()
 
             Dim handler As New HttpClientHandler()
-            ConfigureMCPHandler(handler)
+            ConfigureMCPHandler(handler, headerA)
 
             Dim client As New HttpClient(handler)
             client.Timeout = TimeSpan.FromMilliseconds(timeoutMs)
@@ -121,6 +121,7 @@ Namespace SharedLibrary
 
                 ' ── Step 3: Resolve relative URL ─────────────────────────────
                 postEndpoint = ResolveSSEEndpoint(sseBaseUrl, postEndpoint)
+                If Not System.String.IsNullOrEmpty(headerA) Then ValidateMCPCredentialOrigin(sseBaseUrl, postEndpoint)
 
                 ' ── Step 4: POST initialize handshake ────────────────────────
                 Await PostMCPInitializeHandshake(postEndpoint, headerA, headerB, timeoutMs).ConfigureAwait(False)
@@ -178,7 +179,7 @@ Namespace SharedLibrary
                 Dim expectedId As Newtonsoft.Json.Linq.JToken = Newtonsoft.Json.Linq.JObject.Parse(requestBody)("id")?.DeepClone()
 
                 Dim handler As New HttpClientHandler()
-                ConfigureMCPHandler(handler)
+                ConfigureMCPHandler(handler, headerA)
 
                 Dim client As New HttpClient(handler)
                 client.Timeout = TimeSpan.FromMilliseconds(timeoutMs)
@@ -215,13 +216,13 @@ Namespace SharedLibrary
                     End If
 
                     postEndpoint = ResolveSSEEndpoint(sseBaseUrl, postEndpoint)
+                    If Not System.String.IsNullOrEmpty(headerA) Then ValidateMCPCredentialOrigin(sseBaseUrl, postEndpoint)
 
                     If context IsNot Nothing AndAlso context.INI_APIDebug Then
                         Dim sentDebug As New StringBuilder()
                         sentDebug.AppendLine($"SENT TO API (SSE GET): {sseBaseUrl}")
                         sentDebug.AppendLine($"SSE POST ENDPOINT: {postEndpoint}")
                         sentDebug.AppendLine($"HeaderA: {headerA}")
-                        sentDebug.AppendLine($"HeaderB: {headerB}")
                         sentDebug.AppendLine("SSE TOOL REQUEST:")
                         sentDebug.AppendLine(requestBody)
 
@@ -231,7 +232,7 @@ Namespace SharedLibrary
 
                     ' ── Step 2: POST initialize handshake ────────────────────────
                     Using postHandler As New HttpClientHandler()
-                        ConfigureMCPHandler(postHandler)
+                        ConfigureMCPHandler(postHandler, headerA)
 
                         Using postClient As New HttpClient(postHandler)
                             postClient.Timeout = TimeSpan.FromMilliseconds(timeoutMs)
@@ -381,7 +382,8 @@ Namespace SharedLibrary
         End Sub
 
         ''' <summary>Configures an HttpClientHandler with proxy and decompression settings.</summary>
-        Private Shared Sub ConfigureMCPHandler(handler As HttpClientHandler)
+        Private Shared Sub ConfigureMCPHandler(handler As HttpClientHandler, headerName As System.String)
+            handler.AllowAutoRedirect = System.String.IsNullOrEmpty(headerName)
             handler.AutomaticDecompression = System.Net.DecompressionMethods.GZip Or System.Net.DecompressionMethods.Deflate
             handler.UseProxy = True
             handler.Proxy = System.Net.WebRequest.DefaultWebProxy
@@ -414,7 +416,16 @@ Namespace SharedLibrary
             Return Nothing
         End Function
 
-        ''' <summary>Resolves a potentially relative SSE endpoint URL against the base SSE URL.</summary>
+        ''' <summary>Checks the destination before forwarding an authentication header.</summary>
+        Public Shared Sub ValidateMCPCredentialOrigin(baseUrl As System.String, endpoint As System.String)
+            Dim origin As New System.Uri(baseUrl)
+            Dim target As New System.Uri(endpoint)
+            If Not System.String.Equals(origin.Scheme, target.Scheme, System.StringComparison.OrdinalIgnoreCase) OrElse
+               Not System.String.Equals(origin.IdnHost, target.IdnHost, System.StringComparison.OrdinalIgnoreCase) OrElse origin.Port <> target.Port Then
+                Throw New System.InvalidOperationException("The MCP server requested credentials at another origin. Check its configured endpoint.")
+            End If
+        End Sub
+
         Private Shared Function ResolveSSEEndpoint(sseBaseUrl As String, postEndpoint As String) As String
             If postEndpoint.StartsWith("/") Then
                 Dim uri As New Uri(sseBaseUrl)
@@ -431,7 +442,7 @@ Namespace SharedLibrary
                 timeoutMs As Integer) As Task
 
             Using postHandler As New HttpClientHandler()
-                ConfigureMCPHandler(postHandler)
+                ConfigureMCPHandler(postHandler, headerA)
 
                 Using postClient As New HttpClient(postHandler)
                     postClient.Timeout = TimeSpan.FromMilliseconds(timeoutMs)
@@ -471,7 +482,8 @@ Namespace SharedLibrary
             If result Is Nothing Then Return
             Dim code As System.String = System.String.Empty
             Dim kind As System.String = System.String.Empty
-            If Agents.SubAgentRuntimeHardening.TryGetEnvelopeErrorInfo(result.ToString(Newtonsoft.Json.Formatting.None), code, kind) Then
+            If TypeOf result("error") Is Newtonsoft.Json.Linq.JObject OrElse
+               Agents.SubAgentRuntimeHardening.TryGetEnvelopeErrorInfo(result.ToString(Newtonsoft.Json.Formatting.None), code, kind) Then
                 Throw New System.InvalidOperationException("JSON-RPC error: " & result.ToString(Newtonsoft.Json.Formatting.None))
             End If
         End Sub
@@ -576,7 +588,7 @@ Namespace SharedLibrary
             Try
 
                 Using handler As New HttpClientHandler()
-                    ConfigureMCPHandler(handler)
+                    ConfigureMCPHandler(handler, headerA)
 
                     Using client As New HttpClient(handler)
                         client.Timeout = TimeSpan.FromMilliseconds(timeoutMs)
@@ -648,7 +660,7 @@ Namespace SharedLibrary
         ''' <summary>
         ''' Sends a single JSON-RPC POST to a Streamable HTTP MCP endpoint and returns the parsed JSON response.
         ''' </summary>
-        Private Shared Async Function PostMCPStreamableRequest(
+        Public Shared Async Function PostMCPStreamableRequest(
                 client As HttpClient,
                 mcpUrl As String,
                 payload As JObject,
@@ -658,37 +670,40 @@ Namespace SharedLibrary
                 Optional session As MCPStreamableSessionState = Nothing) As System.Threading.Tasks.Task(Of Newtonsoft.Json.Linq.JObject)
 
             If session IsNot Nothing Then session.ApplyHeaders(client, mcpUrl)
-            Dim content As New StringContent(payload.ToString(Formatting.None), Encoding.UTF8, "application/json")
-            Dim response As HttpResponseMessage = Await client.PostAsync(mcpUrl, content).ConfigureAwait(False)
-            Dim responseText As String = Await response.Content.ReadAsStringAsync().ConfigureAwait(False)
+            Using content As New StringContent(payload.ToString(Formatting.None), Encoding.UTF8, "application/json")
+                Using response As HttpResponseMessage = Await client.PostAsync(mcpUrl, content).ConfigureAwait(False)
+                    Dim responseText As String = Await response.Content.ReadAsStringAsync().ConfigureAwait(False)
 
-            If Not response.IsSuccessStatusCode Then
-                Throw New MCPHttpRequestException(response.StatusCode,
-                    $"MCP Streamable HTTP POST {CInt(response.StatusCode)} ({response.ReasonPhrase}): " &
-                    responseText)
-            End If
+                    If Not response.IsSuccessStatusCode Then
+                        Throw New MCPHttpRequestException(response.StatusCode,
+                            $"MCP Streamable HTTP POST returned HTTP {CInt(response.StatusCode)}." &
+                            If(response.StatusCode = System.Net.HttpStatusCode.Unauthorized OrElse
+                               response.StatusCode = System.Net.HttpStatusCode.Forbidden, "", " " & responseText))
+                    End If
 
-            If Not expectResponse Then
-                Return New JObject()
-            End If
+                    If Not expectResponse Then
+                        Return New JObject()
+                    End If
 
-            responseText = ExtractJsonFromMCPResponse(
-                responseText,
-                If(response.Content.Headers.ContentType?.MediaType, ""), payload("id"))
+                    responseText = ExtractJsonFromMCPResponse(
+                        responseText,
+                        If(response.Content.Headers.ContentType?.MediaType, ""), payload("id"))
 
-            If System.String.IsNullOrWhiteSpace(responseText) Then
-                Throw New System.InvalidOperationException("MCP returned an empty body for a request that requires a response.")
-            End If
+                    If System.String.IsNullOrWhiteSpace(responseText) Then
+                        Throw New System.InvalidOperationException("MCP returned an empty body for a request that requires a response.")
+                    End If
 
-            Dim result As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(responseText)
-            If Not IsMatchingMCPResponse(result, payload("id")) Then
-                Throw New System.InvalidOperationException("MCP response id does not match the request: " & responseText)
-            End If
-            If Not preserveRpcError Then CheckJsonRpcError(result)
-            If session IsNot Nothing AndAlso System.String.Equals(payload.Value(Of System.String)("method"), "initialize", System.StringComparison.Ordinal) Then
-                session.CaptureInitialization(mcpUrl, response, result)
-            End If
-            Return result
+                    Dim result As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(responseText)
+                    If Not IsMatchingMCPResponse(result, payload("id")) Then
+                        Throw New System.InvalidOperationException("MCP response id does not match the request: " & responseText)
+                    End If
+                    If Not preserveRpcError Then CheckJsonRpcError(result)
+                    If session IsNot Nothing AndAlso System.String.Equals(payload.Value(Of System.String)("method"), "initialize", System.StringComparison.Ordinal) Then
+                        session.CaptureInitialization(mcpUrl, response, result)
+                    End If
+                    Return result
+                End Using
+            End Using
         End Function
 
         ''' <summary>
