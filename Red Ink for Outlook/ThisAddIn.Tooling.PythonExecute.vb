@@ -314,8 +314,10 @@ Partial Public Class ThisAddIn
         ' Pre-execution guard: reject an unchanged deterministic resubmission before starting the worker, so a
         ' prior code-repair/diagnostic outcome that produced no code change does not spawn another identical
         ' worker run. This is not counted as a worker attempt and does not mutate the advisor session state.
+        Dim repairHistory As Agents.PythonExecuteRepairSession = Agents.PythonExecuteRepairAdvisor.ResolveHistoryForCall(
+            context, context.SequencingState, toolCall.ToolName, toolCall.CallId, toolCall.Arguments)
         Dim pythonUnchangedRejection As String = Nothing
-        If Agents.PythonExecuteRepairAdvisor.ShouldRejectUnchangedResubmission(context, toolCall.Arguments, pythonUnchangedRejection) Then
+        If Agents.PythonExecuteRepairAdvisor.ShouldRejectUnchangedResubmission(repairHistory, toolCall.Arguments, pythonUnchangedRejection) Then
             response.Success = False
             response.RejectedBeforeExecution = True
             response.ErrorCode = "UNCHANGED_RESUBMISSION_REJECTED"
@@ -330,7 +332,7 @@ Partial Public Class ThisAddIn
         ' Pre-execution guard: reject a destructive (non-minimal) repair before starting the worker. The task
         ' remains repairable so the model can submit a correct minimal repair; no worker attempt is consumed.
         Dim pythonSuspiciousRejection As String = Nothing
-        If Agents.PythonExecuteRepairAdvisor.ShouldRejectSuspiciousRepair(context, toolCall.Arguments, pythonSuspiciousRejection) Then
+        If Agents.PythonExecuteRepairAdvisor.ShouldRejectSuspiciousRepair(repairHistory, toolCall.Arguments, pythonSuspiciousRejection) Then
             response.Success = False
             response.RejectedBeforeExecution = True
             response.ErrorCode = "SUSPICIOUS_REPAIR_REJECTED"
@@ -466,7 +468,7 @@ Partial Public Class ThisAddIn
             ' loop annotates it and the model is required to actually produce the requested output.
             If response.Success Then
                 Dim pythonIncompletePayload As String = Nothing
-                If Agents.PythonExecuteRepairAdvisor.TryBuildIncompleteTaskPayload(context, toolCall.Arguments, response.Response, pythonIncompletePayload) Then
+                If Agents.PythonExecuteRepairAdvisor.TryBuildIncompleteTaskPayload(repairHistory, toolCall.Arguments, response.Response, pythonIncompletePayload) Then
                     response.Success = False
                     response.ErrorCode = "TASK_POSTCONDITION_FAILED"
                     response.ErrorMessage = "The Python run exited successfully but did not produce a valid observable result."
@@ -485,7 +487,7 @@ Partial Public Class ThisAddIn
             ' abort via its existing tool-error abort path instead of iterating further.
             Dim pythonTerminalReason As String = Nothing
             Dim pythonRedundantReason As String = Nothing
-            response.Response = Agents.PythonExecuteRepairAdvisor.Annotate(context, toolCall.Arguments, response.Response, response.Success, pythonTerminalReason, pythonRedundantReason)
+            response.Response = Agents.PythonExecuteRepairAdvisor.Annotate(repairHistory, toolCall.Arguments, response.Response, response.Success, pythonTerminalReason, pythonRedundantReason)
             If Not String.IsNullOrEmpty(pythonTerminalReason) Then
                 response.RepairLoopTerminal = True
                 response.RepairLoopTerminalReason = pythonTerminalReason

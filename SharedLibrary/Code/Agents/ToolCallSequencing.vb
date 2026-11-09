@@ -4905,21 +4905,29 @@ Namespace Agents
             runState.ProjectLatestUnresolvedFailure()
         End Sub
 
-        Private Shared Function BuildNonessentialFailureRepairGuidance(runState As ToolingRunState) As System.String
+        Private Shared Function BuildNonessentialFailureRepairGuidance(runState As ToolingRunState, blockingFailure As ToolFailureRecord) As System.String
             If runState Is Nothing OrElse runState.UnresolvedToolFailures Is Nothing OrElse runState.SuccessfulReadEvidence Is Nothing Then Return System.String.Empty
-            Dim options As New System.Text.StringBuilder()
-            For Each failure As ToolFailureRecord In runState.UnresolvedToolFailures
-                For Each evidence As System.Collections.Generic.KeyValuePair(Of System.Int64, System.String) In runState.SuccessfulReadEvidence.OrderByDescending(Function(value) value.Key)
+            Dim examples As New Newtonsoft.Json.Linq.JArray()
+            For Each failure As ToolFailureRecord In runState.UnresolvedToolFailures.OrderByDescending(Function(item) item Is blockingFailure)
+                For Each evidence In runState.SuccessfulReadEvidence.OrderByDescending(Function(value) value.Key)
                     If Not CanAcknowledgeNonessentialFailure(runState, failure, evidence.Key) Then Continue For
-                    options.Append(" failure_sequence=").Append(failure.Sequence).Append("; tool=").Append(failure.ToolName).
-                        Append("; evidence_sequence=").Append(evidence.Key).Append("; evidence_tool=").Append(evidence.Value).Append(".")
+                    examples.Add(New Newtonsoft.Json.Linq.JObject(
+                        New Newtonsoft.Json.Linq.JProperty("failure_sequence", failure.Sequence),
+                        New Newtonsoft.Json.Linq.JProperty("evidence_sequence", evidence.Key),
+                        New Newtonsoft.Json.Linq.JProperty("reason", "Explain why the later " & evidence.Value & " evidence covers the request without the failed " & failure.ToolName & " attempt.")))
                     Exit For
                 Next
+                If examples.Count = 32 Then Exit For
             Next
-            If options.Length = 0 Then Return System.String.Empty
-            Return " OPTIONAL-ATTEMPT REVIEW: The host permits explicit acknowledgement only of the following non-mutating or unexecuted, unscoped failed attempts, supported by a later successful source read:" & options.ToString() &
-                " If and ONLY if that failed attempt is genuinely unnecessary for the user's requested result, include nonessential_failures:[{failure_sequence:<id>,evidence_sequence:<id>,reason:<specific explanation of why all requirements are met without it>}] in the final TASK_STATUS JSON (with properly quoted JSON property names and string values). " &
-                "This does not claim the failed call succeeded. Do not acknowledge missing required data, mutations or deliverables. Disclose any material limitations in the user-facing answer. All required tools, memory, effects and output-slot checks still apply."
+            If examples.Count = 0 Then Return System.String.Empty
+            Dim footer As New Newtonsoft.Json.Linq.JObject(
+                New Newtonsoft.Json.Linq.JProperty("status", "complete"),
+                New Newtonsoft.Json.Linq.JProperty("reason", "Explain how the result meets the request."),
+                New Newtonsoft.Json.Linq.JProperty("nonessential_failures", examples))
+            Return " OPTIONAL-ATTEMPT REVIEW: If the actual evidence meets all requirements, keep only genuinely nonessential attempts from this example, " &
+                "replace each example reason with a specific explanation, and retain all other required footer fields. " &
+                "Disclose material limitations in the user-facing answer. Never waive required data, mutations or outputs. " &
+                "<TASK_STATUS>" & footer.ToString(Newtonsoft.Json.Formatting.None) & "</TASK_STATUS>. Resolve any remaining blocker through permitted tool work."
         End Function
 
         Public Shared Function ValidateActiveToolingTurn(responseText As String,
@@ -5077,7 +5085,9 @@ Namespace Agents
 
         Public Shared Function RequiresToolEnabledRepair(invalidReason As String) As Boolean
             Dim reason As System.String = If(invalidReason, System.String.Empty).Trim()
-            Return System.String.Equals(reason, "complete_with_unresolved_tool_failure", System.StringComparison.OrdinalIgnoreCase) OrElse
+            Return reason.StartsWith("complete_missing_required_successful_tools:", System.StringComparison.OrdinalIgnoreCase) OrElse
+                System.String.Equals(reason, "invalid_nonessential_failure_acknowledgement", System.StringComparison.OrdinalIgnoreCase) OrElse
+                System.String.Equals(reason, "complete_with_unresolved_tool_failure", System.StringComparison.OrdinalIgnoreCase) OrElse
                 System.String.Equals(reason, "complete_unreconciled_legacy_outputs", System.StringComparison.OrdinalIgnoreCase) OrElse
                 System.String.Equals(reason, RequestedDeliverableNotCreatedCode, System.StringComparison.OrdinalIgnoreCase) OrElse
                 System.String.Equals(reason, RequestedDeliverableSlotsIncompleteCode, System.StringComparison.OrdinalIgnoreCase)
@@ -5116,7 +5126,7 @@ Namespace Agents
 
             Dim prompt As String =
                 "REPAIR: Completion is currently not permitted because a prior tool failure remains unresolved. " &
-                "Do not return status complete until the unresolved failure has actually been resolved by successful tool work. " &
+                "Resolve the failure through permitted tool work or use an explicitly eligible optional-attempt review below. " &
                 "A tool call may be retried, including with the same arguments, when another attempt may succeed. " &
                 "If no permitted recovery path can succeed, return a truthful blocked explanation ending with exactly one valid " &
                 "<TASK_STATUS>{""status"":""blocked"",""reason"":""no safe completion path""}</TASK_STATUS>."
@@ -5125,6 +5135,7 @@ Namespace Agents
                 Return prompt
             End If
 
+            prompt &= BuildNonessentialFailureRepairGuidance(runState, failure)
             prompt &= " Current unresolved failure: tool=" & FormatRepairDiagnosticValue(failure.ToolName) &
                       "; errorCode=" & FormatRepairDiagnosticValue(failure.ErrorCode) &
                       "; recoveryPolicy=" & failure.RecoveryPolicy.ToString() &
@@ -5154,7 +5165,7 @@ Namespace Agents
                     prompt &= " This failure has no automatic successful-tool recovery path. Do not claim completion while it remains unresolved; use a host-authorized recovery mechanism if one exists, otherwise return blocked."
             End Select
 
-            Return prompt & BuildNonessentialFailureRepairGuidance(runState)
+            Return prompt
         End Function
 
         ' Repair the model-owned completion decision without asking it to rewrite the answer.
@@ -6113,7 +6124,8 @@ Namespace Agents
         End Function
 
         Public Shared Function BuildFinalizationDiagnostic(runState As ToolingRunState, invalidReason As System.String,
-                Optional validation As ActiveToolingTurnValidationResult = Nothing) As System.String
+                Optional validation As ActiveToolingTurnValidationResult = Nothing,
+                Optional verifyLegacySlots As System.Boolean = False) As System.String
             Dim reason As System.String = If(invalidReason, System.String.Empty).Trim()
             If runState Is Nothing Then Return "phase=finalization; invalidReason=" & reason
 
@@ -6124,6 +6136,10 @@ Namespace Agents
             If System.String.Equals(reason, RequestedDeliverableSlotsIncompleteCode, System.StringComparison.OrdinalIgnoreCase) Then
                 Dim missing As System.Collections.Generic.List(Of System.String) = GetMissingExpectedDeliverableSlotKeys(runState)
                 If missing.Count > 0 Then parts.Add("missingSlots=" & System.String.Join(",", missing))
+            End If
+
+            If System.String.Equals(reason, "complete_unreconciled_legacy_outputs", System.StringComparison.OrdinalIgnoreCase) Then
+                parts.Add(ArtifactDelivery.BuildLegacyReconciliationDiagnostic(runState, verifyLegacySlots))
             End If
 
             If runState.HasUnresolvedToolFailure AndAlso runState.UnresolvedToolFailures IsNot Nothing Then

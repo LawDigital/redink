@@ -1635,11 +1635,8 @@ Partial Public Class ThisAddIn
                 AddOnInstruct += ToolTriggerInstruct.Replace("; add", ", ")
             End If
 
-            If UseSecondAPI OrElse ToolTriggerAvailable Then
-                If (Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) And modelSupportsTool) Or ToolTriggerAvailable Then
-                    AddOnInstruct += ToolSelectionInstruct.Replace("; add", ", ")
-                End If
-            End If
+            Dim toolSelectionAvailable As System.Boolean = modelSupportsTool OrElse ToolTriggerAvailable
+            If toolSelectionAvailable Then AddOnInstruct += ToolSelectionInstruct.Replace("; add", ", ")
 
             ' Format the instruction list with proper grammar (replace last comma with ", and")
             Dim lastCommaIndex As Integer = AddOnInstruct.LastIndexOf(","c)
@@ -2310,8 +2307,6 @@ SkipPromptInput:
                         })
 
                 End If
-
-                Dim toolSelectionAvailable As System.Boolean = (UseSecondAPI OrElse ToolTriggerAvailable) AndAlso ((Not System.String.IsNullOrWhiteSpace(INI_AlternateModelPath) AndAlso modelSupportsTool) OrElse ToolTriggerAvailable)
 
                 If toolSelectionAvailable Then
 
@@ -3655,7 +3650,15 @@ SkipPromptInput:
                 Return
             End If
 
-            If Not UseSecondAPI AndAlso OtherPrompt.IndexOf(ToolTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
+            Dim DoToolSelection As System.Boolean = OtherPrompt.IndexOf(ToolSelectionTrigger, System.StringComparison.OrdinalIgnoreCase) >= 0
+            If DoToolSelection Then
+                If Not toolSelectionAvailable Then
+                    ShowCustomMessageBox($"Choose a tooling-capable Freestyle model to use {ToolSelectionTrigger}.")
+                    Return
+                End If
+                OtherPrompt = Regex.Replace(OtherPrompt, Regex.Escape(ToolSelectionTrigger), "", RegexOptions.IgnoreCase Or RegexOptions.CultureInvariant).Trim()
+            End If
+            If Not UseSecondAPI AndAlso (DoToolSelection OrElse OtherPrompt.IndexOf(ToolTrigger, System.StringComparison.OrdinalIgnoreCase) >= 0) Then
                 toolTriggerDetected = True
 
                 If Not SharedMethods.TryGetSpecialTaskModelConfig(
@@ -3675,7 +3678,7 @@ SkipPromptInput:
                     Return
                 End If
 
-                OtherPrompt = OtherPrompt.Replace(ToolTrigger, "").Trim()
+                OtherPrompt = Regex.Replace(OtherPrompt, Regex.Escape(ToolTrigger), "", RegexOptions.IgnoreCase Or RegexOptions.CultureInvariant).Trim()
 
                 If Not originalConfigLoaded Then
                     originalConfig = GetCurrentConfig(_context)
@@ -3987,13 +3990,9 @@ SkipPromptInput:
 
             ' === TOOLING TRIGGER HANDLING ===
 
-            ' Check if user wants to (re)select tools
-            Dim DoToolSelection As Boolean = False
-            If OtherPrompt.IndexOf(ToolSelectionTrigger, StringComparison.OrdinalIgnoreCase) >= 0 And Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
-                If modelSupportsTool Then
-                    OtherPrompt = OtherPrompt.Replace(ToolSelectionTrigger, "").Trim()
-                    DoToolSelection = True
-                End If
+            If DoToolSelection AndAlso (DoFiles OrElse DoForm OrElse DoAssemble) Then
+                ShowCustomMessageBox($"File processing, assembly and form completion use dedicated workflows. Remove {ToolSelectionTrigger} or choose a regular Freestyle request.")
+                Return
             End If
 
             ' If model supports tooling, handle tool selection

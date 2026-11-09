@@ -85,6 +85,8 @@ Partial Class Ribbon1
         Me.RI_FreestyleAM = Me.Factory.CreateRibbonButton
         Me.RI_Undo = Me.Factory.CreateRibbonButton
         Me.Menu2 = Me.Factory.CreateRibbonMenu
+        Me.RI_ConvertFilesAnalyze = Me.Factory.CreateRibbonButton
+        Me.RI_ConvertFiles = Me.Factory.CreateRibbonButton
         Me.RI_AdjustHeight = Me.Factory.CreateRibbonButton
         Me.RI_AdjustLegacyNotes = Me.Factory.CreateRibbonButton
         Me.RI_Regex = Me.Factory.CreateRibbonButton
@@ -228,6 +230,7 @@ Partial Class Ribbon1
         '
         'Menu3
         '
+        Me.Menu3.Items.Add(Me.RI_ConvertFilesAnalyze)
         Me.Menu3.Items.Add(Me.RI_CSVAnalyze)
         Me.Menu3.Items.Add(Me.RI_TXTAnalyze)
         Me.Menu3.Items.Add(Me.RI_Extractor)
@@ -254,7 +257,7 @@ Partial Class Ribbon1
         Me.RI_TXTAnalyze.Label = "Analyze TXT"
         Me.RI_TXTAnalyze.Name = "RI_TXTAnalyze"
         Me.RI_TXTAnalyze.OfficeImageId = "GetPowerQueryDataFromText"
-        Me.RI_TXTAnalyze.ScreenTip = "Will parse through the TXT files in a directory and analyze their content"
+        Me.RI_TXTAnalyze.ScreenTip = "Analyzes TXT and Markdown (.md) files in a directory"
         Me.RI_TXTAnalyze.ShowImage = True
         '
         'RI_Extractor
@@ -262,7 +265,7 @@ Partial Class Ribbon1
         Me.RI_CollectionAnalyzer.Label = "Collection Analyzer"
         Me.RI_CollectionAnalyzer.Name = "RI_CollectionAnalyzer"
         Me.RI_CollectionAnalyzer.OfficeImageId = "WhatIfAnalysisMenu"
-        Me.RI_CollectionAnalyzer.ScreenTip = "Analyze a folder of documents as one evidence-based collection"
+        Me.RI_CollectionAnalyzer.ScreenTip = "Analyze TXT, Markdown (.md) and EML files as one evidence-based collection"
         Me.RI_CollectionAnalyzer.ShowImage = True
         Me.RI_TabularReview.Label = "Tabular Review"
         Me.RI_TabularReview.Name = "RI_TabularReview"
@@ -312,6 +315,7 @@ Partial Class Ribbon1
         '
         'Menu2
         '
+        Me.Menu2.Items.Add(Me.RI_ConvertFiles)
         Me.Menu2.Items.Add(Me.RI_AdjustHeight)
         Me.Menu2.Items.Add(Me.RI_AdjustLegacyNotes)
         Me.Menu2.Items.Add(Me.RI_Regex)
@@ -319,11 +323,21 @@ Partial Class Ribbon1
         Me.Menu2.Label = "Excel Helpers"
         Me.Menu2.Name = "Menu2"
         Me.Menu2.OfficeImageId = "GalInsertAspNet"
-        Me.Menu2.ScreenTip = "Provides additional useful tools in Excel (no AI used)"
+        Me.Menu2.ScreenTip = "Provides additional useful tools in Excel; conversion may use AI for OCR or preparation"
         Me.Menu2.ShowImage = True
         '
         'RI_AdjustHeight
         '
+        Me.RI_ConvertFiles.Label = "Convert PDFs/Files to TXT or Markdown"
+        Me.RI_ConvertFiles.Name = "RI_ConvertFiles"
+        Me.RI_ConvertFiles.OfficeImageId = "ExportTextFile"
+        Me.RI_ConvertFiles.ScreenTip = "Converts a file or folder to TXT or Markdown, with OCR, preparation, combined output and semantic indexing options"
+        Me.RI_ConvertFiles.ShowImage = True
+        Me.RI_ConvertFilesAnalyze.Label = "Convert PDFs/Files to TXT or Markdown"
+        Me.RI_ConvertFilesAnalyze.Name = "RI_ConvertFilesAnalyze"
+        Me.RI_ConvertFilesAnalyze.OfficeImageId = "ExportTextFile"
+        Me.RI_ConvertFilesAnalyze.ScreenTip = "Converts a file or folder to TXT or Markdown, with OCR, preparation, combined output and semantic indexing options"
+        Me.RI_ConvertFilesAnalyze.ShowImage = True
         Me.RI_AdjustHeight.Label = "Adjust Cell Height"
         Me.RI_AdjustHeight.Name = "RI_AdjustHeight"
         Me.RI_AdjustHeight.OfficeImageId = "PageScaleToFitHeight"
@@ -626,6 +640,8 @@ Partial Class Ribbon1
     Friend WithEvents RI_Model8 As RibbonButton
     Friend WithEvents RI_Model9 As RibbonButton
     Friend WithEvents RI_Model10 As RibbonButton
+    Friend WithEvents RI_ConvertFilesAnalyze As Microsoft.Office.Tools.Ribbon.RibbonButton
+    Friend WithEvents RI_ConvertFiles As Microsoft.Office.Tools.Ribbon.RibbonButton
     Friend WithEvents RI_TXTAnalyze As RibbonButton
 End Class
 

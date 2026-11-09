@@ -148,7 +148,7 @@ Namespace SharedLibrary
                 Dim url As String = If(e.Uri, "")
                 If String.IsNullOrEmpty(url) Then Return
 
-                If url.StartsWith(_redirectUriPrefix, StringComparison.OrdinalIgnoreCase) Then
+                If SharedLibrary.SharedMethods.IsMCPRedirectCallback(url, _redirectUriPrefix) Then
                     e.Cancel = True
                     ReportCaptured(url)
                 End If
