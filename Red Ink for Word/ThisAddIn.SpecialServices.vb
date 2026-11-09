@@ -306,6 +306,12 @@ Partial Public Class ThisAddIn
             If streamable OrElse INI_Endpoint_2.StartsWith(SharedMethods.MCP_SSE_PREFIX, System.StringComparison.OrdinalIgnoreCase) Then
                 Dim prefix As System.String = If(streamable, SharedMethods.MCP_STREAMABLE_PREFIX, SharedMethods.MCP_SSE_PREFIX)
                 Dim mcpUrl As System.String = INI_Endpoint_2.Substring(prefix.Length)
+                Dim automaticOAuth As System.Boolean = INI_OAuth2_2 AndAlso SLib.IsAutomaticMCPOAuth(INI_OAuth2Endpoint_2)
+                If automaticOAuth Then
+                    _context.DecodedAPI_2 = Await SLib.GetFreshAccessToken(
+                        _context, INI_OAuth2ClientMail_2, INI_OAuth2Scopes_2, INI_APIKey_2,
+                        INI_OAuth2Endpoint_2, INI_OAuth2ATExpiry_2, True, mcpEndpoint:=INI_Endpoint_2)
+                End If
                 Dim resolvedHeaderB = INI_HeaderB_2.Replace("{apikey}", _context.DecodedAPI_2)
 
                 Dim mcpRequestBody As String = INI_APICall_2
@@ -323,13 +329,28 @@ Partial Public Class ThisAddIn
                     End Try
 
                     Dim timeoutMs As System.Int32 = CInt(Math.Min(INI_Timeout_2, Integer.MaxValue))
-                    If streamable Then
-                        llmresult = Await SharedMethods.ExecuteMCPStreamableToolCall(
-                            mcpUrl, mcpRequestBody, INI_HeaderA_2, resolvedHeaderB, timeoutMs)
-                    Else
-                        llmresult = Await SharedMethods.ExecuteMCPSSEToolCall(
-                            _context, mcpUrl, mcpRequestBody, INI_HeaderA_2, resolvedHeaderB, timeoutMs)
-                    End If
+                    Dim attemptedRenewal As System.Boolean = False
+                    Do
+                        Dim unauthorized As System.Boolean = False
+                        Try
+                            If streamable Then
+                                llmresult = Await SharedMethods.ExecuteMCPStreamableToolCall(
+                                    mcpUrl, mcpRequestBody, INI_HeaderA_2, resolvedHeaderB, timeoutMs)
+                            Else
+                                llmresult = Await SharedMethods.ExecuteMCPSSEToolCall(
+                                    _context, mcpUrl, mcpRequestBody, INI_HeaderA_2, resolvedHeaderB, timeoutMs)
+                            End If
+                        Catch ex As SLib.MCPHttpRequestException When automaticOAuth AndAlso Not attemptedRenewal AndAlso ex.ResponseStatusCode = System.Net.HttpStatusCode.Unauthorized
+                            unauthorized = True
+                        End Try
+                        If Not unauthorized Then Exit Do
+                        attemptedRenewal = True
+                        _context.DecodedAPI_2 = Await SLib.GetFreshAccessToken(
+                            _context, INI_OAuth2ClientMail_2, INI_OAuth2Scopes_2, INI_APIKey_2,
+                            INI_OAuth2Endpoint_2, INI_OAuth2ATExpiry_2, True, forceRefresh:=True,
+                            mcpEndpoint:=INI_Endpoint_2, rejectedMcpToken:=_context.DecodedAPI_2)
+                        resolvedHeaderB = INI_HeaderB_2.Replace("{apikey}", _context.DecodedAPI_2)
+                    Loop
                     splash.ThrowIfFailed()
                 Catch ex As Global.SharedLibrary.SharedLibrary.SplashScreenCountDown.SplashDisplayException
                     ' Technical details are already in the shared diagnostic log.

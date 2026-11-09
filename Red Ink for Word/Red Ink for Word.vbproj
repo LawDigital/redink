@@ -739,6 +739,9 @@
     <Compile Include="ThisAddIn.TextToSpeech.vb" />
     <Compile Include="ThisAddIn.Transcriptor.vb" />
     <Compile Include="ThisAddIn.TranslatePresentations.vb" />
+    <Compile Include="..\SharedLibrary\Code\HostAdapters\ThisAddIn.FileConversion.vb">
+      <Link>ThisAddIn.SharedFileConversion.vb</Link>
+    </Compile>
     <Compile Include="ThisAddIn.vb">
       <SubType>Code</SubType>
     </Compile>

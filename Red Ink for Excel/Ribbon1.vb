@@ -587,6 +587,11 @@ Public Class Ribbon1
         Globals.ThisAddIn.RemoveRIPrefixFromComments()
     End Sub
 
+    Private Sub RI_ConvertFiles_Click(sender As System.Object, e As Microsoft.Office.Tools.Ribbon.RibbonControlEventArgs) Handles RI_ConvertFiles.Click, RI_ConvertFilesAnalyze.Click
+        Global.SharedLibrary.SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "ConvertFiles_Excel invoked")
+        Globals.ThisAddIn.ExportFileContentToText()
+    End Sub
+
     Private Sub RI_TXTAnalyze_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_TXTAnalyze.Click
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "TXTAnalyze_Excel invoked")
         Globals.ThisAddIn.AnalyzeDirectoryWithLLM()

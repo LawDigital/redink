@@ -1261,6 +1261,36 @@ Namespace Agents
             Return result
         End Function
 
+        Public Shared Function BuildLegacyReconciliationDiagnostic(runState As ToolCallSequencing.ToolingRunState, verifySlots As System.Boolean) As System.String
+            If runState Is Nothing OrElse runState.RegisteredDeliverableArtifacts Is Nothing OrElse
+               runState.ExpectedDeliverableSlots Is Nothing Then Return "legacyRegistry=unavailable"
+            Dim openPaths As New System.Collections.Generic.HashSet(Of System.String)(
+                GetUnreconciledLegacyOutputPaths(runState), System.StringComparer.OrdinalIgnoreCase)
+            Dim entries As New Newtonsoft.Json.Linq.JArray()
+            For Each item In runState.RegisteredDeliverableArtifacts
+                If item Is Nothing OrElse item.IsExplicitContract OrElse Not item.LegacyCompatibilityEligible Then Continue For
+                entries.Add(New Newtonsoft.Json.Linq.JObject(
+                    New Newtonsoft.Json.Linq.JProperty("file", System.IO.Path.GetFileName(item.SessionPath)),
+                    New Newtonsoft.Json.Linq.JProperty("artifact_id", item.ArtifactId),
+                    New Newtonsoft.Json.Linq.JProperty("producer", item.SourceTool),
+                    New Newtonsoft.Json.Linq.JProperty("open", openPaths.Contains(item.SessionPath)),
+                    New Newtonsoft.Json.Linq.JProperty("producer_source_matched", item.LegacySourceAccountedFor)))
+            Next
+            Dim slots As New Newtonsoft.Json.Linq.JArray()
+            For Each slot In runState.ExpectedDeliverableSlots
+                If slot Is Nothing Then Continue For
+                Dim entry As New Newtonsoft.Json.Linq.JObject(
+                    New Newtonsoft.Json.Linq.JProperty("logical_deliverable_id", slot.LogicalDeliverableId),
+                    New Newtonsoft.Json.Linq.JProperty("output_slot_id", slot.OutputSlotId))
+                If verifySlots Then
+                    entry.Add("satisfied", New Newtonsoft.Json.Linq.JValue(runState.IsExpectedDeliverableSlotSatisfied(slot.LogicalDeliverableId, slot.OutputSlotId)))
+                End If
+                slots.Add(entry)
+            Next
+            Return "legacyOutputs=" & entries.ToString(Newtonsoft.Json.Formatting.None) &
+                "; expectedSlots=" & slots.ToString(Newtonsoft.Json.Formatting.None)
+        End Function
+
         Private Shared Sub RecordExplicitProducerSources(
             runState As ToolCallSequencing.ToolingRunState,
             rootObject As Newtonsoft.Json.Linq.JObject,

@@ -128,6 +128,12 @@ Partial Public Class ThisAddIn
             ' ── 2. Initialize + discover tools; if needed, bootstrap OAuth and retry ──
             authParams = CollectMCPAuthInfo()
             If authParams Is Nothing Then Return
+            If authParams.OAuth2Automatic Then
+                Dim automaticAuthorization As SLib.MCPProtectedResourceOAuthResult =
+                    Await SLib.GetAutomaticMCPAuthorizationAsync(mcpUrl, reconnect:=authParams.OAuth2Reconnect)
+                ApplyDiscoveredMCPOAuth(authParams, automaticAuthorization)
+                authParams.APIKeyPlaceholder = ""
+            End If
 
             Dim tools As List(Of MCPToolInfo) = Nothing
             Dim serverName As String = ""
@@ -138,26 +144,37 @@ Partial Public Class ThisAddIn
             Dim initResult As MCPInitResult = Nothing
             Dim firstDiscoveryError As Exception = Nothing
 
-            Try
-                initResult = Await MCPInitializeWithDiscovery(mcpUrl, authParams)
-                resolvedUrl = initResult.ResolvedUrl
-                sseBaseUrl = initResult.SseBaseUrl
-                serverName = initResult.ServerName
-                detectedTransport = initResult.Transport
-                tools = Await MCPListTools(resolvedUrl, authParams)
-            Catch ex As Exception
-                firstDiscoveryError = ex
-            Finally
-                If authParams?.SseSession IsNot Nothing Then
-                    authParams.SseSession.Dispose()
-                    authParams.SseSession = Nothing
-                End If
-            End Try
+            For discoveryAttempt As System.Int32 = 0 To If(authParams.OAuth2Automatic, 1, 0)
+                Try
+                    initResult = Await MCPInitializeWithDiscovery(mcpUrl, authParams)
+                    resolvedUrl = initResult.ResolvedUrl
+                    sseBaseUrl = initResult.SseBaseUrl
+                    serverName = initResult.ServerName
+                    detectedTransport = initResult.Transport
+                    tools = Await MCPListTools(resolvedUrl, authParams)
+                Catch ex As Exception
+                    firstDiscoveryError = ex
+                Finally
+                    If authParams?.SseSession IsNot Nothing Then
+                        authParams.SseSession.Dispose()
+                        authParams.SseSession = Nothing
+                    End If
+                End Try
+                If firstDiscoveryError Is Nothing Then Exit For
+                Dim denied As SLib.MCPHttpRequestException = TryCast(firstDiscoveryError, SLib.MCPHttpRequestException)
+                If Not authParams.OAuth2Automatic OrElse discoveryAttempt > 0 OrElse denied Is Nothing OrElse
+                   denied.ResponseStatusCode <> System.Net.HttpStatusCode.Unauthorized Then Exit For
+                Dim renewedAuthorization As SLib.MCPProtectedResourceOAuthResult =
+                    Await SLib.GetAutomaticMCPAuthorizationAsync(mcpUrl, forceRefresh:=True, rejectedToken:=authParams.LiveAPIKey)
+                ApplyDiscoveredMCPOAuth(authParams, renewedAuthorization)
+                firstDiscoveryError = Nothing
+            Next
 
             If firstDiscoveryError IsNot Nothing Then
                 Dim httpError As SLib.MCPHttpRequestException = TryCast(firstDiscoveryError, SLib.MCPHttpRequestException)
                 If authParams.LiveAPIKey.Length > 0 OrElse Not IsMCPAccessDenied(httpError) Then
-                    Dim hint As System.String = If(IsMCPAccessDenied(httpError), " Check the API key, header name and access rights.", "")
+                    Dim hint As System.String = If(IsMCPAccessDenied(httpError),
+                        If(authParams.OAuth2Automatic, " Reconnect using Automatic OAuth and check your account permissions.", " Check the API key, header name and access rights."), "")
                     Await SwitchToUi(Sub() ShowCustomMessageBox("Failed to query the MCP server:" & vbCrLf & firstDiscoveryError.Message & hint, $"{AN} MCP Import"))
                     Return
                 End If
@@ -448,6 +465,8 @@ Partial Public Class ThisAddIn
         Public Property HeaderA As String = ""
         Public Property HeaderB As String = ""
 
+        Public Property OAuth2Automatic As System.Boolean = False
+        Public Property OAuth2Reconnect As System.Boolean = False
         Public Property OAuth2 As Boolean = False
         Public Property OAuth2ClientId As String = ""
         Public Property OAuth2ClientSecret As String = ""
@@ -511,13 +530,24 @@ Partial Public Class ThisAddIn
         If Not System.String.IsNullOrWhiteSpace(codeBasis) Then
             fields.Add(New InputParameter("Save this key encrypted in the INI", False))
         End If
+        Dim automaticOAuthIndex As System.Int32 = fields.Count
+        fields.Add(New InputParameter("Automatic OAuth (personal connection cache; no API key)", False))
+        fields.Add(New InputParameter("Forget saved OAuth connection (requires Automatic OAuth)", False))
         Dim inputs As InputParameter() = fields.ToArray()
         If Not ShowCustomVariableInputForm(
             "Enter a key to authenticate the first request. Leave it empty for public servers or automatic OAuth." &
-            vbCrLf & "By default the INI contains a placeholder for the key.", $"{AN} MCP Import", inputs) Then Return Nothing
+            vbCrLf & "Select Automatic OAuth for a reusable personal connection without a key. By default the INI contains a placeholder for an API key.", $"{AN} MCP Import", inputs) Then Return Nothing
 
         Dim info As New MCPAuthInfo()
+        info.OAuth2Automatic = CBool(inputs(automaticOAuthIndex).Value)
+        info.OAuth2Reconnect = CBool(inputs(automaticOAuthIndex + 1).Value)
+        If info.OAuth2Reconnect AndAlso Not info.OAuth2Automatic Then
+            Throw New System.ArgumentException("To forget a saved OAuth connection, select Automatic OAuth.")
+        End If
         info.LiveAPIKey = CStr(inputs(0).Value).Trim()
+        If info.OAuth2Automatic AndAlso info.LiveAPIKey.Length > 0 Then
+            Throw New System.ArgumentException("For automatic OAuth, leave the Discovery API key empty.")
+        End If
         If info.LiveAPIKey.Length > 0 Then
             info.HeaderA = CStr(inputs(1).Value).Trim()
             info.HeaderB = CStr(inputs(2).Value).Trim()
@@ -526,7 +556,7 @@ Partial Public Class ThisAddIn
                info.LiveAPIKey.Any(AddressOf System.Char.IsControl) Then
                 Throw New System.ArgumentException("Enter a valid HTTP header name and a single-line template containing {apikey}.")
             End If
-            If inputs.Length > 3 AndAlso CBool(inputs(3).Value) Then
+            If Not System.String.IsNullOrWhiteSpace(codeBasis) AndAlso CBool(inputs(3).Value) Then
                 info.APIKeyPlaceholder = SLib.CodeString(info.LiveAPIKey, codeBasis)
                 If info.APIKeyPlaceholder.StartsWith("Error:", System.StringComparison.Ordinal) Then
                     Throw New System.InvalidOperationException("Red Ink could not encrypt the key. Check your CodeBasis or export with a placeholder.")
@@ -572,6 +602,7 @@ Partial Public Class ThisAddIn
             oauthEndpointValue &= "¦" & oauth.Resource
         End If
 
+        If auth.OAuth2Automatic Then Return
         Dim cacheKey As String = SLib.BuildMCPTokenCacheKey(oauth.ClientId, oauthEndpointValue)
         Dim expiresInSeconds As Integer = If(oauth.ExpiresIn > 0, oauth.ExpiresIn, 3600)
         Dim expiryUtc As DateTime = DateTime.UtcNow.AddSeconds(Math.Max(60, expiresInSeconds - 300))
@@ -1605,7 +1636,10 @@ Partial Public Class ThisAddIn
         sb.AppendLine($"APIKeyPrefix = {MCPSanitizeINIValue(auth.APIKeyPrefix)}")
         sb.AppendLine($"APIKeyEncrypted = {auth.APIKeyEncrypted}")
 
-        If auth.OAuth2 Then
+        If auth.OAuth2Automatic Then
+            sb.AppendLine("OAuth2 = True")
+            sb.AppendLine("OAuth2Endpoint = auto")
+        ElseIf auth.OAuth2 Then
             Dim oauthEndpointValue As String
 
             If auth.OAuth2UseDeviceFlow Then

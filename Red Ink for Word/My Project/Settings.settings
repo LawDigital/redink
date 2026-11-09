@@ -365,6 +365,12 @@
     <Setting Name="LastPromptChat" Type="System.String" Scope="User">
       <Value Profile="(Default)" />
     </Setting>
+    <Setting Name="DeselectedMainToolNames" Type="System.String" Scope="User">
+      <Value Profile="(Default)" />
+    </Setting>
+    <Setting Name="DeselectedAdvancedToolNames" Type="System.String" Scope="User">
+      <Value Profile="(Default)" />
+    </Setting>
     <Setting Name="SelectedMainToolNames" Type="System.String" Scope="User">
       <Value Profile="(Default)" />
     </Setting>
@@ -372,7 +378,7 @@
       <Value Profile="(Default)" />
     </Setting>
     <Setting Name="AdvancedToolsEnabled" Type="System.Boolean" Scope="User">
-      <Value Profile="(Default)">False</Value>
+      <Value Profile="(Default)">True</Value>
     </Setting>
     <Setting Name="LastAudioOutputDeviceId" Type="System.String" Scope="User">
       <Value Profile="(Default)" />

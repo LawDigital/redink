@@ -787,7 +787,9 @@ __AfterDispatch:
                     toolConfig.OAuth2Endpoint,
                     toolConfig.OAuth2ATExpiry,
                     True,
-                    False).ConfigureAwait(False)
+                    False,
+                    cancellationToken:=cancellationToken,
+                    mcpEndpoint:=toolConfig.Endpoint).ConfigureAwait(False)
 
                 If String.IsNullOrWhiteSpace(toolConfig.DecodedAPI) Then
                     response.Success = False
@@ -863,7 +865,7 @@ __AfterDispatch:
                         details:=$"ToolName='{toolCall.ToolName}'; SseBase='{sseBase}'")
 
                     cancellationToken.ThrowIfCancellationRequested()
-                    Dim sseRefreshOk As Boolean = Await ForceRefreshToolOAuthToken(toolConfig, toolCall.ToolName).ConfigureAwait(False)
+                    Dim sseRefreshOk As Boolean = Await ForceRefreshToolOAuthToken(toolConfig, toolCall.ToolName, cancellationToken).ConfigureAwait(False)
                     If Not sseRefreshOk Then Exit Do
                 Loop
 
@@ -946,7 +948,7 @@ __AfterDispatch:
                         details:=$"ToolName='{toolCall.ToolName}'; Endpoint='{mcpUrl}'")
 
                     cancellationToken.ThrowIfCancellationRequested()
-                    Dim streamRefreshOk As Boolean = Await ForceRefreshToolOAuthToken(toolConfig, toolCall.ToolName).ConfigureAwait(False)
+                    Dim streamRefreshOk As Boolean = Await ForceRefreshToolOAuthToken(toolConfig, toolCall.ToolName, cancellationToken).ConfigureAwait(False)
                     If Not streamRefreshOk Then Exit Do
                 Loop
 
