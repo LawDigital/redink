@@ -1867,11 +1867,6 @@ Public Class DiscussInky
                 My.Settings.DiscussFormSize = Me.RestoreBounds.Size
             End If
 
-            Globals.ThisAddIn.PersistDiscussInkyToolSelection(
-                Globals.ThisAddIn.SplitPersistedToolNames(CStr(My.Settings("SelectedMainToolNames"))),
-                Globals.ThisAddIn.SplitPersistedToolNames(CStr(My.Settings("SelectedAdvancedToolNames"))),
-                _chkAdvancedTools.Checked)
-
             My.Settings.DiscussEnableTooling = _chkEnableTooling.Checked
             My.Settings.Save()
         Catch
@@ -2175,10 +2170,8 @@ Public Class DiscussInky
 
     Private Sub OnAdvancedToolsChanged(sender As Object, e As EventArgs)
         Try
-            Globals.ThisAddIn.PersistDiscussInkyToolSelection(
-                Globals.ThisAddIn.GetDiscussInkyEffectiveMainToolNames(),
-                Globals.ThisAddIn.GetDiscussInkyEffectiveAdvancedToolNames(),
-                _chkAdvancedTools.Checked)
+            My.Settings.AdvancedToolsEnabled = _chkAdvancedTools.Checked
+            My.Settings.Save()
         Catch
         End Try
 
@@ -7860,15 +7853,6 @@ Public Class DiscussInky
         Return normalized
     End Function
 
-    Private Function GetSettingStringSafe(settingName As String) As String
-        Try
-            Dim value = My.Settings(settingName)
-            Return If(value, "").ToString()
-        Catch
-            Return ""
-        End Try
-    End Function
-
     Private Shared Function GetXmlAttributeValue(element As XElement,
                                                  attributeName As String,
                                                  Optional defaultValue As String = "") As String
@@ -8077,8 +8061,10 @@ Public Class DiscussInky
                 New XAttribute("displayName", If(_alternateModelDisplayName, ""))),
             New XElement(
                 "ToolSelection",
-                New XAttribute("main", GetSettingStringSafe("SelectedMainToolNames")),
-                New XAttribute("advanced", GetSettingStringSafe("SelectedAdvancedToolNames"))),
+                New XAttribute("main", String.Join("|", Globals.ThisAddIn.GetDiscussInkyEffectiveMainToolNames())),
+                New XAttribute("advanced", String.Join("|", Globals.ThisAddIn.GetDiscussInkyEffectiveAdvancedToolNames())),
+                New XAttribute("deselectedMain", My.Settings.DeselectedMainToolNames),
+                New XAttribute("deselectedAdvanced", My.Settings.DeselectedAdvancedToolNames)),
                        New XElement(
                 "Ui",
                 New XAttribute("splitterDistance", _splitChat.SplitterDistance)),
@@ -8406,10 +8392,20 @@ Public Class DiscussInky
             End Try
 
             Try
-                Globals.ThisAddIn.PersistDiscussInkyToolSelection(
-                    Globals.ThisAddIn.SplitPersistedToolNames(GetXmlAttributeValue(toolSelectionElement, "main", "")),
-                    Globals.ThisAddIn.SplitPersistedToolNames(GetXmlAttributeValue(toolSelectionElement, "advanced", "")),
-                    _chkAdvancedTools.Checked)
+                If toolSelectionElement IsNot Nothing AndAlso toolSelectionElement.Attribute("deselectedMain") IsNot Nothing AndAlso
+                   toolSelectionElement.Attribute("deselectedAdvanced") IsNot Nothing Then
+                    My.Settings.DeselectedMainToolNames = toolSelectionElement.Attribute("deselectedMain").Value
+                    My.Settings.DeselectedAdvancedToolNames = toolSelectionElement.Attribute("deselectedAdvanced").Value
+                    My.Settings.SelectedToolNames = String.Join("|", Globals.ThisAddIn.GetDiscussInkyEffectiveTools().Select(Function(tool) tool.ToolName))
+                    My.Settings.Save()
+                ElseIf Not System.String.IsNullOrWhiteSpace(GetXmlAttributeValue(toolSelectionElement, "main")) OrElse
+                       Not System.String.IsNullOrWhiteSpace(GetXmlAttributeValue(toolSelectionElement, "advanced")) Then
+                    ' Old writers could emit two empty legacy fields for any selection. Keep current opt-outs in that case.
+                    Globals.ThisAddIn.PersistDiscussInkyToolSelection(
+                        Globals.ThisAddIn.SplitPersistedToolNames(GetXmlAttributeValue(toolSelectionElement, "main", "")),
+                        Globals.ThisAddIn.SplitPersistedToolNames(GetXmlAttributeValue(toolSelectionElement, "advanced", "")),
+                        _chkAdvancedTools.Checked)
+                End If
                 _selectedToolsForChat = Nothing
             Catch
             End Try

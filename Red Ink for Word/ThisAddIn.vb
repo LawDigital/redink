@@ -13,7 +13,7 @@
 '   agent, UI, transcription, and command behavior to the other ThisAddIn.* files.
 ' =============================================================================
 '
-' 8.11.2026
+' 9.11.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -72,7 +72,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.081126" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.091126" & SharedMethods.VersionQualifier
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
     Public Const AN5 As String = "RI" ' for bubble comments 
@@ -379,10 +379,6 @@ Partial Public Class ThisAddIn
     Public Shared SelectedToolNames As New List(Of String)()   ' Persisted list of selected tool names for tooling sessions.
 
 
-    Private Const Add_OcrMarkdownInstruction As String =
-            "Provide the output as Markdown. " &
-            "Use Markdown formatting where it helps preserve the original structure, including headings, lists, tables and other tabular content. " &
-            "Return only the Markdown content and no surrounding code fences."
 
 
 

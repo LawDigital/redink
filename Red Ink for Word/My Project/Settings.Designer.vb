@@ -1531,7 +1531,31 @@ Namespace My
         
         <Global.System.Configuration.UserScopedSettingAttribute(),  _
          Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
-         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property DeselectedMainToolNames() As String
+            Get
+                Return CType(Me("DeselectedMainToolNames"),String)
+            End Get
+            Set
+                Me("DeselectedMainToolNames") = value
+            End Set
+        End Property
+
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property DeselectedAdvancedToolNames() As String
+            Get
+                Return CType(Me("DeselectedAdvancedToolNames"),String)
+            End Get
+            Set
+                Me("DeselectedAdvancedToolNames") = value
+            End Set
+        End Property
+
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("True")>  _
         Public Property AdvancedToolsEnabled() As Boolean
             Get
                 Return CType(Me("AdvancedToolsEnabled"),Boolean)

@@ -101,10 +101,10 @@ Partial Class DragDropForm
 
     End Sub
 
-    Friend WithEvents btnBrowse As Windows.Forms.Button
+    Friend WithEvents btnBrowse As Global.System.Windows.Forms.Button
 
-    Friend WithEvents Label1 As Windows.Forms.Label
+    Friend WithEvents Label1 As Global.System.Windows.Forms.Label
 
-    Friend WithEvents Label2 As Windows.Forms.Label
+    Friend WithEvents Label2 As Global.System.Windows.Forms.Label
 
 End Class

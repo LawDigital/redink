@@ -66,7 +66,18 @@ Namespace Agents
     ''' <summary>Mutable per-session repair state. One instance per tooling-loop session.</summary>
     Public NotInheritable Class PythonExecuteRepairSession
         Public ReadOnly Property Limits As New PythonExecuteRepairLimits()
-        Public ReadOnly Property Attempts As New System.Collections.Generic.List(Of PythonExecuteAttempt)()
+        Private _attempts As New System.Collections.Generic.List(Of PythonExecuteAttempt)()
+        Public ReadOnly Property Attempts As System.Collections.Generic.List(Of PythonExecuteAttempt)
+            Get
+                Return _attempts
+            End Get
+        End Property
+
+        Friend Function CopyHistory() As PythonExecuteRepairSession
+            Dim copy As PythonExecuteRepairSession = DirectCast(MemberwiseClone(), PythonExecuteRepairSession)
+            copy._attempts = New System.Collections.Generic.List(Of PythonExecuteAttempt)(_attempts)
+            Return copy
+        End Function
         Public Property TransientRetriesUsed As System.Int32
         Public Property InfrastructureRetriesUsed As System.Int32
         Public Property CodeRepairsUsed As System.Int32
@@ -98,7 +109,13 @@ Namespace Agents
         Private Const MaxExpressionChars As System.Int32 = 200
 
         Private Shared ReadOnly SessionsLock As New System.Object()
-        Private Shared ReadOnly Sessions As New System.Runtime.CompilerServices.ConditionalWeakTable(Of System.Object, PythonExecuteRepairSession)()
+        Private NotInheritable Class RunHistories
+            Public Current As New PythonExecuteRepairSession()
+            Public CurrentIsOperation As System.Boolean
+            Public ReadOnly ByScope As New System.Collections.Generic.Dictionary(Of System.String, PythonExecuteRepairSession)(System.StringComparer.Ordinal)
+        End Class
+
+        Private Shared ReadOnly Sessions As New System.Runtime.CompilerServices.ConditionalWeakTable(Of System.Object, RunHistories)()
         Private Shared ReadOnly FallbackSessionKey As New System.Object()
 
         Private Sub New()
@@ -728,6 +745,7 @@ Namespace Agents
             session.SymbolSwapStreak = 0
             session.LastFingerprint = Nothing
             session.LastCodeHash = Nothing
+            session.LastCodeText = Nothing
             session.LastSymbol = Nothing
             session.LastLine = 0
             session.LastExceptionType = Nothing
@@ -743,8 +761,13 @@ Namespace Agents
         ''' </summary>
         Public Shared Sub ResetForFullRecovery(sessionKey As System.Object)
             Try
-                Dim session As PythonExecuteRepairSession = GetOrCreateSession(sessionKey)
-                ResetSession(session)
+                SyncLock SessionsLock
+                    Dim histories As RunHistories = GetRunHistories(sessionKey)
+                    ResetSession(histories.Current)
+                    For Each history As PythonExecuteRepairSession In histories.ByScope.Values
+                        ResetSession(history)
+                    Next
+                End SyncLock
             Catch ex As System.Exception
                 System.Diagnostics.Trace.WriteLine(ex.ToString())
             End Try
@@ -1239,15 +1262,37 @@ Namespace Agents
         ' Small helpers
         ' ─────────────────────────────────────────────────────────────────────
 
-        Private Shared Function GetOrCreateSession(sessionKey As System.Object) As PythonExecuteRepairSession
-            Dim key As System.Object = If(sessionKey, FallbackSessionKey)
+        Private Shared Function GetRunHistories(sessionKey As System.Object) As RunHistories
+            Return Sessions.GetValue(If(sessionKey, FallbackSessionKey), Function(key) New RunHistories())
+        End Function
+
+        ' Both hosts bind the call before dispatch. Pin one history for preflight and worker completion.
+        Public Shared Function ResolveHistoryForCall(sessionKey As System.Object, runState As ToolCallSequencing.ToolingRunState,
+                toolName As System.String, callId As System.String,
+                arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object)) As PythonExecuteRepairSession
+            Dim scope As System.String = If(runState?.ResolveBoundRepairScope(toolName, callId, arguments), System.String.Empty)
+            Dim isOperation As System.Boolean = scope.StartsWith("operation:", System.StringComparison.Ordinal)
             SyncLock SessionsLock
-                Dim session As PythonExecuteRepairSession = Nothing
-                If Not Sessions.TryGetValue(key, session) Then
-                    session = New PythonExecuteRepairSession()
-                    Sessions.Add(key, session)
+                Dim histories As RunHistories = GetRunHistories(sessionKey)
+                Dim history As PythonExecuteRepairSession = Nothing
+                If scope.Length = 0 OrElse Not histories.ByScope.TryGetValue(scope, history) Then
+                    ' A host attempt ID identifies a call, not independent work. Inherit the
+                    ' latest guards unless the host identifies two distinct operation steps.
+                    history = If(isOperation AndAlso histories.CurrentIsOperation,
+                        New PythonExecuteRepairSession(), histories.Current.CopyHistory())
+                    If scope.Length > 0 Then histories.ByScope(scope) = history
                 End If
-                Return session
+                histories.Current = history
+                histories.CurrentIsOperation = isOperation
+                Return history
+            End SyncLock
+        End Function
+
+        Private Shared Function GetOrCreateSession(sessionKey As System.Object) As PythonExecuteRepairSession
+            Dim pinned As PythonExecuteRepairSession = TryCast(sessionKey, PythonExecuteRepairSession)
+            If pinned IsNot Nothing Then Return pinned
+            SyncLock SessionsLock
+                Return GetRunHistories(sessionKey).Current
             End SyncLock
         End Function
 

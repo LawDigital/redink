@@ -50,6 +50,11 @@ Namespace SharedLibrary
     Partial Public Class SharedMethods
 
         Public Class MCPProtectedResourceOAuthResult
+            Public Property Issuer As System.String = ""
+            Public Property RegistrationEndpoint As System.String = ""
+            Public Property RedirectUri As System.String = ""
+            Public Property RefreshToken As System.String = ""
+            Public Property SupportsRefresh As System.Boolean = False
             Public Property AccessToken As String = ""
             Public Property ClientId As String = ""
             Public Property ClientSecret As String = ""
@@ -110,6 +115,357 @@ Namespace SharedLibrary
                 }
             End SyncLock
         End Sub
+
+        ' Automatic MCP OAuth keeps personal credentials outside distributable INI files.
+        Private Class MCPAutomaticOAuthState
+            Public Property Version As System.Int32 = 1
+            Public Property Endpoint As System.String = ""
+            Public Property ConfiguredScope As System.String = ""
+            Public Property ExpiryUtc As System.DateTime = System.DateTime.MinValue
+            Public Property Connection As MCPProtectedResourceOAuthResult
+        End Class
+
+        Public Shared Function IsAutomaticMCPOAuth(endpointConfig As System.String) As System.Boolean
+            Return System.String.Equals(If(endpointConfig, "").Trim(), "auto", System.StringComparison.OrdinalIgnoreCase)
+        End Function
+
+        Private Shared Function AutomaticMCPResource(endpoint As System.String) As System.String
+            Dim value As System.String = If(endpoint, "").Trim()
+            For Each prefix As System.String In New System.String() {MCP_SSE_PREFIX, MCP_STREAMABLE_PREFIX}
+                If value.StartsWith(prefix, System.StringComparison.OrdinalIgnoreCase) Then
+                    value = value.Substring(prefix.Length)
+                    Exit For
+                End If
+            Next
+            value = RequireMcpOAuthHttpsEndpoint(value, "protected resource")
+            Dim uri As New System.Uri(value)
+            If uri.UserInfo.Length > 0 OrElse uri.Fragment.Length > 0 Then
+                Throw New System.ArgumentException("Use an MCP endpoint without user information or a fragment.")
+            End If
+            Return uri.AbsoluteUri
+        End Function
+
+        Private Shared Function AutomaticMCPCachePath(endpoint As System.String, scope As System.String) As System.String
+            Dim identity As System.String = endpoint & Microsoft.VisualBasic.vbLf & scope
+            Dim digest As System.String
+            Using sha As System.Security.Cryptography.SHA256 = System.Security.Cryptography.SHA256.Create()
+                digest = System.BitConverter.ToString(sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(identity))).Replace("-", "").ToLowerInvariant()
+            End Using
+            Dim directory As System.String = System.IO.Path.Combine(
+                System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData), "RedInk", "McpOAuth")
+            System.IO.Directory.CreateDirectory(directory)
+            Return System.IO.Path.Combine(directory, digest & ".bin")
+        End Function
+
+        Private Shared Async Function LockAutomaticMCPCacheAsync(path As System.String, cancellationToken As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of System.IO.FileStream)
+            Dim deadline As System.DateTime = System.DateTime.UtcNow.AddMinutes(10)
+            Do
+                cancellationToken.ThrowIfCancellationRequested()
+                Try
+                    Return New System.IO.FileStream(path & ".lock", System.IO.FileMode.OpenOrCreate,
+                        System.IO.FileAccess.ReadWrite, System.IO.FileShare.None)
+                Catch ex As System.IO.IOException
+                    If System.DateTime.UtcNow >= deadline Then
+                        Throw New System.TimeoutException("Another Office process is still using this MCP connection. Finish its sign-in and retry.")
+                    End If
+                End Try
+                Await System.Threading.Tasks.Task.Delay(200, cancellationToken).ConfigureAwait(False)
+            Loop
+        End Function
+
+        Private Shared Function ReadAutomaticMCPState(path As System.String, endpoint As System.String, scope As System.String) As MCPAutomaticOAuthState
+            If Not System.IO.File.Exists(path) Then Return Nothing
+            Try
+                Dim plain As System.Byte() = System.Security.Cryptography.ProtectedData.Unprotect(
+                    System.IO.File.ReadAllBytes(path), System.Text.Encoding.UTF8.GetBytes("Red Ink MCP OAuth v1"),
+                    System.Security.Cryptography.DataProtectionScope.CurrentUser)
+                Dim state As MCPAutomaticOAuthState = Newtonsoft.Json.JsonConvert.DeserializeObject(Of MCPAutomaticOAuthState)(System.Text.Encoding.UTF8.GetString(plain))
+                If state Is Nothing OrElse state.Version <> 1 OrElse state.Connection Is Nothing OrElse
+                   Not System.String.Equals(state.Endpoint, endpoint, System.StringComparison.Ordinal) OrElse
+                   Not System.String.Equals(state.ConfiguredScope, scope, System.StringComparison.Ordinal) Then
+                    Throw New System.IO.InvalidDataException("The MCP connection cache does not match this configuration.")
+                End If
+                Return state
+            Catch ex As System.Exception
+                ' Do not silently replace a damaged or unreadable personal connection.
+                Throw New System.InvalidOperationException("Red Ink could not read the personal MCP connection. Open the MCP importer, select Automatic OAuth and Forget saved OAuth connection, then reconnect.", ex)
+            End Try
+        End Function
+
+        Private Shared Sub WriteAutomaticMCPState(path As System.String, state As MCPAutomaticOAuthState)
+            Dim plain As System.Byte() = System.Text.Encoding.UTF8.GetBytes(Newtonsoft.Json.JsonConvert.SerializeObject(state))
+            Dim protectedBytes As System.Byte() = System.Security.Cryptography.ProtectedData.Protect(plain,
+                System.Text.Encoding.UTF8.GetBytes("Red Ink MCP OAuth v1"), System.Security.Cryptography.DataProtectionScope.CurrentUser)
+            Dim temporary As System.String = path & ".tmp-" & System.Guid.NewGuid().ToString("N")
+            Try
+                System.IO.File.WriteAllBytes(temporary, protectedBytes)
+                If System.IO.File.Exists(path) Then
+                    System.IO.File.Replace(temporary, path, Nothing)
+                Else
+                    System.IO.File.Move(temporary, path)
+                End If
+            Finally
+                If System.IO.File.Exists(temporary) Then System.IO.File.Delete(temporary)
+            End Try
+        End Sub
+
+        Private Shared Function NewAutomaticMCPHttpClient() As System.Net.Http.HttpClient
+            Dim handler As New System.Net.Http.HttpClientHandler() With {
+                .AllowAutoRedirect = False,
+                .AutomaticDecompression = System.Net.DecompressionMethods.GZip Or System.Net.DecompressionMethods.Deflate
+            }
+            handler.UseProxy = True
+            handler.Proxy = System.Net.WebRequest.DefaultWebProxy
+            If handler.Proxy IsNot Nothing Then handler.Proxy.Credentials = System.Net.CredentialCache.DefaultCredentials
+            Dim client As New System.Net.Http.HttpClient(handler) With {.Timeout = System.TimeSpan.FromSeconds(30)}
+            client.DefaultRequestHeaders.Accept.ParseAdd("application/json")
+            Return client
+        End Function
+
+        Private Shared Async Function GetAutomaticMCPJsonAsync(url As System.String, cancellationToken As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of Newtonsoft.Json.Linq.JObject)
+            url = RequireMcpOAuthHttpsEndpoint(url, "metadata endpoint")
+            Using client As System.Net.Http.HttpClient = NewAutomaticMCPHttpClient()
+                Using response As System.Net.Http.HttpResponseMessage = Await client.GetAsync(url, cancellationToken).ConfigureAwait(False)
+                    response.EnsureSuccessStatusCode()
+                    Return Newtonsoft.Json.Linq.JObject.Parse(Await response.Content.ReadAsStringAsync().ConfigureAwait(False))
+                End Using
+            End Using
+        End Function
+
+        Private Shared Async Function DiscoverAutomaticMCPAsync(endpoint As System.String, configuredScope As System.String, cancellationToken As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of MCPProtectedResourceOAuthResult)
+            ' Some Streamable HTTP servers only challenge POST and answer GET with 405.
+            Dim challenge As System.Collections.Generic.Dictionary(Of System.String, System.String) = Await GetBearerChallengeAsync(endpoint).ConfigureAwait(False)
+            Dim metadata As Newtonsoft.Json.Linq.JObject = Nothing
+            Dim advertisedMetadata As System.String = GetChallengeValue(challenge, "resource_metadata")
+            If Not System.String.IsNullOrWhiteSpace(advertisedMetadata) Then
+                metadata = Await GetAutomaticMCPJsonAsync(advertisedMetadata, cancellationToken).ConfigureAwait(False)
+            Else
+                For Each candidate As System.String In BuildProtectedResourceMetadataCandidates(endpoint)
+                    Try
+                        metadata = Await GetAutomaticMCPJsonAsync(candidate, cancellationToken).ConfigureAwait(False)
+                    Catch ex As System.Net.Http.HttpRequestException
+                        LogMCPOAuth("Automatic resource metadata candidate unavailable", candidate)
+                    End Try
+                    If metadata IsNot Nothing Then Exit For
+                Next
+            End If
+            If metadata Is Nothing Then Throw New System.InvalidOperationException("The MCP server did not publish usable OAuth protected-resource metadata.")
+            Dim resource As System.String = RequireMcpOAuthHttpsEndpoint(If(metadata("resource")?.ToString(), ""), "resource")
+            If Not System.String.Equals(New System.Uri(resource).AbsoluteUri, endpoint, System.StringComparison.Ordinal) Then
+                Throw New System.InvalidOperationException("The OAuth resource metadata identifies a different MCP endpoint.")
+            End If
+            Dim servers As Newtonsoft.Json.Linq.JArray = TryCast(metadata("authorization_servers"), Newtonsoft.Json.Linq.JArray)
+            If servers Is Nothing OrElse servers.Count = 0 Then Throw New System.InvalidOperationException("The MCP server did not advertise an OAuth authorization server.")
+            Dim issuer As System.String = RequireMcpOAuthHttpsEndpoint(servers(0).ToString(), "issuer")
+            Dim issuerUri As New System.Uri(issuer)
+            If issuerUri.Query.Length > 0 OrElse issuerUri.Fragment.Length > 0 OrElse issuerUri.UserInfo.Length > 0 Then
+                Throw New System.InvalidOperationException("The OAuth issuer must not contain credentials, a query or a fragment.")
+            End If
+            Dim origin As System.String = issuerUri.GetLeftPart(System.UriPartial.Authority)
+            Dim path As System.String = issuerUri.AbsolutePath.TrimEnd("/"c)
+            Dim serverMetadata As Newtonsoft.Json.Linq.JObject = Nothing
+            Dim candidates As New System.Collections.Generic.List(Of System.String) From {
+                origin & "/.well-known/oauth-authorization-server" & path,
+                issuer.TrimEnd("/"c) & "/.well-known/openid-configuration"
+            }
+            For Each candidate As System.String In candidates.Distinct(System.StringComparer.Ordinal)
+                Try
+                    serverMetadata = Await GetAutomaticMCPJsonAsync(candidate, cancellationToken).ConfigureAwait(False)
+                Catch ex As System.Net.Http.HttpRequestException
+                    LogMCPOAuth("Automatic authorization metadata candidate unavailable", candidate)
+                End Try
+                If serverMetadata IsNot Nothing Then Exit For
+            Next
+            If serverMetadata Is Nothing OrElse Not System.String.Equals(If(serverMetadata("issuer")?.ToString(), ""), issuer, System.StringComparison.Ordinal) Then
+                Throw New System.InvalidOperationException("The OAuth authorization metadata does not match the advertised issuer.")
+            End If
+            Dim scope As System.String = configuredScope
+            If scope.Length = 0 Then scope = GetChallengeValue(challenge, "scope")
+            If scope.Length = 0 Then
+                Dim scopes As Newtonsoft.Json.Linq.JArray = TryCast(metadata("scopes_supported"), Newtonsoft.Json.Linq.JArray)
+                If scopes IsNot Nothing Then scope = System.String.Join(" ", scopes.Select(Function(item) item.ToString()))
+            End If
+            Dim result As New MCPProtectedResourceOAuthResult With {
+                .Issuer = issuer, .Resource = resource, .Scope = scope,
+                .AuthorizationEndpoint = RequireMcpOAuthHttpsEndpoint(If(serverMetadata("authorization_endpoint")?.ToString(), ""), "authorization_endpoint"),
+                .TokenEndpoint = RequireMcpOAuthHttpsEndpoint(If(serverMetadata("token_endpoint")?.ToString(), ""), "token_endpoint"),
+                .RegistrationEndpoint = If(serverMetadata("registration_endpoint")?.ToString(), "")
+            }
+            Dim pkce As Newtonsoft.Json.Linq.JArray = TryCast(serverMetadata("code_challenge_methods_supported"), Newtonsoft.Json.Linq.JArray)
+            If pkce Is Nothing OrElse Not pkce.Any(Function(item) item.ToString() = "S256") Then
+                Throw New System.InvalidOperationException("The OAuth server must advertise PKCE S256 for automatic MCP sign-in.")
+            End If
+            Dim grants As Newtonsoft.Json.Linq.JArray = TryCast(serverMetadata("grant_types_supported"), Newtonsoft.Json.Linq.JArray)
+            If grants IsNot Nothing AndAlso Not grants.Any(Function(item) item.ToString() = "authorization_code") Then
+                Throw New System.InvalidOperationException("The OAuth server does not support the authorization-code flow required by automatic MCP sign-in.")
+            End If
+            result.SupportsRefresh = grants Is Nothing OrElse grants.Any(Function(item) item.ToString() = "refresh_token")
+            Return result
+        End Function
+
+        Private Shared Async Function RegisterAutomaticMCPAsync(connection As MCPProtectedResourceOAuthResult, cancellationToken As System.Threading.CancellationToken) As System.Threading.Tasks.Task
+            Dim endpoint As System.String = RequireMcpOAuthHttpsEndpoint(connection.RegistrationEndpoint, "registration_endpoint")
+            ' Register only the grants used by this native client, never an unadvertised device grant.
+            Dim grants As New Newtonsoft.Json.Linq.JArray("authorization_code")
+            If connection.SupportsRefresh Then grants.Add("refresh_token")
+            For Each redirect As System.String In New System.String() {"http://127.0.0.1/callback", "https://localhost/callback"}
+                Dim payload As New Newtonsoft.Json.Linq.JObject From {
+                    {"client_name", "Red Ink"}, {"application_type", "native"},
+                    {"redirect_uris", New Newtonsoft.Json.Linq.JArray(redirect)},
+                    {"grant_types", grants.DeepClone()}, {"response_types", New Newtonsoft.Json.Linq.JArray("code")},
+                    {"token_endpoint_auth_method", "none"}
+                }
+                Using client As System.Net.Http.HttpClient = NewAutomaticMCPHttpClient()
+                    Using content As New System.Net.Http.StringContent(payload.ToString(Newtonsoft.Json.Formatting.None), System.Text.Encoding.UTF8, "application/json")
+                        Using response As System.Net.Http.HttpResponseMessage = Await client.PostAsync(endpoint, content, cancellationToken).ConfigureAwait(False)
+                            Dim json As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(Await response.Content.ReadAsStringAsync().ConfigureAwait(False))
+                            If Not response.IsSuccessStatusCode Then
+                                Dim errorCode As System.String = If(json("error")?.ToString(), "")
+                                If response.StatusCode = System.Net.HttpStatusCode.BadRequest AndAlso
+                                   (errorCode = "invalid_redirect_uri" OrElse errorCode = "invalid_client_metadata") AndAlso redirect.StartsWith("http:", System.StringComparison.Ordinal) Then
+                                    LogMCPOAuth("Automatic registration redirect rejected", "Retrying with HTTPS loopback.")
+                                    Continue For
+                                End If
+                                Throw New System.InvalidOperationException("MCP OAuth client registration failed (HTTP " & CInt(response.StatusCode).ToString() & ").")
+                            End If
+                            connection.ClientId = If(json("client_id")?.ToString(), "")
+                            connection.ClientSecret = ""
+                            connection.RedirectUri = redirect
+                            If System.String.IsNullOrWhiteSpace(connection.ClientId) Then Throw New System.InvalidOperationException("OAuth registration returned no client ID.")
+                            Dim method As System.String = If(json("token_endpoint_auth_method")?.ToString(), "none")
+                            If method <> "none" Then Throw New System.InvalidOperationException("The OAuth registration did not accept public-client authentication.")
+                            Dim redirects As Newtonsoft.Json.Linq.JArray = TryCast(json("redirect_uris"), Newtonsoft.Json.Linq.JArray)
+                            If redirects IsNot Nothing AndAlso Not redirects.Any(Function(item) item.ToString() = redirect) Then
+                                Throw New System.InvalidOperationException("OAuth registration did not accept the requested callback address.")
+                            End If
+                            Return
+                        End Using
+                    End Using
+                End Using
+            Next
+            Throw New System.InvalidOperationException("The OAuth server rejected the native client's callback addresses.")
+        End Function
+
+        Private Shared Sub ApplyAutomaticMCPToken(connection As MCPProtectedResourceOAuthResult, json As Newtonsoft.Json.Linq.JObject)
+            Dim token As System.String = If(json("access_token")?.ToString(), "")
+            Dim tokenType As System.String = If(json("token_type")?.ToString(), "")
+            Dim seconds As System.Int32
+            If System.String.IsNullOrWhiteSpace(token) OrElse token.Any(AddressOf System.Char.IsControl) OrElse
+               Not System.String.Equals(tokenType, "Bearer", System.StringComparison.OrdinalIgnoreCase) OrElse
+               Not System.Int32.TryParse(If(json("expires_in")?.ToString(), ""), seconds) OrElse seconds <= 0 Then
+                Throw New System.InvalidOperationException("The OAuth server returned an incomplete or unsupported access token.")
+            End If
+            If json("refresh_token") IsNot Nothing AndAlso System.String.IsNullOrWhiteSpace(json("refresh_token").ToString()) Then
+                Throw New System.InvalidOperationException("The OAuth server returned an empty refresh token.")
+            End If
+            If json("scope") IsNot Nothing Then
+                Dim granted As New System.Collections.Generic.HashSet(Of System.String)(
+                    json("scope").ToString().Split(New System.Char() {" "c}, System.StringSplitOptions.RemoveEmptyEntries), System.StringComparer.Ordinal)
+                If connection.Scope.Split(New System.Char() {" "c}, System.StringSplitOptions.RemoveEmptyEntries).Any(Function(item) Not granted.Contains(item)) Then
+                    Throw New System.InvalidOperationException("The OAuth server did not grant all requested MCP permissions. Reconnect and approve the required access.")
+                End If
+            End If
+            connection.AccessToken = token
+            connection.ExpiresIn = seconds
+            If json("refresh_token") IsNot Nothing Then connection.RefreshToken = json("refresh_token").ToString()
+            If json("scope") IsNot Nothing Then connection.Scope = json("scope").ToString()
+        End Sub
+
+        Public Shared Async Function GetAutomaticMCPAuthorizationAsync(mcpEndpoint As System.String,
+                Optional configuredScope As System.String = "", Optional forceRefresh As System.Boolean = False,
+                Optional rejectedToken As System.String = "", Optional silent As System.Boolean = False,
+                Optional cancellationToken As System.Threading.CancellationToken = Nothing,
+                Optional reconnect As System.Boolean = False) As System.Threading.Tasks.Task(Of MCPProtectedResourceOAuthResult)
+            Dim endpoint As System.String = AutomaticMCPResource(mcpEndpoint)
+            Dim scope As System.String = System.String.Join(" ", If(configuredScope, "").Split(New System.Char() {" "c, Microsoft.VisualBasic.ControlChars.Tab}, System.StringSplitOptions.RemoveEmptyEntries).Distinct(System.StringComparer.Ordinal).OrderBy(Function(item) item, System.StringComparer.Ordinal))
+            Dim path As System.String = AutomaticMCPCachePath(endpoint, scope)
+            Using cacheLock As System.IO.FileStream = Await LockAutomaticMCPCacheAsync(path, cancellationToken).ConfigureAwait(False)
+                If reconnect Then
+                    RequireInteractiveExecution("Reset personal MCP authorization", "noninteractive_auth_required")
+                    If System.IO.File.Exists(path) Then System.IO.File.Delete(path)
+                End If
+                Dim state As MCPAutomaticOAuthState = ReadAutomaticMCPState(path, endpoint, scope)
+                If state IsNot Nothing AndAlso state.ExpiryUtc > System.DateTime.UtcNow AndAlso
+                   Not System.String.IsNullOrWhiteSpace(state.Connection.AccessToken) AndAlso
+                   (Not forceRefresh OrElse (rejectedToken.Length > 0 AndAlso Not System.String.Equals(rejectedToken, state.Connection.AccessToken, System.StringComparison.Ordinal))) Then
+                    Return state.Connection
+                End If
+                cancellationToken.ThrowIfCancellationRequested()
+                If state IsNot Nothing Then
+                    state.Connection.AccessToken = ""
+                    state.ExpiryUtc = System.DateTime.MinValue
+                    WriteAutomaticMCPState(path, state)
+                End If
+                Dim discovered As MCPProtectedResourceOAuthResult = Await DiscoverAutomaticMCPAsync(endpoint, scope, cancellationToken).ConfigureAwait(False)
+                If state Is Nothing Then state = New MCPAutomaticOAuthState With {.Endpoint = endpoint, .ConfiguredScope = scope}
+                Dim saved As MCPProtectedResourceOAuthResult = state.Connection
+                Dim sameAuthority As System.Boolean = saved IsNot Nothing AndAlso
+                    System.String.Equals(saved.Issuer, discovered.Issuer, System.StringComparison.Ordinal) AndAlso
+                    System.String.Equals(saved.Resource, discovered.Resource, System.StringComparison.Ordinal) AndAlso
+                    System.String.Equals(saved.TokenEndpoint, discovered.TokenEndpoint, System.StringComparison.Ordinal)
+                If sameAuthority Then
+                    discovered.ClientId = saved.ClientId
+                    discovered.ClientSecret = saved.ClientSecret
+                    discovered.RedirectUri = saved.RedirectUri
+                    discovered.RefreshToken = saved.RefreshToken
+                    If scope.Length = 0 Then discovered.Scope = saved.Scope
+                End If
+                ' Persist invalidation before any network refresh or interactive operation.
+                ' A timeout or cancellation must never resurrect a token rejected by the server.
+                state.Connection = discovered
+                state.ExpiryUtc = System.DateTime.MinValue
+                WriteAutomaticMCPState(path, state)
+                If discovered.RefreshToken.Length > 0 AndAlso discovered.ClientId.Length > 0 Then
+                    Dim form As New System.Collections.Generic.Dictionary(Of System.String, System.String) From {
+                        {"grant_type", "refresh_token"}, {"client_id", discovered.ClientId},
+                        {"refresh_token", discovered.RefreshToken}, {"resource", discovered.Resource}
+                    }
+                    If discovered.ClientSecret.Length > 0 Then form("client_secret") = discovered.ClientSecret
+                    Using client As System.Net.Http.HttpClient = NewAutomaticMCPHttpClient()
+                        Using content As New System.Net.Http.FormUrlEncodedContent(form)
+                            Using response As System.Net.Http.HttpResponseMessage = Await client.PostAsync(discovered.TokenEndpoint, content, cancellationToken).ConfigureAwait(False)
+                                Dim json As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(Await response.Content.ReadAsStringAsync().ConfigureAwait(False))
+                                If response.IsSuccessStatusCode Then
+                                    ApplyAutomaticMCPToken(discovered, json)
+                                    state.ExpiryUtc = AutomaticMCPExpiry(discovered.ExpiresIn)
+                                    WriteAutomaticMCPState(path, state)
+                                    Return discovered
+                                End If
+                                Dim errorCode As System.String = If(json("error")?.ToString(), "")
+                                If errorCode <> "invalid_grant" AndAlso errorCode <> "invalid_client" Then
+                                    Throw New System.InvalidOperationException("MCP OAuth token renewal failed (HTTP " & CInt(response.StatusCode).ToString() & "). Retry later.")
+                                End If
+                                LogMCPOAuth("Automatic token renewal requires sign-in", errorCode)
+                                discovered.RefreshToken = ""
+                                If errorCode = "invalid_client" Then discovered.ClientId = ""
+                                WriteAutomaticMCPState(path, state)
+                            End Using
+                        End Using
+                    End Using
+                End If
+                RequireInteractiveExecution("MCP OAuth sign-in: connect this server interactively before retrying", "noninteractive_auth_required")
+                If silent Then Throw New System.InvalidOperationException("This MCP server requires interactive sign-in. Connect it in Freestyle and retry.")
+                cancellationToken.ThrowIfCancellationRequested()
+                If discovered.ClientId.Length = 0 Then
+                    Await RegisterAutomaticMCPAsync(discovered, cancellationToken).ConfigureAwait(False)
+                    WriteAutomaticMCPState(path, state)
+                End If
+                Dim authorized As MCPProtectedResourceOAuthResult = Await RunOobAuthorizationCodeFlowAsync(
+                    discovered.ClientId, discovered.ClientSecret, discovered.AuthorizationEndpoint, discovered.TokenEndpoint,
+                    discovered.RedirectUri, discovered.Scope, discovered.Resource, False, True, cancellationToken, discovered.Issuer).ConfigureAwait(False)
+                discovered.AccessToken = authorized.AccessToken
+                discovered.RefreshToken = authorized.RefreshToken
+                discovered.ExpiresIn = authorized.ExpiresIn
+                discovered.Scope = authorized.Scope
+                state.ExpiryUtc = AutomaticMCPExpiry(discovered.ExpiresIn)
+                WriteAutomaticMCPState(path, state)
+                Return discovered
+            End Using
+        End Function
+
+        Private Shared Function AutomaticMCPExpiry(seconds As System.Int32) As System.DateTime
+            Return System.DateTime.UtcNow.AddSeconds(seconds - System.Math.Min(300, System.Math.Max(1, seconds \ 10)))
+        End Function
 
         Public Shared Async Function AcquireMCPProtectedResourceOAuthAsync(
                 protectedResourceUrl As String,
@@ -558,7 +914,10 @@ Namespace SharedLibrary
                 redirectUri As String,
                 scope As String,
                 resource As String,
-                silent As Boolean) As Task(Of MCPProtectedResourceOAuthResult)
+                silent As Boolean,
+                Optional strictOAuth As System.Boolean = False,
+                Optional cancellationToken As System.Threading.CancellationToken = Nothing,
+                Optional expectedIssuer As System.String = "") As System.Threading.Tasks.Task(Of MCPProtectedResourceOAuthResult)
 
             authorizationEndpoint = RequireMcpOAuthHttpsEndpoint(authorizationEndpoint, "authorization_endpoint")
             tokenEndpoint = RequireMcpOAuthHttpsEndpoint(tokenEndpoint, "token_endpoint")
@@ -596,13 +955,27 @@ Namespace SharedLibrary
             capturedRedirect = RunOnStaThread(Of System.String)(
                 Function()
                     Using browserForm As New MCPOAuthBrowserForm(authUrl.ToString(), redirectUri)
-                        Dim owner As System.Windows.Forms.IWin32Window = Nothing
-                        If IsOnHostUiThread Then owner = ResolveSameThreadDialogOwner()
-                        Dim result As System.Windows.Forms.DialogResult = If(owner Is Nothing, browserForm.ShowDialog(), browserForm.ShowDialog(owner))
-                        If result <> System.Windows.Forms.DialogResult.OK OrElse System.String.IsNullOrWhiteSpace(browserForm.CapturedRedirectUrl) Then
-                            Throw New System.Exception("OAuth authentication was cancelled or did not complete.")
-                        End If
-                        Return browserForm.CapturedRedirectUrl
+                        cancellationToken.ThrowIfCancellationRequested()
+                        Dim cancellationHandle As System.IntPtr = browserForm.Handle
+                        Using cancelRegistration As System.Threading.CancellationTokenRegistration = cancellationToken.Register(
+                            Sub()
+                                Try
+                                    If browserForm.IsHandleCreated AndAlso Not browserForm.IsDisposed Then
+                                        browserForm.BeginInvoke(New System.Action(Sub() browserForm.Close()))
+                                    End If
+                                Catch ex As System.InvalidOperationException
+                                    ' The STA may already have disposed the window.
+                                End Try
+                            End Sub)
+                            Dim owner As System.Windows.Forms.IWin32Window = Nothing
+                            If IsOnHostUiThread Then owner = ResolveSameThreadDialogOwner()
+                            Dim result As System.Windows.Forms.DialogResult = If(owner Is Nothing, browserForm.ShowDialog(), browserForm.ShowDialog(owner))
+                            If result <> System.Windows.Forms.DialogResult.OK OrElse System.String.IsNullOrWhiteSpace(browserForm.CapturedRedirectUrl) Then
+                                Throw New System.Exception("OAuth authentication was cancelled or did not complete.")
+                            End If
+                            cancellationToken.ThrowIfCancellationRequested()
+                            Return browserForm.CapturedRedirectUrl
+                        End Using
                     End Using
                 End Function, "Red Ink MCP OAuth")
 
@@ -611,7 +984,15 @@ Namespace SharedLibrary
             Try
                 Dim uri As New Uri(capturedRedirect)
                 Dim qs = System.Web.HttpUtility.ParseQueryString(uri.Query)
+                If Not IsMCPRedirectCallback(capturedRedirect, redirectUri) OrElse
+                   Not System.String.Equals(qs("state"), state, System.StringComparison.Ordinal) Then
+                    Throw New System.Exception("OAuth callback validation failed. Start sign-in again.")
+                End If
 
+                If expectedIssuer.Length > 0 AndAlso qs("iss") IsNot Nothing AndAlso
+                   Not System.String.Equals(qs("iss"), expectedIssuer, System.StringComparison.Ordinal) Then
+                    Throw New System.Exception("OAuth callback identifies a different authorization server.")
+                End If
                 Dim errorText As String = If(qs("error"), "")
                 If Not String.IsNullOrWhiteSpace(errorText) Then
                     Throw New Exception("OAuth authorization failed: " & errorText)
@@ -642,14 +1023,16 @@ Namespace SharedLibrary
                 formData("resource") = resource
             End If
 
-            Using client As New HttpClient()
+            Using client As System.Net.Http.HttpClient = If(strictOAuth, NewAutomaticMCPHttpClient(), New System.Net.Http.HttpClient())
                 client.Timeout = TimeSpan.FromSeconds(60)
 
-                Dim response = Await client.PostAsync(tokenEndpoint, New FormUrlEncodedContent(formData)).ConfigureAwait(False)
+                Dim response = Await client.PostAsync(tokenEndpoint, New FormUrlEncodedContent(formData), cancellationToken).ConfigureAwait(False)
                 Dim responseText = Await response.Content.ReadAsStringAsync().ConfigureAwait(False)
 
                 If Not response.IsSuccessStatusCode Then
-                    Throw New Exception($"OAuth token exchange failed: HTTP {CInt(response.StatusCode)} {responseText}")
+                    Throw New System.Exception(If(strictOAuth,
+                        "OAuth token exchange failed (HTTP " & CInt(response.StatusCode).ToString() & "). Start sign-in again.",
+                        $"OAuth token exchange failed: HTTP {CInt(response.StatusCode)} {responseText}"))
                 End If
 
                 Dim tokenJson = JObject.Parse(responseText)
@@ -665,7 +1048,7 @@ Namespace SharedLibrary
                     If expiresIn <= 0 Then expiresIn = 3600
                 End If
 
-                Return New MCPProtectedResourceOAuthResult With {
+                Dim result As New MCPProtectedResourceOAuthResult With {
                     .AccessToken = accessToken,
                     .ClientId = clientId,
                     .ClientSecret = clientSecret,
@@ -674,8 +1057,11 @@ Namespace SharedLibrary
                     .Scope = scope,
                     .Resource = resource,
                     .ExpiresIn = expiresIn,
-                    .UseDeviceFlow = False
+                    .UseDeviceFlow = False,
+                    .RedirectUri = redirectUri
                 }
+                If strictOAuth Then ApplyAutomaticMCPToken(result, tokenJson)
+                Return result
             End Using
         End Function
 
@@ -993,6 +1379,17 @@ Namespace SharedLibrary
                 ' Never let logging itself fail OAuth
             End Try
         End Sub
+
+        Public Shared Function IsMCPRedirectCallback(callback As System.String, expected As System.String) As System.Boolean
+            Dim actualUri As System.Uri = Nothing
+            Dim expectedUri As System.Uri = Nothing
+            If Not System.Uri.TryCreate(callback, System.UriKind.Absolute, actualUri) OrElse
+               Not System.Uri.TryCreate(expected, System.UriKind.Absolute, expectedUri) Then Return False
+            Return System.String.Equals(actualUri.Scheme, expectedUri.Scheme, System.StringComparison.OrdinalIgnoreCase) AndAlso
+                System.String.Equals(actualUri.Host, expectedUri.Host, System.StringComparison.OrdinalIgnoreCase) AndAlso
+                actualUri.Port = expectedUri.Port AndAlso actualUri.UserInfo.Length = 0 AndAlso actualUri.Fragment.Length = 0 AndAlso
+                System.String.Equals(actualUri.AbsolutePath, expectedUri.AbsolutePath, System.StringComparison.Ordinal)
+        End Function
 
         Private Shared Function GenerateOAuthRandomValue() As String
             Dim bytes(31) As Byte

@@ -104,7 +104,7 @@ Namespace SharedLibrary
 
                 If Not sseResponse.IsSuccessStatusCode Then
                     Dim preview = Await sseResponse.Content.ReadAsStringAsync().ConfigureAwait(False)
-                    Throw New Exception(
+                    Throw New MCPHttpRequestException(sseResponse.StatusCode,
                         $"SSE handshake GET {CInt(sseResponse.StatusCode)} ({sseResponse.ReasonPhrase}): " &
                         preview)
                 End If
@@ -201,7 +201,7 @@ Namespace SharedLibrary
 
                     If Not sseResponse.IsSuccessStatusCode Then
                         Dim preview = Await sseResponse.Content.ReadAsStringAsync().ConfigureAwait(False)
-                        Throw New Exception(
+                        Throw New MCPHttpRequestException(sseResponse.StatusCode,
                             $"SSE GET {CInt(sseResponse.StatusCode)} ({sseResponse.ReasonPhrase}): " &
                             preview)
                     End If
@@ -253,7 +253,7 @@ Namespace SharedLibrary
                             Dim initResp = Await postClient.PostAsync(postEndpoint, initContent).ConfigureAwait(False)
                             If Not initResp.IsSuccessStatusCode Then
                                 Dim err = Await initResp.Content.ReadAsStringAsync().ConfigureAwait(False)
-                                Throw New System.Exception($"SSE initialize POST {CInt(initResp.StatusCode)}: {err}")
+                                Throw New MCPHttpRequestException(initResp.StatusCode, $"SSE initialize POST {CInt(initResp.StatusCode)}: {err}")
                             End If
 
                             ' Wait for initialize response on SSE stream (consume it)
@@ -274,7 +274,7 @@ Namespace SharedLibrary
 
                             If Not toolResp.IsSuccessStatusCode Then
                                 Dim err = Await toolResp.Content.ReadAsStringAsync().ConfigureAwait(False)
-                                Throw New System.Exception($"SSE tool POST {CInt(toolResp.StatusCode)}: {err}")
+                                Throw New MCPHttpRequestException(toolResp.StatusCode, $"SSE tool POST {CInt(toolResp.StatusCode)}: {err}")
                             End If
 
                             ' Check if the POST response itself contains a JSON-RPC result
@@ -462,7 +462,7 @@ Namespace SharedLibrary
                     Dim initResp = Await postClient.PostAsync(postEndpoint, initContent).ConfigureAwait(False)
                     If Not initResp.IsSuccessStatusCode Then
                         Dim err = Await initResp.Content.ReadAsStringAsync().ConfigureAwait(False)
-                        Throw New System.Exception($"SSE initialize POST {CInt(initResp.StatusCode)}: {err}")
+                        Throw New MCPHttpRequestException(initResp.StatusCode, $"SSE initialize POST {CInt(initResp.StatusCode)}: {err}")
                     End If
 
                     Dim notifPayload As New JObject From {{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}}
