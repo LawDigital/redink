@@ -13,7 +13,7 @@
 '   agent, UI, transcription, and command behavior to the other ThisAddIn.* files.
 ' =============================================================================
 '
-' 9.11.2026
+' 10.11.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -72,7 +72,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.091126" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.101126" & SharedMethods.VersionQualifier
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
     Public Const AN5 As String = "RI" ' for bubble comments 

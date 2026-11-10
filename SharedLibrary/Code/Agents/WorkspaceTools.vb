@@ -137,6 +137,11 @@ Namespace Agents
 
         ' --------------------------------------------------------------- dispatch
         Public Shared Function Execute(toolName As String, arguments As IDictionary(Of String, Object)) As String
+            Return Execute(toolName, arguments, Nothing)
+        End Function
+
+        Public Shared Function Execute(toolName As String, arguments As IDictionary(Of String, Object),
+                                       runState As Global.SharedLibrary.Agents.ToolCallSequencing.ToolingRunState) As String
             Try
                 Dim normalized = NormalizeArguments(toolName, arguments)
                 If normalized IsNot Nothing Then
@@ -157,7 +162,7 @@ Namespace Agents
                     Case ToolCopy : Return ExecuteCopyOrMove(arguments, isMove:=False)
                     Case ToolMove : Return ExecuteCopyOrMove(arguments, isMove:=True)
                     Case ToolRename : Return ExecuteRename(arguments)
-                    Case ToolDelete : Return ExecuteDelete(arguments)
+                    Case ToolDelete : Return ExecuteDelete(arguments, runState)
                     Case ToolMakeDir : Return ExecuteMakeDir(arguments)
                     Case ToolExtractText, ToolExtractTextMany
                         Return Err_("host_only_tool", toolName & " must be executed by the host (Word/Outlook), not via the shared dispatcher.")
@@ -852,7 +857,7 @@ Namespace Agents
             Return ArtifactDelivery.AttachOptionalSingleFileArtifactToResult(resultJson, artifactMetadata, dst)
         End Function
 
-        Private Shared Function ExecuteDelete(args As IDictionary(Of String, Object)) As String
+        Private Shared Function ExecuteDelete(args As IDictionary(Of String, Object), runState As Global.SharedLibrary.Agents.ToolCallSequencing.ToolingRunState) As String
             Dim err = RequireConnected() : If err IsNot Nothing Then Return err
             If Not _active.AllowDelete Then Return Err_("not_permitted", "Delete is disabled.")
             Dim p = ResolveInsideWorkspace(GetStr(args, "path"))
@@ -861,6 +866,7 @@ Namespace Agents
                 FileSystem.DeleteFile(p, UIOption.OnlyErrorDialogs,
                     If(toTrash, RecycleOption.SendToRecycleBin, RecycleOption.DeletePermanently),
                     UICancelOption.ThrowException)
+                ArtifactDelivery.RecordConfirmedFileDeletion(runState, p)
             ElseIf Directory.Exists(p) Then
                 FileSystem.DeleteDirectory(p, UIOption.OnlyErrorDialogs,
                     If(toTrash, RecycleOption.SendToRecycleBin, RecycleOption.DeletePermanently),

@@ -126,22 +126,7 @@ Partial Public Class ThisAddIn
             Return New Global.SharedLibrary.TabularReview.ReviewWorkbookSaveResult With {
                 .Status = "failed", .Message = "This workbook is read-only. Use Save As to keep a writable copy."}
         End If
-        If Not automatic AndAlso Not saveAs Then
-            Using Global.SharedLibrary.SharedLibrary.SharedMethods.PushDialogOwner(form)
-                Dim choice As System.Int32 = Global.SharedLibrary.SharedLibrary.SharedMethods.ShowCustomYesNoBox(
-                    "Save " & workbook.Name & " to disk now?" & System.Environment.NewLine &
-                    "This saves all changes in this Excel workbook, including the complete review and extracted source text." &
-                    If(System.String.IsNullOrWhiteSpace(workbook.Path), System.Environment.NewLine & "Choose a filename in the next step.", ""),
-                    "Save", "Keep open", "Red Ink — Save workbook")
-                If choice <> 1 Then
-                    Return New Global.SharedLibrary.TabularReview.ReviewWorkbookSaveResult With {
-                        .Status = "skipped", .Message = "Save skipped. Your review changes remain in the open Excel workbook."}
-                End If
-            End Using
-            store.EnsureAvailable()
-            If Me.HostWindowLifetimeToken.IsCancellationRequested Then Throw New System.OperationCanceledException(Me.HostWindowLifetimeToken)
-            If System.String.IsNullOrWhiteSpace(workbook.Path) Then saveAs = True
-        End If
+        If System.String.IsNullOrWhiteSpace(workbook.Path) Then saveAs = True
         If Not saveAs Then
             ' Prepare portable-folder metadata before the disk write, including a
             ' native Excel Save As that changed the captured workbook's location.
@@ -155,11 +140,6 @@ Partial Public Class ThisAddIn
             End If
             Return WriteTabularReviewWorkbookFile(store, "", Nothing, automatic)
         End If
-        If automatic Then
-            Return New Global.SharedLibrary.TabularReview.ReviewWorkbookSaveResult With {
-                .Status = "skipped", .Message = "Use Save or Save As once to choose a workbook file before AutoSave can run."}
-        End If
-
         Dim currentFormat As System.Int32 = CInt(workbook.FileFormat)
         Dim extension As System.String = If(currentFormat = 50, "xlsb", If(currentFormat = 52 OrElse workbook.HasVBProject, "xlsm", "xlsx"))
         Dim defaultName As System.String = System.IO.Path.ChangeExtension(workbook.Name, extension)
@@ -339,7 +319,8 @@ Partial Public Class ThisAddIn
         Dim hasPath As System.Boolean = Not System.String.IsNullOrWhiteSpace(workbook.Path)
         Dim state As New Global.SharedLibrary.TabularReview.ReviewWorkbookSaveState With {.Saved = hasPath AndAlso workbook.Saved}
         If Not hasPath Then
-            state.Message = "Review changes stay in the open workbook. Use Save or Save As once to choose its file and enable AutoSave."
+            state.CanAutoSave = Not workbook.ReadOnly AndAlso workbook.Application.Ready
+            state.Message = "Choose a filename on the first save."
         ElseIf workbook.ReadOnly Then
             state.Message = "This workbook is read-only. Use Save As to keep a writable copy."
         Else

@@ -439,6 +439,7 @@ Namespace Agents
             Public Property LegacyCompatibilityEligible As Boolean
             ' Exact successful producer-source provenance; not artifact identity or supersession.
             ' Shared with nested runs and persisted in the ordinary artifact registry snapshot.
+            Public Property LegacyFileDeleted As System.Boolean
             Public Property LegacySourceAccountedFor As System.Boolean
             Public Property WasObservedLegacyFileDelta As Boolean
             Public Property IsFinalDeliverable As Boolean

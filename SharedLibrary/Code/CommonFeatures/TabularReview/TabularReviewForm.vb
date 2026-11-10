@@ -20,6 +20,7 @@ Namespace Global.SharedLibrary.TabularReview
         Private ReadOnly _allowedPaths As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
         Private ReadOnly _models As System.Collections.Generic.List(Of ReviewModelChoice)
         Private _project As ReviewProject
+        Private Shared _sessionReviewer As System.String = ""
         Private _ready As System.Boolean
         Private _busy As System.Boolean
         Private _closed As System.Boolean
@@ -33,6 +34,7 @@ Namespace Global.SharedLibrary.TabularReview
         Private _persistedViewJson As System.String = ""
         Private _pendingMetadata As System.Boolean
         Private _savingWorkbook As System.Boolean
+        Private _filenameDeclined As System.Boolean
         Private _lastSavedUtc As System.String = ""
         Private _persistenceMessage As System.String = ""
         Private _portableNotice As System.String = ""
@@ -353,10 +355,19 @@ Namespace Global.SharedLibrary.TabularReview
                     If requestId = _flushId AndAlso _flush IsNot Nothing Then _flush.TrySetResult(BooleanField(request, "ok"))
                     Return
                 End If
+                If command = "rememberReviewer" Then
+                    _sessionReviewer = TextField(request, "name").Trim()
+                    For Each window As System.Windows.Forms.Form In System.Windows.Forms.Application.OpenForms
+                        Dim review As TabularReviewForm = TryCast(window, TabularReviewForm)
+                        If review IsNot Nothing AndAlso review IsNot Me AndAlso review._ready Then review.Post(New With {.command = "sessionReviewer", .name = _sessionReviewer})
+                    Next
+                    Return
+                End If
                 EnsureAvailable()
                 Select Case command
                     Case "ready"
                         _ready = True
+                        Post(New With {.command = "sessionReviewer", .name = _sessionReviewer})
                         SendState()
                     Case "cancel"
                         If _operation IsNot Nothing Then _operation.Cancel()
@@ -402,11 +413,16 @@ Namespace Global.SharedLibrary.TabularReview
                                 SetFindingsArchived(request, command = "removeFindings")
                             Case "saveAnswer"
                                 SaveAnswer(request)
+                            Case "dissolveGroup"
+                                DissolveGroup(request)
+                            Case "assignGroup", "assignCategory", "groupByFolder"
+                                AssignReviewScope(request, command)
                             Case "saveDocument"
                                 SaveDocument(request)
                             Case "view"
                                 SaveView(request)
                             Case "saveAutosave"
+                                _filenameDeclined = False
                                 Dim candidate As ReviewProject = ReviewContract.Clone(_project)
                                 candidate.View.AutoSave = BooleanField(request, "enabled", True)
                                 Commit(candidate, "autosave_preference", If(candidate.View.AutoSave, "Enabled review autosave.", "Disabled review autosave."), actor:=RequireReviewer(request))
@@ -421,7 +437,7 @@ Namespace Global.SharedLibrary.TabularReview
                                 _persistenceMessage = ""
                                 _message = "Loaded direct Excel edits. Changed questions and answers require review."
                                 SendState()
-                            Case "scanFolder", "importSelection", "refreshDocument", "relinkDocument", "generate", "generateAll", "planContradictions", "checkContradictions", "exportReport",
+                            Case "scanFolder", "importSelection", "refreshDocument", "relinkDocument", "generate", "generateAll", "classifyDocuments", "reviewGroups", "planContradictions", "checkContradictions", "exportReport",
                                  "listColumnTemplates", "loadColumnTemplate", "importColumnTemplates", "saveColumnTemplate", "exportColumnTemplate"
                                 _busy = True
                                 enteredOperation = True
@@ -435,6 +451,10 @@ Namespace Global.SharedLibrary.TabularReview
                                     Await LoadRegisteredSourcesAsync(importedIds, _operation.Token)
                                 ElseIf command = "refreshDocument" OrElse command = "relinkDocument" Then
                                     Await RefreshDocumentAsync(TextField(request, "documentId"), command = "relinkDocument", _operation.Token)
+                                ElseIf command = "classifyDocuments" Then
+                                    Await ClassifyDocumentsAsync(request, _operation.Token)
+                                ElseIf command = "reviewGroups" Then
+                                    Await ReviewGroupsAsync(request, _operation.Token)
                                 ElseIf command = "planContradictions" Then
                                     consistencyPlan = Await PlanConsistencyAsync(request, _operation.Token)
                                 ElseIf command = "checkContradictions" Then
@@ -549,6 +569,7 @@ Namespace Global.SharedLibrary.TabularReview
 
         Private Shared Function RequireReviewer(request As Newtonsoft.Json.Linq.JObject) As System.String
             Dim name As System.String = TextField(request, "actor").Trim()
+            If name.Length = 0 AndAlso BooleanField(request, "automatic") Then Return System.Environment.UserName
             If name.Length = 0 Then Throw New System.InvalidOperationException("Enter your name in Reviewer before saving manual changes.")
             Return name
         End Function
@@ -587,6 +608,7 @@ Namespace Global.SharedLibrary.TabularReview
             If _savingWorkbook Then Return New ReviewWorkbookSaveResult With {.Status = "skipped", .Message = "A workbook save is already running."}
             If automatic Then
                 If Not _project.View.AutoSave Then Return New ReviewWorkbookSaveResult With {.Status = "skipped", .Message = "Autosave is off."}
+                If _filenameDeclined AndAlso _callbacks.WorkbookPath IsNot Nothing AndAlso System.String.IsNullOrWhiteSpace(_callbacks.WorkbookPath.Invoke()) Then Return New ReviewWorkbookSaveResult With {.Status = "skipped", .Message = "Choose Save to select a filename."}
                 If Not HasReviewContent() Then Return New ReviewWorkbookSaveResult With {.Status = "skipped", .Message = "Add documents or columns to begin your review."}
                 Dim state As ReviewWorkbookSaveState = If(_callbacks.WorkbookSaveState Is Nothing, Nothing, _callbacks.WorkbookSaveState.Invoke())
                 If state Is Nothing OrElse Not state.CanAutoSave Then
@@ -607,7 +629,8 @@ Namespace Global.SharedLibrary.TabularReview
                 If result Is Nothing OrElse Not ReviewContract.Contains(New System.String() {"saved", "cancelled", "skipped", "failed"}, result.Status) Then
                     Throw New System.IO.InvalidDataException("Excel returned an invalid save result. Check the workbook before closing it.")
                 End If
-                If automatic AndAlso result.Status = "cancelled" Then Throw New System.IO.InvalidDataException("Autosave unexpectedly requested an interactive cancellation. Use Save to check this workbook.")
+                If result.Status = "cancelled" Then _filenameDeclined = True
+                If result.Status = "saved" Then _filenameDeclined = False
                 If result.Status = "failed" Then Throw New System.IO.IOException(result.Message)
                 _persistenceMessage = result.Message
                 If result.Status = "saved" Then
@@ -702,23 +725,29 @@ Namespace Global.SharedLibrary.TabularReview
                     .Id = If(previous IsNot Nothing, previous.Id, System.Guid.NewGuid().ToString("N")),
                     .Title = TextField(definition, "title"), .Instruction = TextField(definition, "instruction"),
                     .Kind = TextField(definition, "kind", "analysis"), .Archived = BooleanField(definition, "archived"),
+                    .Category = TextField(definition, "category").Trim(), .FlagScale = TextField(definition, "flagScale"),
+                    .FlagConditions = If(definition("flagConditions") Is Nothing, New System.Collections.Generic.Dictionary(Of System.String, System.String)(), definition("flagConditions").ToObject(Of System.Collections.Generic.Dictionary(Of System.String, System.String))()),
                     .Options = ExactStringList(definition("options"))
                 }
+                If criterion.FlagConditions Is Nothing Then Throw New System.IO.InvalidDataException("Flag conditions must map labels to instructions.")
+                For Each label As System.String In New System.Collections.Generic.List(Of System.String)(criterion.FlagConditions.Keys)
+                    If criterion.Kind = "analysis" AndAlso Not criterion.FlagValues().Contains(label) Then criterion.FlagConditions.Remove(label)
+                Next
                 If Not seen.Add(criterion.Id) Then Throw New System.IO.InvalidDataException("A column appears more than once.")
                 If previous IsNot Nothing Then
                     criterion.Revision = previous.Revision
-                    Dim changed As System.Boolean = criterion.Title <> previous.Title OrElse criterion.Instruction <> previous.Instruction OrElse criterion.Kind <> previous.Kind OrElse ReviewContract.Serialize(criterion.Options) <> ReviewContract.Serialize(previous.Options)
+                    Dim changed As System.Boolean = criterion.Category <> previous.Category OrElse criterion.FlagScale <> previous.FlagScale OrElse ReviewContract.Serialize(criterion.FlagConditions) <> ReviewContract.Serialize(previous.FlagConditions) OrElse criterion.Title <> previous.Title OrElse criterion.Instruction <> previous.Instruction OrElse criterion.Kind <> previous.Kind OrElse ReviewContract.Serialize(criterion.Options) <> ReviewContract.Serialize(previous.Options)
                     If changed Then
                         criterion.Revision += 1
                     End If
                     If changed OrElse (previous.Archived AndAlso Not criterion.Archived) Then
                         For Each document As ReviewDocument In candidate.Documents
-                            ReviewContract.Invalidate(document, criterion.Id)
+                            If criterion.AppliesTo(document) OrElse previous.AppliesTo(document) Then ReviewContract.Invalidate(document, criterion.Id)
                         Next
                     End If
                 ElseIf Not criterion.Archived Then
                     For Each document As ReviewDocument In candidate.Documents
-                        ReviewContract.Invalidate(document, criterion.Id)
+                        If criterion.AppliesTo(document) Then ReviewContract.Invalidate(document, criterion.Id)
                     Next
                 End If
                 Dim width As System.Nullable(Of System.Int32) = OptionalColumnWidth(definition("width"), False)
@@ -834,6 +863,24 @@ Namespace Global.SharedLibrary.TabularReview
             candidate.FlagColors = colors
             ReviewContract.NormalizeFlagColors(candidate)
             For Each criterion As ReviewCriterion In candidate.Criteria
+                If criterion.Kind = "analysis" Then
+                    Dim labels = criterion.FlagValues()
+                    If labels.RemoveAll(Function(label As System.String) deleted.Contains(label)) > 0 Then
+                        criterion.FlagScale = System.String.Join(System.Environment.NewLine, labels)
+                        For Each label As System.String In deleted
+                            criterion.FlagConditions.Remove(label)
+                        Next
+                        criterion.Revision += 1
+                        For Each document As ReviewDocument In candidate.Documents
+                            Dim prior As ReviewAnswer = Nothing
+                            If document.Answers.TryGetValue(criterion.Id, prior) AndAlso deleted.Contains(prior.RiskFlag) Then
+                                ReviewContract.ArchiveAnswer(prior, "Deleted question flag")
+                                prior.RiskFlag = ""
+                                ReviewContract.Invalidate(document, criterion.Id)
+                            End If
+                        Next
+                    End If
+                End If
                 If criterion.Kind <> "flag" Then Continue For
                 Dim removedOptions As System.Int32 = criterion.Options.RemoveAll(Function(label As System.String) deleted.Contains(label))
                 If removedOptions > 0 Then criterion.Revision += 1
@@ -990,6 +1037,19 @@ Namespace Global.SharedLibrary.TabularReview
             finding.UpdatedBy = actor
             finding.ReviewedBy = If(status = "reviewed", actor, "")
             finding.ReviewedUtc = If(status = "reviewed", finding.UpdatedUtc, "")
+            For Each edits As System.Collections.Generic.Dictionary(Of System.String, ReviewAnswer) In candidate.GroupEdits.Values
+                For Each edited As ReviewAnswer In edits.Values
+                    If edited.SourceHash <> finding.RunId Then Continue For
+                    ReviewContract.ArchiveAnswer(edited, "Finding edit")
+                    edited.Text = finding.Description
+                    edited.Assessment = finding.Assessment
+                    edited.Status = finding.Status
+                    edited.UpdatedUtc = finding.UpdatedUtc
+                    edited.UpdatedBy = actor
+                    edited.ReviewedUtc = finding.ReviewedUtc
+                    edited.ReviewedBy = finding.ReviewedBy
+                Next
+            Next
             Commit(candidate, "finding_edit", "Saved the finding's assessment, priority and review status.", actor:=RequireReviewer(request))
         End Sub
 
@@ -1024,8 +1084,12 @@ Namespace Global.SharedLibrary.TabularReview
         Private Sub SaveAnswer(request As Newtonsoft.Json.Linq.JObject)
             Dim actor As System.String = RequireReviewer(request)
             Dim candidate As ReviewProject = ReviewContract.Clone(_project)
-            Dim document As ReviewDocument = FindDocument(TextField(request, "documentId"), candidate)
+            Dim documentId As System.String = TextField(request, "documentId")
+            Dim group As System.Boolean = documentId.StartsWith("group:", System.StringComparison.Ordinal)
+            Dim document As ReviewDocument = If(group, ReviewContract.CurrentGroupRows(candidate).Find(Function(item As ReviewDocument) item.Id = documentId), FindDocument(documentId, candidate))
             Dim criterion As ReviewCriterion = FindCriterion(TextField(request, "criterionId"), candidate)
+            If document Is Nothing Then Throw New System.IO.InvalidDataException("The group no longer exists.")
+            If Not If(group, candidate.Documents.Exists(Function(member As ReviewDocument) Not member.Archived AndAlso member.GroupName = document.GroupName AndAlso criterion.AppliesTo(member)), criterion.AppliesTo(document)) Then Throw New System.IO.InvalidDataException("This question does not apply to the selected row.")
             Dim answer As ReviewAnswer = Nothing
             If Not document.Answers.TryGetValue(criterion.Id, answer) Then
                 answer = New ReviewAnswer()
@@ -1035,18 +1099,43 @@ Namespace Global.SharedLibrary.TabularReview
             If status <> "draft" AndAlso status <> "reviewed" Then Throw New System.IO.InvalidDataException("Choose Draft or Reviewed for an edited answer.")
             Dim text As System.String = TextField(request, "text")
             If status = "reviewed" AndAlso System.String.IsNullOrWhiteSpace(text) Then Throw New System.IO.InvalidDataException("Enter the answer or explain the absence of a finding before marking this answer reviewed.")
-            If (criterion.Kind = "priority" OrElse criterion.Kind = "flag") AndAlso criterion.Options.Count > 0 AndAlso text.Length > 0 AndAlso Not criterion.Options.Contains(text) Then Throw New System.IO.InvalidDataException("Choose one of the values configured for this column.")
+            If (criterion.Kind = "priority" OrElse criterion.Kind = "flag") AndAlso Not group AndAlso criterion.Options.Count > 0 AndAlso text.Length > 0 AndAlso Not criterion.Options.Contains(text) Then Throw New System.IO.InvalidDataException("Choose one of the values configured for this column.")
+            Dim riskFlag As System.String = TextField(request, "riskFlag", answer.RiskFlag)
+            Dim labels As System.Collections.Generic.List(Of System.String) = criterion.FlagValues()
+            If labels.Count > 0 AndAlso (riskFlag.Length > 0 OrElse status = "reviewed") AndAlso Not labels.Contains(riskFlag) Then Throw New System.IO.InvalidDataException("Select a configured flag for this answer.")
             ReviewContract.ArchiveAnswer(answer, "Manual edit")
+            answer.RiskFlag = If(labels.Count > 0, riskFlag, "")
+            answer.TextStyle = ReadFieldStyle(request, "textStyle", answer.TextStyle)
+            answer.AssessmentStyle = ReadFieldStyle(request, "assessmentStyle", answer.AssessmentStyle)
             answer.Text = text
             answer.Assessment = TextField(request, "assessment")
             answer.Status = status
             answer.UserEdited = True
             answer.CriterionRevision = criterion.Revision
-            answer.SourceHash = document.SourceHash
+            If Not group Then answer.SourceHash = document.SourceHash
             answer.UpdatedUtc = System.DateTime.UtcNow.ToString("o")
             answer.UpdatedBy = actor
             answer.ReviewedBy = If(status = "reviewed", actor, "")
             answer.ReviewedUtc = If(status = "reviewed", answer.UpdatedUtc, "")
+            If group Then
+                answer.GroupContext = document.TextHash
+                If Not candidate.GroupEdits.ContainsKey(document.Id) Then candidate.GroupEdits.Add(document.Id, New System.Collections.Generic.Dictionary(Of System.String, ReviewAnswer)())
+                Dim finding As ReviewFinding = candidate.Findings.Find(Function(item As ReviewFinding) item.RunId = answer.SourceHash AndAlso Not item.Archived)
+                If finding IsNot Nothing Then
+                    ReviewContract.ArchiveFinding(finding, "Group matrix edit")
+                    finding.Description = answer.Text
+                    finding.Assessment = answer.Assessment
+                    finding.UserEdited = True
+                    finding.UpdatedUtc = answer.UpdatedUtc
+                    finding.UpdatedBy = actor
+                    finding.Status = status
+                    finding.ReviewedUtc = answer.ReviewedUtc
+                    finding.ReviewedBy = answer.ReviewedBy
+                End If
+                candidate.GroupEdits(document.Id)(criterion.Id) = answer
+                Commit(candidate, "group_answer_edit", status, document.Id, criterion.Id, actor:=actor)
+                Return
+            End If
             document.UpdatedBy = actor
             document.UpdatedUtc = answer.UpdatedUtc
             document.ReviewedBy = ""
@@ -1057,17 +1146,75 @@ Namespace Global.SharedLibrary.TabularReview
             Commit(candidate, "answer_edit", ReviewContract.Serialize(New With {.status = status, .previousReviewer = FindDocument(document.Id).Reviewer, .reviewer = document.Reviewer}), document.Id, criterion.Id, actor:=RequireReviewer(request))
         End Sub
 
+        Private Shared Function ReadFieldStyle(request As Newtonsoft.Json.Linq.JObject, key As System.String, fallback As System.Int32) As System.Int32
+            If request(key) Is Nothing Then Return fallback
+            Dim value As System.Int32
+            If Not System.Int32.TryParse(request(key).ToString(), value) OrElse value < 0 OrElse value > 3 Then Throw New System.IO.InvalidDataException("Invalid field formatting.")
+            Return value
+        End Function
+
+        Private Sub DissolveGroup(request As Newtonsoft.Json.Linq.JObject)
+            Dim name As System.String = TextField(request, "groupName")
+            If System.String.IsNullOrWhiteSpace(name) Then Throw New System.IO.InvalidDataException("Select a named group.")
+            Dim candidate As ReviewProject = ReviewContract.Clone(_project)
+            For Each document As ReviewDocument In candidate.Documents
+                If document.GroupName = name Then document.GroupName = ""
+            Next
+            For Each run As ReviewConsistencyRun In candidate.ConsistencyRuns
+                If run.GroupName = name Then run.GroupName = ""
+            Next
+            candidate.GroupEdits.Remove("group:" & ReviewContract.Digest(name))
+            Commit(candidate, "dissolve_group", name, actor:=RequireReviewer(request))
+        End Sub
+
+        Private Sub AssignReviewScope(request As Newtonsoft.Json.Linq.JObject, command As System.String)
+            Dim actor As System.String = RequireReviewer(request)
+            Dim selected As System.Collections.Generic.List(Of ReviewDocument) = SelectedDocuments(request)
+            Dim candidate As ReviewProject = ReviewContract.Clone(_project)
+            Dim changes As New System.Collections.Generic.List(Of System.Object)()
+            Dim value As System.String = TextField(request, "value").Trim()
+            For Each original As ReviewDocument In selected
+                Dim document As ReviewDocument = FindDocument(original.Id, candidate)
+                Dim previous As System.String = If(command = "assignCategory", document.Category, document.GroupName)
+                Dim assignment As System.String = value
+                If command = "groupByFolder" Then
+                    If previous.Length > 0 OrElse System.String.IsNullOrWhiteSpace(document.RelativePath) OrElse Not ReviewContract.IsSafeRelativePath(document.RelativePath.Replace("\", "/")) Then Continue For
+                    Dim relative As System.String = document.RelativePath.Replace("\", "/")
+                    Dim separator As System.Int32 = relative.LastIndexOf("/"c)
+                    If separator <= 0 Then Continue For
+                    assignment = relative.Substring(0, separator)
+                End If
+                If previous = assignment Then Continue For
+                If command = "assignCategory" Then
+                    document.Category = assignment
+                    document.ReviewStatus = "unreviewed"
+                    document.LastReviewedUtc = ""
+                    document.ReviewedBy = ""
+                    document.ReviewedUtc = ""
+                Else
+                    document.GroupName = assignment
+                End If
+                document.UpdatedBy = actor
+                document.UpdatedUtc = System.DateTime.UtcNow.ToString("o")
+                changes.Add(New With {.documentId = document.Id, .previous = previous, .current = assignment})
+            Next
+            If changes.Count > 0 Then Commit(candidate, command, ReviewContract.Serialize(changes), actor:=actor)
+            _message = "Updated assignments: " & changes.Count.ToString() & " of " & selected.Count.ToString() & " selected documents."
+        End Sub
+
         Private Sub SaveDocument(request As Newtonsoft.Json.Linq.JObject)
             Dim actor As System.String = RequireReviewer(request)
             Dim candidate As ReviewProject = ReviewContract.Clone(_project)
             Dim document As ReviewDocument = FindDocument(TextField(request, "documentId"), candidate)
+            document.Category = TextField(request, "category", document.Category).Trim()
+            document.GroupName = TextField(request, "groupName", document.GroupName).Trim()
             Dim status As System.String = TextField(request, "reviewStatus", "unreviewed")
             If Not ReviewContract.Contains(New System.String() {"unreviewed", "in_review", "reviewed"}, status) Then Throw New System.IO.InvalidDataException("Unknown review status.")
             If status = "reviewed" Then
                 For Each criterion As ReviewCriterion In candidate.Criteria
-                    If criterion.Archived OrElse criterion.Kind = "text" Then Continue For
+                    If criterion.Archived OrElse criterion.Kind = "text" OrElse Not criterion.AppliesTo(document) Then Continue For
                     Dim answer As ReviewAnswer = Nothing
-                    If Not document.Answers.TryGetValue(criterion.Id, answer) OrElse System.String.IsNullOrWhiteSpace(answer.Text) OrElse answer.Status = "stale" OrElse answer.Status = "error" OrElse answer.Status = "pending" Then
+                    If Not document.Answers.TryGetValue(criterion.Id, answer) OrElse System.String.IsNullOrWhiteSpace(answer.Text) OrElse answer.Status = "stale" OrElse answer.Status = "error" OrElse answer.Status = "pending" OrElse (criterion.FlagValues().Count > 0 AndAlso Not criterion.FlagValues().Contains(answer.RiskFlag)) Then
                         Throw New System.InvalidOperationException("Resolve empty, stale or failed answers before marking this document reviewed.")
                     End If
                 Next
@@ -1090,7 +1237,7 @@ Namespace Global.SharedLibrary.TabularReview
         End Sub
 
         Private Shared Function DocumentMetadata(document As ReviewDocument) As System.Object
-            Return New With {.number = document.Number, .reviewStatus = document.ReviewStatus, .priority = document.Priority,
+            Return New With {.category = document.Category, .groupName = document.GroupName, .number = document.Number, .reviewStatus = document.ReviewStatus, .priority = document.Priority,
                 .flags = document.Flags, .reviewer = document.Reviewer, .notes = document.Notes, .lastReviewedUtc = document.LastReviewedUtc,
                 .updatedBy = document.UpdatedBy, .updatedUtc = document.UpdatedUtc, .reviewedBy = document.ReviewedBy, .reviewedUtc = document.ReviewedUtc}
         End Function
@@ -1129,12 +1276,12 @@ Namespace Global.SharedLibrary.TabularReview
             For Each criterion As ReviewCriterion In imported.Criteria
                 ' Equal headers can represent different source columns. Match each
                 ' target at most once and retain every original column/value.
-                Dim same As ReviewCriterion = candidate.Criteria.Find(Function(item As ReviewCriterion) Not item.Archived AndAlso Not usedTargets.Contains(item.Id) AndAlso item.Title = criterion.Title AndAlso item.Instruction = criterion.Instruction AndAlso item.Kind = criterion.Kind AndAlso ReviewContract.Serialize(item.Options) = ReviewContract.Serialize(criterion.Options))
+                Dim same As ReviewCriterion = candidate.Criteria.Find(Function(item As ReviewCriterion) Not item.Archived AndAlso Not usedTargets.Contains(item.Id) AndAlso item.Category = criterion.Category AndAlso item.FlagScale = criterion.FlagScale AndAlso ReviewContract.Serialize(item.FlagConditions) = ReviewContract.Serialize(criterion.FlagConditions) AndAlso item.Title = criterion.Title AndAlso item.Instruction = criterion.Instruction AndAlso item.Kind = criterion.Kind AndAlso ReviewContract.Serialize(item.Options) = ReviewContract.Serialize(criterion.Options))
                 If same Is Nothing Then
                     candidate.Criteria.Add(criterion)
                     map(criterion.Id) = criterion.Id
                     For Each document As ReviewDocument In candidate.Documents
-                        ReviewContract.Invalidate(document, criterion.Id)
+                        If criterion.AppliesTo(document) Then ReviewContract.Invalidate(document, criterion.Id)
                     Next
                 Else
                     map(criterion.Id) = same.Id
@@ -1397,6 +1544,61 @@ Namespace Global.SharedLibrary.TabularReview
             Return ReviewContract.ShortDocumentReference(If(extension.Length > 0, relative.Substring(0, relative.Length - extension.Length), relative).Replace("\", " / "), ReviewContract.Digest(relative))
         End Function
 
+        Private Async Function ClassifyDocumentsAsync(request As Newtonsoft.Json.Linq.JObject, cancellation As System.Threading.CancellationToken) As System.Threading.Tasks.Task
+            Dim selected = SelectedDocuments(request)
+            Dim operationModelKey As System.String = ResolveOperationModel(request)
+            Dim choice As ReviewModelChoice = _models.Find(Function(item As ReviewModelChoice) item.Key = operationModelKey)
+            Dim invoke As System.Func(Of System.String, System.String, System.Threading.CancellationToken, System.Threading.Tasks.Task(Of System.String)) = ReviewModelCatalog.CreateInvoker(_context, choice)
+            Dim configuredBudget As System.Int32 = _context.INI_TextAnalyzeMaxSourceChars
+            Dim budget As System.Int32 = If(configuredBudget >= 2048, System.Math.Min(28000, configuredBudget), 28000)
+            Dim engine As New ReviewAnalysisEngine(invoke, budget)
+            Dim types As New System.Collections.Generic.List(Of System.String)()
+            Dim known As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            For Each criterion As ReviewCriterion In _project.Criteria
+                If Not criterion.Archived AndAlso criterion.Category.Length > 0 AndAlso known.Add(criterion.Category) Then types.Add(criterion.Category)
+            Next
+            For Each document As ReviewDocument In _project.Documents
+                If Not document.Archived AndAlso document.Category.Length > 0 AndAlso known.Add(document.Category) Then types.Add(document.Category)
+            Next
+            If types.Count = 0 Then Throw New System.InvalidOperationException("Define document types on questions or documents first.")
+            Dim options As New System.Collections.Generic.List(Of System.String) From {"0"}
+            For index As System.Int32 = 1 To types.Count
+                options.Add(index.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            Next
+            Dim question As New ReviewCriterion With {.Title = "Document type", .Kind = "flag", .Options = options,
+                .Instruction = "Classify the supplied document by its substantive purpose. Return the one-based index of the best matching type in this ordered list, or 0 for ambiguous or unsupported. Explain the choice and cite the source. Types: " & ReviewContract.Serialize(types)}
+            Dim assigned As System.Int32
+            For Each original As ReviewDocument In selected
+                cancellation.ThrowIfCancellationRequested()
+                Dim singleton As New System.Collections.Generic.List(Of ReviewDocument) From {original}
+                Await VerifySelectedSourcesAsync(singleton, cancellation)
+                Dim document As ReviewDocument = FindDocument(original.Id)
+                If document.ExtractionStatus <> "complete" AndAlso document.ExtractionStatus <> "partial" Then Throw New System.IO.InvalidDataException("Refresh the source before classifying " & document.FileName)
+                Dim answer As ReviewAnswer = Await System.Threading.Tasks.Task.Run(Function() engine.GenerateAsync(document, question, _project.OutputLanguage, operationModelKey, "", cancellation), cancellation)
+                Await Global.SharedLibrary.SharedLibrary.SharedMethods.SwitchToHostUiThread()
+                singleton(0) = FindDocument(original.Id)
+                Await VerifySelectedSourcesAsync(singleton, cancellation)
+                Dim candidate As ReviewProject = ReviewContract.Clone(_project)
+                Dim current As ReviewDocument = FindDocument(original.Id, candidate)
+                If current.SourceHash <> document.SourceHash OrElse (current.ExtractionStatus <> "complete" AndAlso current.ExtractionStatus <> "partial") Then Throw New System.IO.InvalidDataException("The source changed during classification.")
+                Dim index As System.Int32 = System.Int32.Parse(answer.Text, System.Globalization.CultureInfo.InvariantCulture)
+                Dim previous As System.String = current.Category
+                If index > 0 AndAlso answer.Evidence.Count > 0 Then
+                    current.Category = types(index - 1)
+                    assigned += 1
+                    If current.Category <> previous Then
+                        current.ReviewStatus = "unreviewed"
+                        current.LastReviewedUtc = ""
+                        current.ReviewedUtc = ""
+                        current.ReviewedBy = ""
+                    End If
+                End If
+                cancellation.ThrowIfCancellationRequested()
+                Commit(candidate, "classify_document", ReviewContract.Serialize(New With {.previous = previous, .category = current.Category, .choice = index, .reason = answer.Assessment, .evidence = answer.Evidence, .model = operationModelKey}), original.Id)
+            Next
+            _message = "Classified " & assigned.ToString() & " of " & selected.Count.ToString() & " documents. Ambiguous assignments were retained."
+        End Function
+
         Private Async Function GenerateAsync(request As Newtonsoft.Json.Linq.JObject, allDocuments As System.Boolean, cancellation As System.Threading.CancellationToken) As System.Threading.Tasks.Task
             Dim operationModelKey As System.String = ResolveOperationModel(request)
             Dim choice As ReviewModelChoice = _models.Find(Function(item As ReviewModelChoice) item.Key = operationModelKey)
@@ -1440,6 +1642,7 @@ Namespace Global.SharedLibrary.TabularReview
                 cancellation.ThrowIfCancellationRequested()
                 EnsureAvailable()
                 Dim document As ReviewDocument = FindDocument(target.Id)
+                If Not criteria.Exists(Function(item As ReviewCriterion) item.AppliesTo(document)) Then Continue For
                 Dim sourceIssue As System.String = ""
                 Dim sourceState As System.String = ""
                 Try
@@ -1471,6 +1674,7 @@ Namespace Global.SharedLibrary.TabularReview
                     Commit(recovered, "source_available", "The original bytes match the saved extract again; reused the cached text.", document.Id)
                 End If
                 For Each criterion As ReviewCriterion In criteria
+                    If Not criterion.AppliesTo(document) Then Continue For
                     cancellation.ThrowIfCancellationRequested()
                     document = FindDocument(target.Id)
                     Dim existing As ReviewAnswer = Nothing
@@ -1599,7 +1803,8 @@ Namespace Global.SharedLibrary.TabularReview
             documents = SelectedDocuments(request)
             Dim engine As ReviewContradictionEngine = ConsistencyEngine(modelKey)
             Dim language As System.String = _project.OutputLanguage
-            Dim plan As ReviewConsistencyRun = Await System.Threading.Tasks.Task.Run(Function() engine.PlanPrompt(documents, instruction, language, modelKey, cancellation), cancellation)
+            Dim criterion As ReviewCriterion = If(TextField(request, "groupCriterionId").Length > 0, FindCriterion(TextField(request, "groupCriterionId")), Nothing)
+            Dim plan As ReviewConsistencyRun = Await System.Threading.Tasks.Task.Run(Function() engine.PlanPrompt(documents, instruction, language, modelKey, cancellation, criterion), cancellation)
             Await Global.SharedLibrary.SharedLibrary.SharedMethods.SwitchToHostUiThread()
             EnsureAvailable()
             cancellation.ThrowIfCancellationRequested()
@@ -1610,6 +1815,48 @@ Namespace Global.SharedLibrary.TabularReview
             _consistencyPlanInstruction = instruction
             _message = plan.CoverageMessage
             Return plan
+        End Function
+
+        Private Async Function ReviewGroupsAsync(request As Newtonsoft.Json.Linq.JObject, cancellation As System.Threading.CancellationToken) As System.Threading.Tasks.Task
+            Dim requested As System.String = TextField(request, "groupName")
+            Dim groups As New System.Collections.Generic.Dictionary(Of System.String, System.Collections.Generic.List(Of System.String))(System.StringComparer.Ordinal)
+            For Each document As ReviewDocument In _project.Documents
+                If document.Archived OrElse System.String.IsNullOrWhiteSpace(document.GroupName) OrElse (requested.Length > 0 AndAlso document.GroupName <> requested) Then Continue For
+                If Not groups.ContainsKey(document.GroupName) Then groups.Add(document.GroupName, New System.Collections.Generic.List(Of System.String)())
+                groups(document.GroupName).Add(document.Id)
+            Next
+            Dim completed As System.Int32
+            For Each pair As System.Collections.Generic.KeyValuePair(Of System.String, System.Collections.Generic.List(Of System.String)) In groups
+                If pair.Value.Count < 2 Then Continue For
+                cancellation.ThrowIfCancellationRequested()
+                Dim scope As Newtonsoft.Json.Linq.JObject = DirectCast(request.DeepClone(), Newtonsoft.Json.Linq.JObject)
+                scope("groupName") = New Newtonsoft.Json.Linq.JValue(pair.Key)
+                scope("documentIds") = Newtonsoft.Json.Linq.JArray.FromObject(pair.Value)
+                If BooleanField(request, "perQuestion") Then
+                    Dim planned As System.Int32
+                    For Each criterion As ReviewCriterion In _project.Criteria
+                        If criterion.Archived OrElse criterion.Kind = "text" OrElse System.String.IsNullOrWhiteSpace(criterion.Instruction) Then Continue For
+                        If Not pair.Value.Exists(Function(id As System.String) criterion.AppliesTo(FindDocument(id))) Then Continue For
+                        scope("groupCriterionId") = New Newtonsoft.Json.Linq.JValue(criterion.Id)
+                        scope("instruction") = New Newtonsoft.Json.Linq.JValue(criterion.Instruction)
+                        Await RunGroupPromptAsync(scope, cancellation)
+                        planned += 1
+                    Next
+                    If planned = 0 Then Throw New System.InvalidOperationException("No applicable AI questions for group " & pair.Key)
+                Else
+                    Await RunGroupPromptAsync(scope, cancellation)
+                End If
+                cancellation.ThrowIfCancellationRequested()
+                completed += 1
+            Next
+            If completed = 0 Then Throw New System.InvalidOperationException("Assign at least two documents to a named group before running this review.")
+            _message = "Reviewed groups: " & completed.ToString() & ". See their summary rows in Excel and their source quotations in Findings."
+        End Function
+
+        Private Async Function RunGroupPromptAsync(scope As Newtonsoft.Json.Linq.JObject, cancellation As System.Threading.CancellationToken) As System.Threading.Tasks.Task
+            Dim plan As ReviewConsistencyRun = Await PlanConsistencyAsync(scope, cancellation)
+            scope("planId") = New Newtonsoft.Json.Linq.JValue(plan.Id)
+            Await CheckConsistencyAsync(scope, cancellation)
         End Function
 
         Private Async Function CheckConsistencyAsync(request As Newtonsoft.Json.Linq.JObject, cancellation As System.Threading.CancellationToken) As System.Threading.Tasks.Task
@@ -1637,9 +1884,22 @@ Namespace Global.SharedLibrary.TabularReview
                     End If
                 End Sub)
             Dim language As System.String = _project.OutputLanguage
+            Dim criterion As ReviewCriterion = If(TextField(request, "groupCriterionId").Length > 0, FindCriterion(TextField(request, "groupCriterionId")), Nothing)
+            Dim groupName As System.String = TextField(request, "groupName")
+            If groupName.Length > 0 Then
+                Dim members As System.Collections.Generic.List(Of ReviewDocument) = _project.Documents.FindAll(Function(item As ReviewDocument) Not item.Archived AndAlso item.GroupName = groupName)
+                If members.Count <> documents.Count OrElse Not documents.TrueForAll(Function(item As ReviewDocument) item.GroupName = groupName) Then Throw New System.InvalidOperationException("The group membership changed. Start the group review again.")
+            End If
             Dim run As ReviewConsistencyRun = Await System.Threading.Tasks.Task.Run(
                 Function() engine.CheckPromptAsync(documents, instruction, language, modelKey, cancellation,
-                    AddressOf PersistConsistencyAsync, Sub(message As System.String) DirectCast(progress, System.IProgress(Of System.String)).Report(message)), cancellation)
+                    Function(progressRun As ReviewConsistencyRun, finding As ReviewFinding)
+                        progressRun.GroupName = groupName
+                        If criterion IsNot Nothing Then
+                            progressRun.GroupCriterionId = criterion.Id
+                            progressRun.GroupCriterionRevision = criterion.Revision
+                        End If
+                        Return PersistConsistencyAsync(progressRun, finding)
+                    End Function, Sub(message As System.String) DirectCast(progress, System.IProgress(Of System.String)).Report(message), criterion), cancellation)
             Await Global.SharedLibrary.SharedLibrary.SharedMethods.SwitchToHostUiThread()
             EnsureAvailable()
             If run.PersistenceFailed Then Throw New System.InvalidOperationException("Excel could not confirm a combined-review checkpoint. Reload Excel before continuing; completed checkpoints may already be present. " & run.Error)
@@ -1742,11 +2002,19 @@ Namespace Global.SharedLibrary.TabularReview
             ReviewContract.ValidateReportDefinitions(New System.Collections.Generic.List(Of ReviewReportDefinition) From {definition}, ActiveCriterionIds(_project))
             Dim data As New ReviewReportData With {.Title = definition.Name, .Kind = definition.Kind, .Orientation = definition.Orientation,
                 .ProjectId = _project.Id, .ProjectRevision = _project.Revision, .Design = definition.Design, .PaperSize = definition.PaperSize}
+            data.TableLayout = TextField(request, "tableLayout", "combined")
+            If data.TableLayout <> "combined" AndAlso data.TableLayout <> "types" Then Throw New System.IO.InvalidDataException("Unknown report layout.")
+            Dim ids As System.Collections.Generic.List(Of System.String) = ExactStringList(request("documentIds"))
+            If ids.Count = 0 Then Throw New System.IO.InvalidDataException("Choose at least one document for the report.")
+            Dim selected As System.Collections.Generic.List(Of ReviewDocument) = ids.ConvertAll(Function(key As System.String) FindDocument(key))
+            If selected.Exists(Function(doc As ReviewDocument) Not System.String.IsNullOrEmpty(doc.GroupName)) AndAlso Not definition.Fields.Contains("document") Then definition.Fields.Insert(0, "document")
             For Each key As System.String In definition.Fields
                 Dim column As New ReviewReportColumn With {.Key = key, .Title = key}
                 Select Case key
                     Case "number" : column.Title = "Document reference" : column.Width = 14
                     Case "document" : column.Title = "Document" : column.Width = 38
+                    Case "category" : column.Title = "Category"
+                    Case "group" : column.Title = "Group"
                     Case "location" : column.Title = "Location in source folder"
                     Case "status" : column.Title = "Review status" : column.Width = 22
                     Case "priority" : column.Title = "Priority" : column.Width = 20
@@ -1757,8 +2025,10 @@ Namespace Global.SharedLibrary.TabularReview
                     Case Else
                         Dim parts As System.String() = key.Split(":"c)
                         Dim criterion As ReviewCriterion = _project.Criteria.Find(Function(item As ReviewCriterion) item.Id = parts(1) AndAlso Not item.Archived)
+                        column.Category = criterion.Category
                         column.Title = criterion.Title
                         Select Case parts(0)
+                            Case "riskFlag" : column.Title &= " — Flag"
                             Case "assessment" : column.Title &= " — Assessment"
                             Case "answerStatus" : column.Title &= " — Status" : column.Width = 22
                             Case "evidence" : column.Title &= " — Sources" : column.Width = 60
@@ -1769,20 +2039,43 @@ Namespace Global.SharedLibrary.TabularReview
                 End Select
                 data.Columns.Add(column)
             Next
-            Dim ids As System.Collections.Generic.List(Of System.String) = ExactStringList(request("documentIds"))
-            If ids.Count = 0 Then Throw New System.IO.InvalidDataException("Choose at least one document for the report.")
-            For Each id As System.String In ids
-                Dim document As ReviewDocument = FindDocument(id)
+            Dim ordered As New System.Collections.Generic.List(Of ReviewDocument)()
+            Dim emitted As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
+            Dim summaries As System.Collections.Generic.List(Of ReviewDocument) = ReviewContract.CurrentGroupRows(_project)
+            For Each doc As ReviewDocument In selected
+                Dim name As System.String = doc.GroupName
+                If System.String.IsNullOrEmpty(name) Then
+                    ordered.Add(doc)
+                ElseIf emitted.Add(name) Then
+                    Dim members As System.Collections.Generic.List(Of ReviewDocument) = selected.FindAll(Function(item As ReviewDocument) item.GroupName = name)
+                    Dim summary As ReviewDocument = summaries.Find(Function(item As ReviewDocument) item.GroupName = name)
+                    If summary Is Nothing OrElse _project.Documents.Exists(Function(item As ReviewDocument) Not item.Archived AndAlso item.GroupName = name AndAlso Not ids.Contains(item.Id)) OrElse
+                       _project.ConsistencyRuns.Exists(Function(run As ReviewConsistencyRun) run.GroupName = name AndAlso run.Documents.Exists(Function(entry As ReviewConsistencyDocumentCoverage) Not ids.Contains(entry.DocumentId))) Then
+                        summary = New ReviewDocument With {.Id = "group:" & ReviewContract.Digest(name), .FileName = "Group — " & name, .GroupName = name, .Notes = "Group analysis omitted for this selection."}
+                    End If
+                    ordered.Add(summary)
+                    ordered.AddRange(members)
+                End If
+            Next
+            For Each document As ReviewDocument In ordered
+                Dim id As System.String = document.Id
+                Dim group As System.Boolean = id.StartsWith("group:", System.StringComparison.Ordinal)
                 If document.Archived Then Throw New System.IO.InvalidDataException("Restore the selected document or remove it from the report selection.")
                 data.Documents.Add(New ReviewReportDocument With {.Id = document.Id, .Number = document.Number, .FileName = document.FileName,
                     .RelativePath = document.RelativePath, .SourcePath = document.SourcePath, .SourceHash = document.SourceHash,
                     .ExtractionStatus = document.ExtractionStatus, .ExtractionMessage = document.ExtractionMessage})
-                Dim row As New ReviewReportRow With {.DocumentId = id}
+                Dim row As New ReviewReportRow With {.DocumentId = id, .Category = document.Category, .IsGroup = group}
                 For Each column As ReviewReportColumn In data.Columns
                     Dim value As System.String = ""
+                    row.Styles.Add(If(group, 1, 0))
                     Select Case column.Key
-                        Case "number" : value = ReviewContract.ShortDocumentReference(document.Number, document.Id)
-                        Case "document" : value = document.FileName
+                        Case "number" : If Not group Then value = ReviewContract.ShortDocumentReference(document.Number, document.Id)
+                        Case "document"
+                            value = document.FileName
+                            If group AndAlso Not definition.Fields.Contains("notes") AndAlso document.Notes <> "" Then value &= System.Environment.NewLine & document.Notes
+                            If Not group AndAlso document.GroupName <> "" Then value = "    ↳ " & If(data.TableLayout = "types", document.GroupName & " · ", "") & value
+                        Case "category" : value = document.Category
+                        Case "group" : value = document.GroupName
                         Case "location" : value = SafeReportLocation(document)
                         Case "status" : value = MatrixStatusLabel(document.ReviewStatus)
                         Case "priority" : value = document.Priority
@@ -1793,17 +2086,22 @@ Namespace Global.SharedLibrary.TabularReview
                         Case Else
                             Dim parts As System.String() = column.Key.Split(":"c)
                             Dim answer As ReviewAnswer = Nothing
-                            If parts(0) = "answerStatus" Then value = MatrixStatusLabel("pending")
+                            If Not group AndAlso Not FindCriterion(parts(1)).AppliesTo(document) Then
+                                row.Values.Add("N/A")
+                                Continue For
+                            End If
+                            If Not group AndAlso parts(0) = "answerStatus" Then value = MatrixStatusLabel("pending")
                             If document.Answers.TryGetValue(parts(1), answer) Then
                                 Select Case parts(0)
-                                    Case "answer" : value = answer.Text
-                                    Case "assessment" : value = answer.Assessment
+                                    Case "answer" : value = answer.Text : row.Styles(row.Styles.Count - 1) = answer.TextStyle
+                                    Case "riskFlag" : value = answer.RiskFlag
+                                    Case "assessment" : value = answer.Assessment : row.Styles(row.Styles.Count - 1) = answer.AssessmentStyle
                                     Case "answerStatus" : value = MatrixStatusLabel(answer.Status)
                                     Case "evidence"
                                         Dim quotations As New System.Collections.Generic.List(Of System.String)()
                                         For Each evidence As ReviewEvidence In answer.Evidence
                                             Dim verification As System.String = evidence.MatchStatus
-                                            If Not System.String.Equals(answer.SourceHash, document.SourceHash, System.StringComparison.Ordinal) Then verification &= "; earlier source version"
+                                            If Not group AndAlso Not System.String.Equals(answer.SourceHash, document.SourceHash, System.StringComparison.Ordinal) Then verification &= "; earlier source version"
                                             quotations.Add(evidence.Locator & System.Environment.NewLine & evidence.Quote & System.Environment.NewLine & "[" & verification & "]")
                                         Next
                                         value = System.String.Join(System.Environment.NewLine & System.Environment.NewLine, quotations)
@@ -2309,6 +2607,8 @@ Namespace Global.SharedLibrary.TabularReview
                 ' The workbook serializer still retains the complete source and its history.
                 serializer.ContractResolver = _browserStateResolver
                 Dim state As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.FromObject(_project, serializer)
+                state.Remove("groupEdits")
+                state("groupRows") = Newtonsoft.Json.Linq.JArray.FromObject(ReviewContract.CurrentGroupRows(_project), serializer)
                 Dim documents As Newtonsoft.Json.Linq.JArray = DirectCast(state("documents"), Newtonsoft.Json.Linq.JArray)
                 For index As System.Int32 = 0 To documents.Count - 1
                     Dim document As Newtonsoft.Json.Linq.JObject = DirectCast(documents(index), Newtonsoft.Json.Linq.JObject)

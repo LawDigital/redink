@@ -965,6 +965,19 @@ Namespace Agents
             Return existing
         End Function
 
+        ' The caller supplies the canonical path after a successful host filesystem operation.
+        ' Retire only registrations that predate this deletion. A later producer gets a fresh record.
+        Friend Shared Sub RecordConfirmedFileDeletion(runState As ToolCallSequencing.ToolingRunState, fullPath As System.String)
+            If runState Is Nothing OrElse runState.RegisteredDeliverableArtifacts Is Nothing Then Return
+            For Each item As ToolCallSequencing.DeliverableArtifact In runState.RegisteredDeliverableArtifacts
+                If item Is Nothing OrElse item.IsExplicitContract OrElse item.LifecycleState <> ArtifactLifecycleState.Intermediate Then Continue For
+                If System.String.Equals(item.SessionPath, fullPath, System.StringComparison.OrdinalIgnoreCase) Then
+                    item.LegacyFileDeleted = True
+                    item.LegacyCompatibilityEligible = False
+                End If
+            Next
+        End Sub
+
         Public Shared Function RegisterLegacyPath(runState As ToolCallSequencing.ToolingRunState,
                                                   candidatePath As String,
                                                   sourceTool As String,
@@ -1268,12 +1281,13 @@ Namespace Agents
                 GetUnreconciledLegacyOutputPaths(runState), System.StringComparer.OrdinalIgnoreCase)
             Dim entries As New Newtonsoft.Json.Linq.JArray()
             For Each item In runState.RegisteredDeliverableArtifacts
-                If item Is Nothing OrElse item.IsExplicitContract OrElse Not item.LegacyCompatibilityEligible Then Continue For
+                If item Is Nothing OrElse item.IsExplicitContract OrElse (Not item.LegacyCompatibilityEligible AndAlso Not item.LegacyFileDeleted) Then Continue For
                 entries.Add(New Newtonsoft.Json.Linq.JObject(
                     New Newtonsoft.Json.Linq.JProperty("file", System.IO.Path.GetFileName(item.SessionPath)),
                     New Newtonsoft.Json.Linq.JProperty("artifact_id", item.ArtifactId),
                     New Newtonsoft.Json.Linq.JProperty("producer", item.SourceTool),
-                    New Newtonsoft.Json.Linq.JProperty("open", openPaths.Contains(item.SessionPath)),
+                    New Newtonsoft.Json.Linq.JProperty("open", Not item.LegacyFileDeleted AndAlso openPaths.Contains(item.SessionPath)),
+                    New Newtonsoft.Json.Linq.JProperty("deleted", item.LegacyFileDeleted),
                     New Newtonsoft.Json.Linq.JProperty("producer_source_matched", item.LegacySourceAccountedFor)))
             Next
             Dim slots As New Newtonsoft.Json.Linq.JArray()
@@ -2321,6 +2335,7 @@ Namespace Agents
                 .SessionPath = If(source.SessionPath, ""),
                 .SourceTool = If(source.SourceTool, ""),
                 .LegacyCompatibilityEligible = source.LegacyCompatibilityEligible,
+                .LegacyFileDeleted = source.LegacyFileDeleted,
                 .LegacySourceAccountedFor = source.LegacySourceAccountedFor,
                 .WasObservedLegacyFileDelta = source.WasObservedLegacyFileDelta,
                 .IsFinalDeliverable = source.IsFinalDeliverable,

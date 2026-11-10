@@ -71,6 +71,8 @@ Namespace Agents
             "SOURCE EVIDENCE RULE: Technical extraction success, a converted status, a complete text-layer pass or a file hash does not establish that the source contains the evidence needed for the requested task. " &
             "Check the material actually read against the requested scope. If it is already known to contain only metadata or repeated marginal text and lacks the required body content, report the source as insufficient or incomplete using the existing caller response contract; do not present an empty findings list as a completed review or infer absence from unread content. " &
             "Use an authorized recovery path when available; if necessary evidence remains unavailable, identify that limitation instead of claiming completion. Unknown extraction metadata alone is not a reason to block; a task asking only for metadata can be satisfied by adequate metadata. " &
+            "For each expressly requested research topic or designated source, check what the inspected material actually supports. One source may cover several topics. A URL by itself supplies no article content. " &
+            "When delegating source-dependent work, pass the relevant inspected content or an accessible source reference using the existing source contract. Identify uncovered topics in the result. If the sole required source remains unavailable, report the dependent part as blocked. " &
             "Enabling OCR only permits it and does not prove it ran. Use the existing ocr_attempted and ocr_used observations when present, retain their unknown state when absent, and do not treat either observation as proof of complete or accurate recognition."
 
         Public Const ExistingArtifactTransformationInstruction As System.String =

@@ -485,6 +485,8 @@ Partial Public Class ThisAddIn
 
             Return If(result, "")
         Catch ex As System.OperationCanceledException When ct.IsCancellationRequested
+            ToolingFileLogger.LogStep(Global.SharedLibrary.Agents.ToolingPhaseTelemetry.BuildCancellationRecord(
+                "subagent_execution", "Word", subAgentLogClock.ElapsedMilliseconds, ex, ct))
             If subAgentTaskId <> "" AndAlso
                _activeToolingContext IsNot Nothing AndAlso
                _activeToolingContext.SequencingState IsNot Nothing AndAlso

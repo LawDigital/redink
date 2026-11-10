@@ -7,6 +7,7 @@ Option Strict On
 
 Namespace Global.SharedLibrary.TabularReview
     Public NotInheritable Class ReviewProject
+        Public Property GroupEdits As New System.Collections.Generic.Dictionary(Of System.String, System.Collections.Generic.Dictionary(Of System.String, ReviewAnswer))()
         Public Property SchemaVersion As System.Int32 = 3
         Public Property Id As System.String = System.Guid.NewGuid().ToString("N")
         Public Property Title As System.String = "Tabular Review"
@@ -33,6 +34,23 @@ Namespace Global.SharedLibrary.TabularReview
     End Class
 
     Public NotInheritable Class ReviewCriterion
+        Public Property Category As System.String = ""
+        Public Property FlagScale As System.String = ""
+        Public Property FlagConditions As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.Ordinal)
+
+        Public Function AppliesTo(document As ReviewDocument) As System.Boolean
+            Return System.String.IsNullOrWhiteSpace(Category) OrElse System.String.Equals(Category.Trim(), If(document.Category, "").Trim(), System.StringComparison.OrdinalIgnoreCase)
+        End Function
+
+        Public Function FlagValues() As System.Collections.Generic.List(Of System.String)
+            Dim values As New System.Collections.Generic.List(Of System.String)()
+            If Kind <> "analysis" Then Return values
+            For Each line As System.String In If(FlagScale, "").Split(New System.Char() {Microsoft.VisualBasic.ControlChars.Cr, Microsoft.VisualBasic.ControlChars.Lf}, System.StringSplitOptions.RemoveEmptyEntries)
+                Dim label As System.String = line.Trim()
+                If label.Length > 0 AndAlso Not values.Contains(label) Then values.Add(label)
+            Next
+            Return values
+        End Function
         Public Property Id As System.String = System.Guid.NewGuid().ToString("N")
         Public Property Title As System.String = ""
         Public Property Instruction As System.String = ""
@@ -44,6 +62,8 @@ Namespace Global.SharedLibrary.TabularReview
     End Class
 
     Public NotInheritable Class ReviewDocument
+        Public Property Category As System.String = ""
+        Public Property GroupName As System.String = ""
         Public Property Id As System.String = System.Guid.NewGuid().ToString("N")
         Public Property Number As System.String = ""
         Public Property FileName As System.String = ""
@@ -108,6 +128,10 @@ Namespace Global.SharedLibrary.TabularReview
     End Class
 
     Public NotInheritable Class ReviewAnswer
+        Public Property TextStyle As System.Int32
+        Public Property AssessmentStyle As System.Int32
+        Public Property GroupContext As System.String = ""
+        Public Property RiskFlag As System.String = ""
         Public Property Text As System.String = ""
         Public Property Assessment As System.String = ""
         ' pending | draft | reviewed | stale | error | imported
@@ -127,6 +151,10 @@ Namespace Global.SharedLibrary.TabularReview
     End Class
 
     Public NotInheritable Class ReviewAnswerVersion
+        Public Property TextStyle As System.Int32
+        Public Property AssessmentStyle As System.Int32
+        Public Property GroupContext As System.String = ""
+        Public Property RiskFlag As System.String = ""
         Public Property Text As System.String = ""
         Public Property Assessment As System.String = ""
         Public Property Status As System.String = ""
@@ -160,6 +188,13 @@ Namespace Global.SharedLibrary.TabularReview
     End Class
 
     Public NotInheritable Class ReviewViewState
+        Public Property CompactQuestions As System.Boolean
+        Public Property EditorWidth As System.Int32 = 480
+        Public Property EditorHeight As System.Int32 = 340
+        Public Property LargeEditor As System.Boolean
+        Public Property ExpandRow As System.Boolean
+        Public Property CategoryFilter As System.String = ""
+        Public Property PreferredModel As System.String
         Public Property DocumentId As System.String = ""
         Public Property CriterionId As System.String = ""
         Public Property Theme As System.String = "light"
@@ -297,6 +332,10 @@ Namespace Global.SharedLibrary.TabularReview
     End Class
 
     Public NotInheritable Class ReviewConsistencyRun
+        Public Property GroupName As System.String = ""
+        Public Property GroupCriterionId As System.String = ""
+        Public Property GroupCriterionRevision As System.Int32
+        Public Property GroupFlag As System.String = ""
         Public Property Mode As System.String = "comparison"
         Public Property Instruction As System.String = ""
         Public Property PlannedSourcePasses As System.Int32
@@ -323,6 +362,7 @@ Namespace Global.SharedLibrary.TabularReview
 
     ' Detached export values. The report renderer never reaches into a live workbook.
     Public NotInheritable Class ReviewReportDefinition
+        Public Property TableLayout As System.String = "combined"
         Public Property Id As System.String = System.Guid.NewGuid().ToString("N")
         Public Property Name As System.String = ""
         Public Property Title As System.String = ""
@@ -335,17 +375,22 @@ Namespace Global.SharedLibrary.TabularReview
     End Class
 
     Public NotInheritable Class ReviewReportColumn
+        Public Property Category As System.String = ""
         Public Property Key As System.String = ""
         Public Property Title As System.String = ""
         Public Property Width As System.Double = 40.0R
     End Class
 
     Public NotInheritable Class ReviewReportRow
+        Public Property Category As System.String = ""
+        Public Property IsGroup As System.Boolean
+        Public Property Styles As New System.Collections.Generic.List(Of System.Int32)()
         Public Property DocumentId As System.String = ""
         Public Property Values As New System.Collections.Generic.List(Of System.String)()
     End Class
 
     Public NotInheritable Class ReviewReportData
+        Public Property TableLayout As System.String = "combined"
         Public Property Title As System.String = ""
         Public Property ProjectId As System.String = ""
         Public Property ProjectRevision As System.Int64
@@ -480,15 +525,19 @@ Namespace Global.SharedLibrary.TabularReview
         End Function
 
         Public Shared Sub Validate(project As ReviewProject)
-            If project Is Nothing OrElse (project.SchemaVersion <> 1 AndAlso project.SchemaVersion <> 2 AndAlso project.SchemaVersion <> 3) Then Throw New System.IO.InvalidDataException("Unsupported or missing Tabular Review data. Keep the workbook and open it with a compatible Red Ink version.")
+            If project Is Nothing OrElse (project.SchemaVersion <> 1 AndAlso project.SchemaVersion <> 2 AndAlso project.SchemaVersion <> 3 AndAlso project.SchemaVersion <> 4 AndAlso project.SchemaVersion <> 5 AndAlso project.SchemaVersion <> 6) Then Throw New System.IO.InvalidDataException("Unsupported or missing Tabular Review data. Keep the workbook and open it with a compatible Red Ink version.")
             ' Version 3 retains authored prompts, completed working notes and removal state.
             ' Older supported data migrates without deleting its sources or findings.
-            project.SchemaVersion = 3
+            project.SchemaVersion = System.Math.Max(3, project.SchemaVersion)
+            If project.GroupEdits Is Nothing Then project.GroupEdits = New System.Collections.Generic.Dictionary(Of System.String, System.Collections.Generic.Dictionary(Of System.String, ReviewAnswer))()
             RequireId(project.Id)
             If project.Criteria Is Nothing OrElse project.Documents Is Nothing OrElse project.Audit Is Nothing OrElse project.View Is Nothing Then Throw New System.IO.InvalidDataException("Incomplete review data.")
             Dim criterionIds As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
             For Each criterion As ReviewCriterion In project.Criteria
                 If criterion Is Nothing Then Throw New System.IO.InvalidDataException("Missing criterion.")
+                criterion.Category = If(criterion.Category, "").Trim()
+                If criterion.FlagScale Is Nothing Then criterion.FlagScale = ""
+                If criterion.FlagConditions Is Nothing Then criterion.FlagConditions = New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.Ordinal)
                 RequireId(criterion.Id)
                 If Not criterionIds.Add(criterion.Id) Then Throw New System.IO.InvalidDataException("Duplicate criterion identity.")
                 If System.String.IsNullOrWhiteSpace(criterion.Title) OrElse criterion.Revision < 1 OrElse criterion.Options Is Nothing Then Throw New System.IO.InvalidDataException("Every criterion needs a title, revision and options list.")
@@ -498,6 +547,8 @@ Namespace Global.SharedLibrary.TabularReview
             Dim documentIds As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
             For Each document As ReviewDocument In project.Documents
                 If document Is Nothing Then Throw New System.IO.InvalidDataException("Missing document.")
+                document.GroupName = If(document.GroupName, "").Trim()
+                document.Category = If(document.Category, "").Trim()
                 RequireId(document.Id)
                 If Not documentIds.Add(document.Id) Then Throw New System.IO.InvalidDataException("Duplicate document identity.")
                 If document.Segments Is Nothing OrElse document.SourceHistory Is Nothing OrElse document.Answers Is Nothing OrElse document.Flags Is Nothing Then Throw New System.IO.InvalidDataException("Incomplete document data.")
@@ -515,6 +566,7 @@ Namespace Global.SharedLibrary.TabularReview
                 For Each pair As System.Collections.Generic.KeyValuePair(Of System.String, ReviewAnswer) In document.Answers
                     If Not criterionIds.Contains(pair.Key) OrElse pair.Value Is Nothing Then Throw New System.IO.InvalidDataException("An answer has no matching criterion.")
                     Dim answer As ReviewAnswer = pair.Value
+                    If answer.RiskFlag Is Nothing Then answer.RiskFlag = ""
                     If Not Contains(New System.String() {"pending", "draft", "reviewed", "stale", "error", "imported"}, answer.Status) Then Throw New System.IO.InvalidDataException("Unknown answer status.")
                     If answer.Text Is Nothing OrElse answer.Evidence Is Nothing OrElse answer.History Is Nothing OrElse answer.FollowUps Is Nothing Then Throw New System.IO.InvalidDataException("Incomplete answer data.")
                     For Each evidence As ReviewEvidence In answer.Evidence
@@ -561,9 +613,9 @@ Namespace Global.SharedLibrary.TabularReview
                                                     criterionIds As System.Collections.Generic.IEnumerable(Of System.String))
             If definitions Is Nothing Then Throw New System.IO.InvalidDataException("Report definitions must be an array.")
             Dim allowed As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal) From {
-                "number", "document", "location", "status", "priority", "flags", "reviewer", "notes", "sourceStatus"}
+                "category", "group", "number", "document", "location", "status", "priority", "flags", "reviewer", "notes", "sourceStatus"}
             For Each id As System.String In criterionIds
-                For Each prefix As System.String In New System.String() {"answer:", "assessment:", "answerStatus:", "evidence:"}
+                For Each prefix As System.String In New System.String() {"answer:", "riskFlag:", "assessment:", "answerStatus:", "evidence:"}
                     allowed.Add(prefix & id)
                 Next
             Next
@@ -574,6 +626,7 @@ Namespace Global.SharedLibrary.TabularReview
                 If Not Contains(New System.String() {"matrix_xlsx", "matrix_docx", "document_report"}, definition.Kind) OrElse
                    Not Contains(New System.String() {"portrait", "landscape"}, definition.Orientation) Then Throw New System.IO.InvalidDataException("Choose a supported report format and orientation.")
                 If Not Contains(New System.String() {"A4", "A3"}, definition.PaperSize) Then Throw New System.IO.InvalidDataException("Choose A4 or A3 for the report.")
+                If definition.TableLayout <> "combined" AndAlso definition.TableLayout <> "types" Then Throw New System.IO.InvalidDataException("Choose a supported table layout.")
                 If definition.Title Is Nothing Then definition.Title = ""
                 If Not Contains(New System.String() {"filtered", "selected", "all"}, definition.DocumentScope) Then Throw New System.IO.InvalidDataException("Choose a supported report document scope.")
                 If Not Contains(New System.String() {"redink", "neutral"}, definition.Design) Then Throw New System.IO.InvalidDataException("Choose Red Ink or Neutral as the report design.")
@@ -643,6 +696,17 @@ Namespace Global.SharedLibrary.TabularReview
                     If Not document.Archived AndAlso view.RowHeights.TryGetValue(document.Id, height) Then heights(document.Id) = System.Math.Max(64, System.Math.Min(900, height))
                 Next
             End If
+            If view.RowHeights IsNot Nothing AndAlso view.RowHeights.Count > 0 Then
+                Dim groups As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
+                For Each document As ReviewDocument In project.Documents
+                    If document.Archived OrElse System.String.IsNullOrWhiteSpace(document.GroupName) OrElse Not groups.Add(document.GroupName) Then Continue For
+                    Dim key As System.String = "group:" & Digest(document.GroupName)
+                    Dim height As System.Int32
+                    If view.RowHeights.TryGetValue(key, height) Then heights(key) = System.Math.Max(64, System.Math.Min(900, height))
+                Next
+            End If
+            view.EditorWidth = System.Math.Max(260, System.Math.Min(1600, view.EditorWidth))
+            view.EditorHeight = System.Math.Max(200, System.Math.Min(1000, view.EditorHeight))
             view.RowHeights = heights
         End Sub
 
@@ -818,11 +882,106 @@ Namespace Global.SharedLibrary.TabularReview
             Return False
         End Function
 
+        Public Shared Function GroupSummaryRows(project As ReviewProject) As System.Collections.Generic.List(Of ReviewDocument)
+            Dim result As New System.Collections.Generic.List(Of ReviewDocument)()
+            If project.SchemaVersion >= 5 Then Return CurrentGroupRows(project)
+            Dim latest As New System.Collections.Generic.Dictionary(Of System.String, ReviewConsistencyRun)(System.StringComparer.Ordinal)
+            For Each run As ReviewConsistencyRun In project.ConsistencyRuns
+                If Not System.String.IsNullOrEmpty(run.GroupName) Then latest(run.GroupName) = run
+            Next
+            For Each run As ReviewConsistencyRun In project.ConsistencyRuns
+                If System.String.IsNullOrEmpty(run.GroupName) OrElse latest(run.GroupName) IsNot run Then Continue For
+                Dim summary As New ReviewDocument With {
+                    .Id = "group:" & run.Id, .FileName = "Group review — " & run.GroupName, .GroupName = run.GroupName,
+                    .ReviewStatus = run.Status, .ExtractionStatus = run.Status, .ExtractionMessage = run.CoverageMessage,
+                    .Notes = run.Instruction, .ImportedFrom = System.String.Join(System.Environment.NewLine, run.Documents.ConvertAll(Function(entry As ReviewConsistencyDocumentCoverage) entry.FileName))
+                }
+                Dim members As System.Collections.Generic.List(Of ReviewDocument) = project.Documents.FindAll(Function(item As ReviewDocument) Not item.Archived AndAlso item.GroupName = run.GroupName)
+                If members.Count <> run.Documents.Count OrElse run.Documents.Exists(Function(entry As ReviewConsistencyDocumentCoverage) Not members.Exists(Function(item As ReviewDocument) item.Id = entry.DocumentId AndAlso item.SourceHash = entry.SourceHash AndAlso item.TextHash = entry.TextHash AndAlso item.ExtractionStatus = entry.ExtractionStatus)) Then summary.ReviewStatus = "stale"
+                For Each finding As ReviewFinding In project.Findings
+                    If finding.RunId = run.Id AndAlso Not finding.Archived Then
+                        summary.Notes &= System.Environment.NewLine & finding.Description & System.Environment.NewLine & finding.Assessment
+                        summary.Priority = finding.Priority
+                        summary.Reviewer = finding.Reviewer
+                    End If
+                Next
+                result.Add(summary)
+            Next
+            Return result
+        End Function
+
+        Public Shared Function CurrentGroupRows(project As ReviewProject) As System.Collections.Generic.List(Of ReviewDocument)
+            Dim rows As New System.Collections.Generic.Dictionary(Of System.String, ReviewDocument)(System.StringComparer.Ordinal)
+            Dim members As New System.Collections.Generic.Dictionary(Of System.String, System.Collections.Generic.List(Of ReviewDocument))(System.StringComparer.Ordinal)
+            For Each document As ReviewDocument In project.Documents
+                If document.Archived OrElse System.String.IsNullOrWhiteSpace(document.GroupName) Then Continue For
+                Dim name As System.String = document.GroupName
+                If Not rows.ContainsKey(name) Then
+                    rows.Add(name, New ReviewDocument With {.Id = "group:" & Digest(name), .FileName = "Group — " & name, .GroupName = name, .ReviewStatus = "pending", .ExtractionStatus = ""})
+                    members.Add(name, New System.Collections.Generic.List(Of ReviewDocument)())
+                End If
+                members(name).Add(document)
+            Next
+            For Each run As ReviewConsistencyRun In project.ConsistencyRuns
+                Dim row As ReviewDocument = Nothing
+                If System.String.IsNullOrEmpty(run.GroupName) OrElse Not rows.TryGetValue(run.GroupName, row) Then Continue For
+                Dim groupMembers As System.Collections.Generic.List(Of ReviewDocument) = members(run.GroupName)
+                Dim current As System.Boolean = run.Documents.Count = groupMembers.Count AndAlso run.Documents.TrueForAll(
+                    Function(entry As ReviewConsistencyDocumentCoverage) groupMembers.Exists(Function(doc As ReviewDocument) doc.Id = entry.DocumentId AndAlso doc.SourceHash = entry.SourceHash AndAlso doc.TextHash = entry.TextHash AndAlso doc.ExtractionStatus = entry.ExtractionStatus))
+                Dim status As System.String = If(current, run.Status, "stale")
+                row.ReviewStatus = status
+                Dim finding As ReviewFinding = project.Findings.Find(Function(item As ReviewFinding) item.RunId = run.Id AndAlso Not item.Archived)
+                If System.String.IsNullOrEmpty(run.GroupCriterionId) Then
+                    row.Notes = run.Instruction & System.Environment.NewLine & If(finding Is Nothing, run.CoverageMessage, finding.Description & System.Environment.NewLine & finding.Assessment)
+                    Continue For
+                End If
+                Dim criterion As ReviewCriterion = project.Criteria.Find(Function(item As ReviewCriterion) item.Id = run.GroupCriterionId)
+                If criterion Is Nothing OrElse criterion.Archived Then Continue For
+                If criterion.Revision <> run.GroupCriterionRevision Then status = "stale"
+                Dim answer As New ReviewAnswer With {.Status = status, .CriterionRevision = run.GroupCriterionRevision, .ModelKey = run.ModelKey, .SourceHash = run.Id, .RiskFlag = run.GroupFlag}
+                If finding IsNot Nothing Then
+                    answer.Text = finding.Description
+                    answer.Assessment = finding.Assessment
+                    For Each reference As ReviewCrossDocumentEvidence In finding.Evidence
+                        Dim evidence As ReviewEvidence = Newtonsoft.Json.JsonConvert.DeserializeObject(Of ReviewEvidence)(Serialize(reference.Evidence), JsonSettings)
+                        Dim source As ReviewDocument = project.Documents.Find(Function(item As ReviewDocument) item.Id = reference.DocumentId)
+                        If source IsNot Nothing Then evidence.Locator = source.FileName & " — " & evidence.Locator
+                        answer.Evidence.Add(evidence)
+                    Next
+                Else
+                    answer.Error = run.CoverageMessage
+                End If
+                row.Answers(criterion.Id) = answer
+            Next
+            For Each row As ReviewDocument In rows.Values
+                Dim fingerprints As New System.Collections.Generic.List(Of System.String)()
+                For Each member As ReviewDocument In members(row.GroupName)
+                    fingerprints.Add(Serialize(New With {member.Id, member.SourceHash, member.TextHash, member.Category, member.ExtractionStatus}))
+                Next
+                fingerprints.Sort(System.StringComparer.Ordinal)
+                row.TextHash = Digest(Serialize(fingerprints))
+                Dim edits As System.Collections.Generic.Dictionary(Of System.String, ReviewAnswer) = Nothing
+                If project.GroupEdits Is Nothing OrElse Not project.GroupEdits.TryGetValue(row.Id, edits) Then Continue For
+                For Each pair As System.Collections.Generic.KeyValuePair(Of System.String, ReviewAnswer) In edits
+                    Dim generated As ReviewAnswer = Nothing
+                    row.Answers.TryGetValue(pair.Key, generated)
+                    If pair.Value.SourceHash <> If(generated Is Nothing, "", generated.SourceHash) Then Continue For
+                    Dim edited As ReviewAnswer = Newtonsoft.Json.JsonConvert.DeserializeObject(Of ReviewAnswer)(Serialize(pair.Value), JsonSettings)
+                    Dim criterion As ReviewCriterion = project.Criteria.Find(Function(item As ReviewCriterion) item.Id = pair.Key)
+                    If criterion Is Nothing OrElse criterion.Archived Then Continue For
+                    If row.TextHash <> edited.GroupContext OrElse edited.CriterionRevision <> criterion.Revision OrElse (generated IsNot Nothing AndAlso generated.Status = "stale") Then edited.Status = "stale"
+                    row.Answers(pair.Key) = edited
+                Next
+            Next
+            Return New System.Collections.Generic.List(Of ReviewDocument)(rows.Values)
+        End Function
+
         Public Shared Sub ArchiveAnswer(answer As ReviewAnswer, actor As System.String)
             If answer Is Nothing Then Return
             If System.String.IsNullOrEmpty(answer.Text) AndAlso System.String.IsNullOrEmpty(answer.Assessment) AndAlso System.String.IsNullOrEmpty(answer.Error) AndAlso answer.Evidence.Count = 0 AndAlso Not answer.UserEdited AndAlso answer.Status = "pending" AndAlso System.String.IsNullOrEmpty(answer.UpdatedUtc) Then Return
             answer.History.Add(New ReviewAnswerVersion With {
-                .Text = answer.Text, .Assessment = answer.Assessment, .Status = answer.Status,
+                .TextStyle = answer.TextStyle, .AssessmentStyle = answer.AssessmentStyle, .GroupContext = answer.GroupContext,
+                .RiskFlag = answer.RiskFlag, .Text = answer.Text, .Assessment = answer.Assessment, .Status = answer.Status,
                 .UpdatedUtc = answer.UpdatedUtc, .UpdatedBy = answer.UpdatedBy, .ReviewedBy = answer.ReviewedBy, .ReviewedUtc = answer.ReviewedUtc, .Actor = actor, .ModelKey = answer.ModelKey,
                 .SourceHash = answer.SourceHash, .CriterionRevision = answer.CriterionRevision,
                 .UserEdited = answer.UserEdited, .Error = answer.Error,

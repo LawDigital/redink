@@ -39,7 +39,7 @@ Namespace Agents
         ''' Tries to handle an agent-layer tool call. Returns the tool response string when
         ''' handled, or Nothing if the tool is not in this layer.
         ''' </summary>
-        Public Shared Async Function TryHandleAsync(toolName As String,
+        Public Shared Function TryHandleAsync(toolName As String,
                                                     arguments As IDictionary(Of String, Object),
                                                     host As ISubAgentHost,
                                                     Optional cancellationToken As CancellationToken = Nothing,
@@ -47,6 +47,18 @@ Namespace Agents
                                                     Optional authoritativeUserRequest As System.String = Nothing,
                                                     Optional semanticArchiveScope As Global.SharedLibrary.SharedLibrary.SemanticArchiveRunScope = Nothing,
                                                     Optional onSkillLoaded As System.Action(Of System.String) = Nothing) As System.Threading.Tasks.Task(Of System.String)
+            Return TryHandleAsync(toolName, arguments, host, cancellationToken, sharedContext, authoritativeUserRequest, semanticArchiveScope, onSkillLoaded, Nothing)
+        End Function
+
+        Public Shared Async Function TryHandleAsync(toolName As String,
+                                                    arguments As IDictionary(Of String, Object),
+                                                    host As ISubAgentHost,
+                                                    cancellationToken As CancellationToken,
+                                                    sharedContext As ISharedContext,
+                                                    authoritativeUserRequest As System.String,
+                                                    semanticArchiveScope As Global.SharedLibrary.SharedLibrary.SemanticArchiveRunScope,
+                                                    onSkillLoaded As System.Action(Of System.String),
+                                                    runState As Global.SharedLibrary.Agents.ToolCallSequencing.ToolingRunState) As System.Threading.Tasks.Task(Of System.String)
             If String.IsNullOrWhiteSpace(toolName) Then Return Nothing
 
             If SemanticArchiveTools.IsSemanticArchiveTool(toolName) Then
@@ -62,11 +74,11 @@ Namespace Agents
             End If
 
             If FileTools.IsFileTool(toolName) Then
-                Return FileTools.Execute(toolName, arguments)
+                Return FileTools.Execute(toolName, arguments, runState)
             End If
 
             If WorkspaceTools.IsWorkspaceTool(toolName) Then
-                Return WorkspaceTools.Execute(toolName, arguments)
+                Return WorkspaceTools.Execute(toolName, arguments, runState)
             End If
 
             If WordTools.IsWordTool(toolName) Then
