@@ -22,9 +22,10 @@ Namespace Global.SharedLibrary.TabularReview
 
         Public Function PlanPrompt(documents As System.Collections.Generic.IEnumerable(Of ReviewDocument), instruction As System.String,
                                    outputLanguage As System.String, operationModelKey As System.String,
-                                   cancellationToken As System.Threading.CancellationToken) As ReviewConsistencyRun
+                                   cancellationToken As System.Threading.CancellationToken, Optional criterion As ReviewCriterion = Nothing) As ReviewConsistencyRun
             ValidateArguments(documents, operationModelKey)
             Dim prepared As New PreparedPrompt()
+            If criterion IsNot Nothing Then prepared.Criterion = criterion
             prepared.Run.StartedUtc = ""
             PreparePrompt(prepared, documents, instruction, outputLanguage, operationModelKey, cancellationToken)
             Return CloneRun(prepared.Run)
@@ -37,7 +38,7 @@ Namespace Global.SharedLibrary.TabularReview
             Dim run As ReviewConsistencyRun = prepared.Run
             run.Instruction = instruction
             run.ModelKey = operationModelKey
-            prepared.Criterion.Instruction = instruction
+            If prepared.Criterion.Instruction.Length = 0 Then prepared.Criterion.Instruction = instruction
             Dim seen As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
             For Each original As ReviewDocument In documents
                 cancellationToken.ThrowIfCancellationRequested()
@@ -87,11 +88,12 @@ Namespace Global.SharedLibrary.TabularReview
                                               outputLanguage As System.String, operationModelKey As System.String,
                                               cancellationToken As System.Threading.CancellationToken,
                                               persist As System.Func(Of ReviewConsistencyRun, ReviewFinding, System.Threading.Tasks.Task),
-                                              Optional progress As System.Action(Of System.String) = Nothing) As System.Threading.Tasks.Task(Of ReviewConsistencyRun)
+                                              Optional progress As System.Action(Of System.String) = Nothing, Optional criterion As ReviewCriterion = Nothing) As System.Threading.Tasks.Task(Of ReviewConsistencyRun)
             ValidateArguments(documents, operationModelKey)
             If persist Is Nothing Then Throw New System.ArgumentNullException(NameOf(persist))
             If System.String.IsNullOrWhiteSpace(instruction) Then Throw New System.IO.InvalidDataException("Enter the prompt to run over the selected documents.")
             Dim prepared As New PreparedPrompt()
+            If criterion IsNot Nothing Then prepared.Criterion = criterion
             Dim run As ReviewConsistencyRun = prepared.Run
             run.Instruction = instruction
             run.ModelKey = operationModelKey
@@ -129,6 +131,7 @@ Namespace Global.SharedLibrary.TabularReview
                     .NoRelevantEvidence = result.Evidence.Count = 0, .Evidence = MapPromptEvidence(prepared, result.Evidence),
                     .CreatedUtc = UtcNow(), .UpdatedUtc = UtcNow()
                 }
+                run.GroupFlag = result.RiskFlag
                 run.FindingIds.Add(finding.Id)
                 Await PublishAsync(persist, run, finding).ConfigureAwait(False)
                 complete = True

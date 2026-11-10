@@ -428,7 +428,7 @@ Partial Public Class ThisAddIn
             End If
 
             If SharedLibrary.Agents.WorkspaceTools.IsWorkspaceTool(toolCall.ToolName) Then
-                response.Response = SharedLibrary.Agents.WorkspaceTools.Execute(toolCall.ToolName, toolCall.Arguments)
+                response.Response = SharedLibrary.Agents.WorkspaceTools.Execute(toolCall.ToolName, toolCall.Arguments, context?.SequencingState)
                 response.Success = True
 
                 Try
@@ -494,6 +494,7 @@ Partial Public Class ThisAddIn
         toolCall.ToolName, toolCall.Arguments, CType(Me, SharedLibrary.Agents.ISubAgentHost), cancellationToken, _context,
         authoritativeUserRequest:=If(context Is Nothing, Nothing, context.LatestUserRequestRaw),
         semanticArchiveScope:=If(context Is Nothing, Nothing, context.SemanticArchiveScope),
+        runState:=If(context Is Nothing, Nothing, context.SequencingState),
         onSkillLoaded:=Sub(skillName As System.String) SharedLogger.LogAgentToolCall(_context, _context.RDV, "Word_Agent", SharedLibrary.Agents.ToolRegistryBuilder.BuildSkillToolName(skillName))).ConfigureAwait(False)
 
                 response.Response = If(__agentJson, "")

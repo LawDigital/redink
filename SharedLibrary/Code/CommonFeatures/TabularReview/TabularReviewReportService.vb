@@ -263,6 +263,7 @@ Namespace Global.SharedLibrary.TabularReview
         End Class
 
         Private NotInheritable Class ReportCell
+            Public Property Emphasis As System.Int32
             Public Property Text As System.String
             Public Property Link As System.Uri
             Public Property Location As System.String = ""
@@ -458,6 +459,52 @@ Namespace Global.SharedLibrary.TabularReview
             If includeEmpty OrElse Not System.String.IsNullOrWhiteSpace(value) Then sheet.Rows.Add(Cells(reference, label, value))
         End Sub
 
+        Private Shared Function ReportSections(data As ReviewReportData) As System.Collections.Generic.List(Of ReviewReportData)
+            Dim sections As New System.Collections.Generic.List(Of ReviewReportData)()
+            If data.TableLayout <> "types" Then
+                sections.Add(data)
+                Return sections
+            End If
+            Dim categories As New System.Collections.Generic.List(Of System.String)()
+            Dim seen As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            If data.Rows.Exists(Function(row As ReviewReportRow) row.IsGroup) Then categories.Add(Nothing)
+            For Each row As ReviewReportRow In data.Rows
+                If Not row.IsGroup AndAlso seen.Add(row.Category.Trim()) Then categories.Add(row.Category.Trim())
+            Next
+            For Each category As System.String In categories
+                Dim groups As System.Boolean = category Is Nothing
+                Dim heading As System.String = If(groups, "Group overview", If(category = "", "Unassigned type", category))
+                Dim section As New ReviewReportData With {.Title = data.Title & " — " & heading, .Kind = data.Kind, .Orientation = data.Orientation, .Design = data.Design, .PaperSize = data.PaperSize,
+                    .ProjectId = data.ProjectId, .ProjectRevision = data.ProjectRevision, .GeneratedUtc = data.GeneratedUtc}
+                Dim indexes As New System.Collections.Generic.List(Of System.Int32)()
+                For index As System.Int32 = 0 To data.Columns.Count - 1
+                    Dim column As ReviewReportColumn = data.Columns(index)
+                    If groups OrElse System.String.IsNullOrWhiteSpace(column.Category) OrElse System.String.Equals(column.Category.Trim(), category, System.StringComparison.OrdinalIgnoreCase) Then
+                        section.Columns.Add(column)
+                        indexes.Add(index)
+                    End If
+                Next
+                If indexes.Count = 0 Then section.Columns.Add(New ReviewReportColumn With {.Key = "document", .Title = "Document"})
+                For index As System.Int32 = 0 To data.Rows.Count - 1
+                    Dim row As ReviewReportRow = data.Rows(index)
+                    If row.IsGroup <> groups OrElse (Not groups AndAlso Not System.String.Equals(row.Category.Trim(), category, System.StringComparison.OrdinalIgnoreCase)) Then Continue For
+                    Dim subset As New ReviewReportRow With {.DocumentId = row.DocumentId, .Category = row.Category, .IsGroup = row.IsGroup}
+                    For Each field As System.Int32 In indexes
+                        subset.Values.Add(row.Values(field))
+                        subset.Styles.Add(row.Styles(field))
+                    Next
+                    If indexes.Count = 0 Then
+                        subset.Values.Add(data.Documents(index).FileName)
+                        subset.Styles.Add(0)
+                    End If
+                    section.Rows.Add(subset)
+                    section.Documents.Add(data.Documents(index))
+                Next
+                sections.Add(section)
+            Next
+            Return sections
+        End Function
+
         Private Shared Function BuildSheets(data As ReviewReportData, outputPath As System.String, cancellationToken As System.Threading.CancellationToken) As System.Collections.Generic.List(Of ReportSheet)
             If data.Kind = "matrix_xlsx" Then
                 Dim headers As New System.Collections.Generic.List(Of System.String)()
@@ -471,7 +518,11 @@ Namespace Global.SharedLibrary.TabularReview
                     .Headers = headers.ToArray(), .Widths = widths.ToArray(), .PreserveCells = True, .AutoSize = True}
                 For Each row As ReviewReportRow In data.Rows
                     cancellationToken.ThrowIfCancellationRequested()
-                    matrix.Rows.Add(Cells(row.Values.ToArray()))
+                    Dim values As System.Collections.Generic.List(Of ReportCell) = Cells(row.Values.ToArray())
+                    For index As System.Int32 = 0 To row.Styles.Count - 1
+                        values(index).Emphasis = row.Styles(index)
+                    Next
+                    matrix.Rows.Add(values)
                 Next
                 Return New System.Collections.Generic.List(Of ReportSheet) From {matrix}
             End If
@@ -484,8 +535,23 @@ Namespace Global.SharedLibrary.TabularReview
                 MarkReport(package.AddCustomFilePropertiesPart())
                 Dim workbook As DocumentFormat.OpenXml.Packaging.WorkbookPart = package.AddWorkbookPart()
                 WriteExcelStyles(workbook.AddNewPart(Of DocumentFormat.OpenXml.Packaging.WorkbookStylesPart)(), data.Design)
-                Dim sheets As System.Collections.Generic.List(Of ReportSheet) = BuildSheets(data, outputPath, cancellationToken)
-                If sheets.Count <> 1 OrElse sheets(0).Name <> "Results" Then Throw New System.IO.InvalidDataException("The report must preserve its single Results worksheet.")
+                Dim sheets As New System.Collections.Generic.List(Of ReportSheet)()
+                For Each section As ReviewReportData In ReportSections(data)
+                    Dim sheet As ReportSheet = BuildSheets(section, outputPath, cancellationToken)(0)
+                    If data.TableLayout = "types" Then
+                        Dim label As System.String = If(section.Rows(0).IsGroup, "Groups", section.Rows(0).Category.Trim())
+                        If label = "" Then label = "Unassigned"
+                        For Each invalid As System.Char In "[]:*?/\"
+                            label = label.Replace(invalid, "_"c)
+                        Next
+                        label = label.Trim("'"c)
+                        Dim prefix As System.String = (sheets.Count + 1).ToString(System.Globalization.CultureInfo.InvariantCulture) & " "
+                        Dim length As System.Int32 = System.Math.Min(label.Length, 31 - prefix.Length)
+                        If length > 0 AndAlso System.Char.IsHighSurrogate(label(length - 1)) Then length -= 1
+                        sheet.Name = (prefix & label.Substring(0, length)).TrimEnd("'"c, " "c)
+                    End If
+                    sheets.Add(sheet)
+                Next
                 Dim relations As New System.Collections.Generic.List(Of System.String)()
                 Dim longTexts As New System.Collections.Generic.List(Of LongText)()
                 Using digest As New ContentDigest()
@@ -622,7 +688,7 @@ Namespace Global.SharedLibrary.TabularReview
                             If row(index).Link IsNot Nothing OrElse row(index).Location.Length > 0 Then style = If(rowIndex Mod 2 = 0, 6, 7)
                             If row(index).Style >= 0 Then style = row(index).Style
                             Dim continuationLocation As System.String = WriteExcelCell(writer, sheet.Name, reference, row(index).Text, style, longTexts, digest,
-                                sheet.Widths(index), height, row(index).Link, row(index).Location, preserveCell:=sheet.PreserveCells)
+                                sheet.Widths(index), height, row(index).Link, row(index).Location, preserveCell:=sheet.PreserveCells, emphasis:=row(index).Emphasis)
                             If continuationLocation.Length > 0 Then
                                 link.Location = continuationLocation
                             ElseIf row(index).Link IsNot Nothing Then
@@ -811,7 +877,7 @@ Namespace Global.SharedLibrary.TabularReview
                                                Optional originalLink As System.Uri = Nothing, Optional originalLocation As System.String = "",
                                                Optional lineHeight As System.Double = 15.0R,
                                                Optional maximumLineCharacters As System.Double = ExcelDisplayCharactersPerLine,
-                                               Optional preserveCell As System.Boolean = False) As System.String
+                                               Optional preserveCell As System.Boolean = False, Optional emphasis As System.Int32 = 0) As System.String
             Dim text As System.String = If(value, "")
             If text.Length > MaximumCellCharacters Then Throw New System.IO.InvalidDataException("A selected value exceeds Excel's cell limit. Choose Word to preserve its complete text; the Excel report structure and existing file remain unchanged.")
             Dim location As System.String = ""
@@ -821,6 +887,13 @@ Namespace Global.SharedLibrary.TabularReview
             writer.WriteAttributeString("s", style.ToString(System.Globalization.CultureInfo.InvariantCulture))
             writer.WriteAttributeString("t", "inlineStr")
             writer.WriteStartElement("is", SpreadsheetNamespace)
+            If emphasis <> 0 Then
+                writer.WriteStartElement("r", SpreadsheetNamespace)
+                writer.WriteStartElement("rPr", SpreadsheetNamespace)
+                If (emphasis And 1) <> 0 Then writer.WriteElementString("b", SpreadsheetNamespace, "")
+                If (emphasis And 2) <> 0 Then writer.WriteElementString("i", SpreadsheetNamespace, "")
+                writer.WriteEndElement()
+            End If
             writer.WriteStartElement("t", SpreadsheetNamespace)
             writer.WriteAttributeString("xml", "space", XmlNamespace, "preserve")
             ' Excel interprets _xNNNN_ tokens even inside inline strings. Escape
@@ -831,6 +904,7 @@ Namespace Global.SharedLibrary.TabularReview
             writer.WriteEndElement()
             writer.WriteEndElement()
             writer.WriteEndElement()
+            If emphasis <> 0 Then writer.WriteEndElement()
             Return location
         End Function
 
@@ -961,7 +1035,9 @@ Namespace Global.SharedLibrary.TabularReview
                             writer.WriteStartElement("w", "document", WordNamespace)
                             writer.WriteAttributeString("xmlns", "r", Nothing, RelationshipNamespace)
                             writer.WriteStartElement("w", "body", WordNamespace)
-                            WriteMatrixWordBody(writer, data, digest, cancellationToken)
+                            For Each section As ReviewReportData In ReportSections(data)
+                                WriteMatrixWordBody(writer, section, digest, cancellationToken)
+                            Next
                             writer.WriteStartElement("w", "sectPr", WordNamespace)
                             writer.WriteStartElement("w", "footerReference", WordNamespace)
                             writer.WriteAttributeString("w", "type", WordNamespace, "default")
@@ -1003,12 +1079,15 @@ Namespace Global.SharedLibrary.TabularReview
                     cancellationToken.ThrowIfCancellationRequested()
                     Dim row As ReviewReportRow = data.Rows(index)
                     Dim document As ReviewReportDocument = data.Documents.Find(Function(item As ReviewReportDocument) item.Id = row.DocumentId)
-                    WriteWordParagraph(writer, "SectionHeading", "Document " & (index + 1).ToString(System.Globalization.CultureInfo.InvariantCulture), digest)
-                    WriteWordParagraph(writer, "Metadata", SourceStatus(document) & " · " & SourceLocation(document), digest)
-                    If document.ExtractionStatus <> "complete" Then WriteWordParagraph(writer, "Metadata", SourceNotice(document), digest)
+                    Dim heading As System.String = document.FileName
+                    Dim nameColumn As System.Int32 = data.Columns.FindIndex(Function(column As ReviewReportColumn) column.Key = "document")
+                    If Not row.IsGroup AndAlso nameColumn >= 0 Then heading = row.Values(nameColumn)
+                    WriteWordParagraph(writer, "SectionHeading", heading, digest)
+                    If Not row.IsGroup Then WriteWordParagraph(writer, "Metadata", SourceStatus(document) & " · " & SourceLocation(document), digest)
+                    If Not row.IsGroup AndAlso document.ExtractionStatus <> "complete" Then WriteWordParagraph(writer, "Metadata", SourceNotice(document), digest)
                     For column As System.Int32 = 0 To data.Columns.Count - 1
                         WriteWordParagraph(writer, "Heading3", data.Columns(column).Title, digest)
-                        WriteWordParagraph(writer, "Normal", row.Values(column), digest)
+                        WriteWordParagraph(writer, "Normal", row.Values(column), digest, emphasis:=row.Styles(column))
                     Next
                 Next
                 Return
@@ -1044,7 +1123,7 @@ Namespace Global.SharedLibrary.TabularReview
                     writer.WriteStartElement("w", "tc", WordNamespace)
                     writer.WriteRaw("<w:tcPr><w:tcW w:w='" & widths(column).ToString(System.Globalization.CultureInfo.InvariantCulture) & "' w:type='dxa'/>" &
                         If(rowIndex < 0, "<w:shd w:val='clear' w:fill='961E2D'/>", If(rowIndex Mod 2 = 1, "<w:shd w:val='clear' w:fill='F7F0F1'/>", "")) & "<w:vAlign w:val='top'/></w:tcPr>")
-                    WriteWordParagraph(writer, If(rowIndex < 0, "RegisterHeader", "RegisterText"), If(rowIndex < 0, data.Columns(column).Title, data.Rows(rowIndex).Values(column)), digest)
+                    WriteWordParagraph(writer, If(rowIndex < 0, "RegisterHeader", "RegisterText"), If(rowIndex < 0, data.Columns(column).Title, data.Rows(rowIndex).Values(column)), digest, emphasis:=If(rowIndex < 0, 0, data.Rows(rowIndex).Styles(column)))
                     writer.WriteEndElement()
                 Next
                 writer.WriteEndElement()
@@ -1119,7 +1198,7 @@ Namespace Global.SharedLibrary.TabularReview
         End Sub
 
         Private Shared Sub WriteWordParagraph(writer As System.Xml.XmlWriter, style As System.String, value As System.String,
-                                              digest As ContentDigest, Optional linkId As System.String = "")
+                                              digest As ContentDigest, Optional linkId As System.String = "", Optional emphasis As System.Int32 = 0)
             digest.Add("p", "")
             writer.WriteStartElement("w", "p", WordNamespace)
             writer.WriteStartElement("w", "pPr", WordNamespace)
@@ -1132,18 +1211,18 @@ Namespace Global.SharedLibrary.TabularReview
                 writer.WriteStartElement("w", "hyperlink", WordNamespace)
                 writer.WriteAttributeString("r", "id", RelationshipNamespace, linkId)
             End If
-            WriteWordText(writer, If(value, ""), digest, linkId.Length > 0)
+            WriteWordText(writer, If(value, ""), digest, linkId.Length > 0, emphasis)
             If linkId.Length > 0 Then writer.WriteEndElement()
             writer.WriteEndElement()
         End Sub
 
-        Private Shared Sub WriteWordText(writer As System.Xml.XmlWriter, value As System.String, digest As ContentDigest, hyperlink As System.Boolean)
+        Private Shared Sub WriteWordText(writer As System.Xml.XmlWriter, value As System.String, digest As ContentDigest, hyperlink As System.Boolean, Optional emphasis As System.Int32 = 0)
             Dim start As System.Int32 = 0
             Dim index As System.Int32 = 0
             While index < value.Length
                 Dim code As System.Int32 = System.Convert.ToInt32(value(index))
                 If code = 9 OrElse code = 10 OrElse code = 13 Then
-                    If index > start Then WriteWordRuns(writer, value.Substring(start, index - start), digest, hyperlink)
+                    If index > start Then WriteWordRuns(writer, value.Substring(start, index - start), digest, hyperlink, emphasis)
                     writer.WriteStartElement("w", "r", WordNamespace)
                     Dim element As System.String = If(code = 9, "tab", "br")
                     writer.WriteStartElement("w", element, WordNamespace)
@@ -1155,13 +1234,19 @@ Namespace Global.SharedLibrary.TabularReview
                 End If
                 index += 1
             End While
-            If start < value.Length OrElse value.Length = 0 Then WriteWordRuns(writer, value.Substring(start), digest, hyperlink)
+            If start < value.Length OrElse value.Length = 0 Then WriteWordRuns(writer, value.Substring(start), digest, hyperlink, emphasis)
         End Sub
 
-        Private Shared Sub WriteWordRuns(writer As System.Xml.XmlWriter, value As System.String, digest As ContentDigest, hyperlink As System.Boolean)
+        Private Shared Sub WriteWordRuns(writer As System.Xml.XmlWriter, value As System.String, digest As ContentDigest, hyperlink As System.Boolean, Optional emphasis As System.Int32 = 0)
             For Each chunk As System.String In SplitText(value, ContinuationCharacters)
                 writer.WriteStartElement("w", "r", WordNamespace)
-                If hyperlink Then writer.WriteRaw("<w:rPr><w:rStyle w:val='Hyperlink'/></w:rPr>")
+                If hyperlink OrElse emphasis <> 0 Then
+                    writer.WriteStartElement("w", "rPr", WordNamespace)
+                    If hyperlink Then writer.WriteRaw("<w:rStyle w:val='Hyperlink'/>")
+                    If (emphasis And 1) <> 0 Then writer.WriteRaw("<w:b/>")
+                    If (emphasis And 2) <> 0 Then writer.WriteRaw("<w:i/>")
+                    writer.WriteEndElement()
+                End If
                 writer.WriteStartElement("w", "t", WordNamespace)
                 writer.WriteAttributeString("xml", "space", XmlNamespace, "preserve")
                 writer.WriteString(chunk)
