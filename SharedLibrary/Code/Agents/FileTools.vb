@@ -75,13 +75,18 @@ Namespace Agents
         ' --------------------------------------------------------------- dispatch
 
         Public Shared Function Execute(toolName As String, arguments As IDictionary(Of String, Object)) As String
+            Return Execute(toolName, arguments, Nothing)
+        End Function
+
+        Public Shared Function Execute(toolName As String, arguments As IDictionary(Of String, Object),
+                                       runState As Global.SharedLibrary.Agents.ToolCallSequencing.ToolingRunState) As String
             Try
                 Select Case toolName
                     Case ToolCopy : Return ExecuteCopy(arguments)
                     Case ToolList : Return ExecuteList(arguments)
                     Case ToolMove : Return ExecuteMove(arguments)
                     Case ToolRename : Return ExecuteRename(arguments)
-                    Case ToolDelete : Return ExecuteDelete(arguments)
+                    Case ToolDelete : Return ExecuteDelete(arguments, runState)
                     Case ToolMakeDir : Return ExecuteMakeDir(arguments)
                     Case ToolRemoveDir : Return ExecuteRemoveDir(arguments)
                     Case Else : Return Err_("unknown_file_tool", "Unknown tool: " & toolName)
@@ -196,7 +201,7 @@ Namespace Agents
             Return ArtifactDelivery.AttachOptionalSingleFileArtifactToResult(resultJson, artifactMetadata, dst)
         End Function
 
-        Private Shared Function ExecuteDelete(args As IDictionary(Of String, Object)) As String
+        Private Shared Function ExecuteDelete(args As IDictionary(Of String, Object), runState As Global.SharedLibrary.Agents.ToolCallSequencing.ToolingRunState) As String
             Dim p = PathPolicy.Resolve(GetStr(args, "path"), PathAccess.Write)
             RequireWorkspaceDelete(p)
             Dim toTrash = GetBool(args, "to_trash", True)
@@ -211,6 +216,7 @@ Namespace Agents
                 Return Err_("not_found", "Path not found.")
             End If
 
+            ArtifactDelivery.RecordConfirmedFileDeletion(runState, p)
             Return JsonConvert.SerializeObject(New With {Key .path = p, Key .to_trash = toTrash})
         End Function
 

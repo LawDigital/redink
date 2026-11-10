@@ -11,6 +11,9 @@ Namespace Global.SharedLibrary.TabularReview
         Public Property Title As System.String = ""
         Public Property Instruction As System.String = ""
         Public Property Kind As System.String = "analysis"
+        Public Property Category As System.String = ""
+        Public Property FlagScale As System.String = ""
+        Public Property FlagConditions As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.Ordinal)
         Public Property Options As New System.Collections.Generic.List(Of System.String)()
         Public Property Width As System.Nullable(Of System.Int32)
     End Class
@@ -97,7 +100,7 @@ Namespace Global.SharedLibrary.TabularReview
                 If column.Options Is Nothing Then Throw New System.IO.InvalidDataException("A column needs an options list, which may be empty.")
                 RequireWidth(column.Width, 140, 1200, "review column")
                 Dim copy As New ReviewTemplateColumn With {
-                    .Title = column.Title, .Instruction = column.Instruction, .Kind = kind, .Width = column.Width
+                    .Category = column.Category, .FlagScale = column.FlagScale, .FlagConditions = New System.Collections.Generic.Dictionary(Of System.String, System.String)(column.FlagConditions, System.StringComparer.Ordinal), .Title = column.Title, .Instruction = column.Instruction, .Kind = kind, .Width = column.Width
                 }
                 Dim optionValues As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
                 For Each optionText As System.String In column.Options
@@ -557,11 +560,20 @@ Namespace Global.SharedLibrary.TabularReview
                 Dim item As Newtonsoft.Json.Linq.JObject = TryCast(value, Newtonsoft.Json.Linq.JObject)
                 If item Is Nothing Then Throw New System.IO.InvalidDataException("Each column definition must be a JSON object.")
                 Dim columnFields As System.Collections.Generic.Dictionary(Of System.String, Newtonsoft.Json.Linq.JToken) = ReadObjectFields(item,
-                    New System.String() {"title", "instruction", "kind", "options", "width"}, "column definition")
+                    New System.String() {"title", "instruction", "kind", "options", "width", "category", "flagScale", "flagConditions"}, "column definition")
                 Dim column As New ReviewTemplateColumn With {
+                    .Category = StringValue(columnFields, "category", ""), .FlagScale = StringValue(columnFields, "flagScale", ""),
                     .Title = StringValue(columnFields, "title", ""), .Instruction = StringValue(columnFields, "instruction", ""),
                     .Kind = StringValue(columnFields, "kind", "analysis"), .Width = IntegerValue(columnFields, "width", True)
                 }
+                Dim rules As Newtonsoft.Json.Linq.JToken = Nothing
+                If columnFields.TryGetValue("flagConditions", rules) Then
+                    If rules.Type <> Newtonsoft.Json.Linq.JTokenType.Object Then Throw New System.IO.InvalidDataException("Flag conditions must map labels to instructions.")
+                    For Each rule As Newtonsoft.Json.Linq.JProperty In DirectCast(rules, Newtonsoft.Json.Linq.JObject).Properties()
+                        If rule.Value.Type <> Newtonsoft.Json.Linq.JTokenType.String Then Throw New System.IO.InvalidDataException("Flag conditions must be text.")
+                        column.FlagConditions.Add(rule.Name, rule.Value.ToString())
+                    Next
+                End If
                 Dim optionsToken As Newtonsoft.Json.Linq.JToken = Nothing
                 If columnFields.TryGetValue("options", optionsToken) Then
                     Dim options As Newtonsoft.Json.Linq.JArray = TryCast(optionsToken, Newtonsoft.Json.Linq.JArray)
@@ -589,9 +601,9 @@ Namespace Global.SharedLibrary.TabularReview
                     Dim reportObject As Newtonsoft.Json.Linq.JObject = TryCast(reportToken, Newtonsoft.Json.Linq.JObject)
                     If reportObject Is Nothing Then Throw New System.IO.InvalidDataException("Each report must contain an object.")
                     Dim reportFields As System.Collections.Generic.Dictionary(Of System.String, Newtonsoft.Json.Linq.JToken) = ReadObjectFields(reportObject,
-                        New System.String() {"id", "name", "title", "documentScope", "kind", "orientation", "design", "paperSize", "fields"}, "report definition")
+                        New System.String() {"id", "name", "title", "documentScope", "kind", "orientation", "design", "paperSize", "tableLayout", "fields"}, "report definition")
                     Dim report As New ReviewReportDefinition With {.Id = StringValue(reportFields, "id", ""), .Name = StringValue(reportFields, "name", ""),
-                        .Title = StringValue(reportFields, "title", ""), .DocumentScope = StringValue(reportFields, "documentScope", "filtered"), .Kind = StringValue(reportFields, "kind", ""), .PaperSize = StringValue(reportFields, "paperSize", "A4"), .Design = StringValue(reportFields, "design", "redink"), .Orientation = StringValue(reportFields, "orientation", "")}
+                        .Title = StringValue(reportFields, "title", ""), .DocumentScope = StringValue(reportFields, "documentScope", "filtered"), .Kind = StringValue(reportFields, "kind", ""), .TableLayout = StringValue(reportFields, "tableLayout", "combined"), .PaperSize = StringValue(reportFields, "paperSize", "A4"), .Design = StringValue(reportFields, "design", "redink"), .Orientation = StringValue(reportFields, "orientation", "")}
                     Dim keys As Newtonsoft.Json.Linq.JArray = TryCast(RequiredValue(reportFields, "fields"), Newtonsoft.Json.Linq.JArray)
                     If keys Is Nothing Then Throw New System.IO.InvalidDataException("Report fields must be an ordered array.")
                     For Each key As Newtonsoft.Json.Linq.JToken In keys
@@ -694,7 +706,10 @@ Namespace Global.SharedLibrary.TabularReview
                 Dim value As New Newtonsoft.Json.Linq.JObject()
                 value.Add("title", New Newtonsoft.Json.Linq.JValue(column.Title))
                 value.Add("instruction", New Newtonsoft.Json.Linq.JValue(column.Instruction))
+                If Not System.String.IsNullOrEmpty(column.Category) Then value.Add("category", New Newtonsoft.Json.Linq.JValue(column.Category))
+                If Not System.String.IsNullOrEmpty(column.FlagScale) Then value.Add("flagScale", New Newtonsoft.Json.Linq.JValue(column.FlagScale))
                 value.Add("kind", New Newtonsoft.Json.Linq.JValue(column.Kind))
+                If column.FlagConditions.Count > 0 Then value.Add("flagConditions", Newtonsoft.Json.Linq.JObject.FromObject(column.FlagConditions))
                 value.Add("options", options)
                 If column.Width.HasValue Then value.Add("width", New Newtonsoft.Json.Linq.JValue(column.Width.Value))
                 columns.Add(value)

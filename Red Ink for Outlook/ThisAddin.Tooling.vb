@@ -7702,7 +7702,7 @@ Partial Public Class ThisAddIn
                 SyncWorkspaceToPathPolicy(includeSessionTempFallback:=True)
             End If
 
-            wsResp.Response = SharedLibrary.Agents.WorkspaceTools.Execute(toolCall.ToolName, toolCall.Arguments)
+            wsResp.Response = SharedLibrary.Agents.WorkspaceTools.Execute(toolCall.ToolName, toolCall.Arguments, context?.SequencingState)
             wsResp.Success = True
 
             Try
@@ -7966,6 +7966,7 @@ Partial Public Class ThisAddIn
         toolCall.ToolName, toolCall.Arguments, CType(Me, SharedLibrary.Agents.ISubAgentHost), cancellationToken, _context,
         authoritativeUserRequest:=If(context Is Nothing, Nothing, context.LatestUserRequestRaw),
         semanticArchiveScope:=If(context Is Nothing, Nothing, context.SemanticArchiveScope),
+        runState:=If(context Is Nothing, Nothing, context.SequencingState),
         onSkillLoaded:=Sub(skillName As System.String) SharedLogger.LogAgentToolCall(_context, _context.RDV, OutlookUsageSurface(), SharedLibrary.Agents.ToolRegistryBuilder.BuildSkillToolName(skillName))).ConfigureAwait(False)
 
                 response.Response = If(__agentJson, "")

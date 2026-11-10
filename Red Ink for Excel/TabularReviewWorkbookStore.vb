@@ -52,6 +52,7 @@ Friend NotInheritable Class TabularReviewWorkbookStore
     End Class
 
     Private NotInheritable Class ProjectionColumn
+        Public Property Category As System.String = ""
         Public Property Id As System.String = ""
         Public Property Title As System.String = ""
         Public Property Instruction As System.String = ""
@@ -297,6 +298,7 @@ Friend NotInheritable Class TabularReviewWorkbookStore
             Throw New System.InvalidOperationException("The review has changed since this view loaded. Use Reload Excel before saving.")
         End If
         Dim candidate As Global.SharedLibrary.TabularReview.ReviewProject = Global.SharedLibrary.TabularReview.ReviewContract.Clone(project)
+        candidate.SchemaVersion = 6
         candidate.Revision = If(_snapshot Is Nothing, 1L, _snapshot.Project.Revision + 1L)
         candidate.UpdatedUtc = System.DateTime.UtcNow.ToString("o")
         Dim columns As System.Collections.Generic.List(Of ProjectionColumn) = BuildColumns(candidate)
@@ -357,6 +359,7 @@ Friend NotInheritable Class TabularReviewWorkbookStore
             WriteProjection(projection, candidate, columns, documents, previousRows, previousColumns)
             saveStage = "formatting the review worksheet"
             FormatProjection(projection, nextRows, nextColumns, If(newProjection, 0, previousColumns))
+            ApplyQuestionFlagColors(projection, candidate, columns, documents, System.Math.Max(nextRows, previousRows), System.Math.Max(nextColumns, previousColumns))
             Dim prepared As New StoredSnapshot With {
                 .Project = candidate,
                 .WorksheetName = projection.Name,
@@ -404,6 +407,7 @@ Friend NotInheritable Class TabularReviewWorkbookStore
             _expectedColumns = nextColumns
             _expectedFingerprint = prepared.ProjectionFingerprint
             _lastNotice = ""
+            project.SchemaVersion = candidate.SchemaVersion
             project.Revision = candidate.Revision
             project.UpdatedUtc = candidate.UpdatedUtc
         Catch ex As System.Exception
@@ -427,6 +431,7 @@ Friend NotInheritable Class TabularReviewWorkbookStore
             If Not committed AndAlso projection IsNot Nothing AndAlso backup IsNot Nothing Then
                 Try
                     RestoreProjection(projection, backup, previousRows, previousColumns, nextRows, nextColumns)
+                    ApplyQuestionFlagColors(projection, _loaded, BuildColumns(_loaded), ActiveDocuments(_loaded), System.Math.Max(nextRows, previousRows), System.Math.Max(nextColumns, previousColumns))
                 Catch rollbackFailure As System.Exception
                     System.Diagnostics.Debug.WriteLine("Tabular Review projection recovery failed: " & rollbackFailure.ToString())
                     Throw New System.InvalidOperationException("Excel could not finish the review save or restore its visible projection. The preceding complete review snapshot remains in the workbook. Keep this workbook and reopen Tabular Review before continuing.", New System.AggregateException(ex, rollbackFailure))
@@ -460,6 +465,7 @@ Friend NotInheritable Class TabularReviewWorkbookStore
             If extent.Item1 <> originalDocuments.Count + 4 OrElse extent.Item2 <> columns.Count Then
                 Throw New System.InvalidOperationException("Excel's review layout changed. Restore added/deleted rows or columns, then use the review's document and criteria controls to change its structure. Reload Excel will not discard worksheet cells.")
             End If
+            Dim readFingerprint As System.String = ComputeFingerprint(sheet, extent.Item1, extent.Item2)
             Dim actualColumns As New System.Collections.Generic.Dictionary(Of System.String, System.Int32)(System.StringComparer.Ordinal)
             For column As System.Int32 = 1 To extent.Item2
                 Dim id As System.String = ReadReviewCell(sheet, 4, column)
@@ -497,6 +503,10 @@ Friend NotInheritable Class TabularReviewWorkbookStore
                     changedCriteria.Add(criterion.Id)
                     For Each document As Global.SharedLibrary.TabularReview.ReviewDocument In merged.Documents
                         Dim answer As Global.SharedLibrary.TabularReview.ReviewAnswer = Nothing
+                        If Not criterion.AppliesTo(document) Then
+                            If document.Answers.TryGetValue(criterion.Id, answer) Then answer.Status = "stale"
+                            Continue For
+                        End If
                         If document.Answers.TryGetValue(criterion.Id, answer) Then Global.SharedLibrary.TabularReview.ReviewContract.ArchiveAnswer(answer, "Excel criterion edit")
                         Global.SharedLibrary.TabularReview.ReviewContract.Invalidate(document, criterion.Id)
                     Next
@@ -514,10 +524,10 @@ Friend NotInheritable Class TabularReviewWorkbookStore
                     Dim formulas As System.Object = range.Formula
                     For offset As System.Int32 = 0 To count - 1
                         Dim documentId As System.String = ScalarText(ArrayItem(values, offset, 0))
-                        Dim original As Global.SharedLibrary.TabularReview.ReviewDocument = _loaded.Documents.Find(Function(item As Global.SharedLibrary.TabularReview.ReviewDocument) item.Id = documentId AndAlso Not item.Archived)
+                        Dim original As Global.SharedLibrary.TabularReview.ReviewDocument = originalDocuments.Find(Function(item As Global.SharedLibrary.TabularReview.ReviewDocument) item.Id = documentId)
                         If original Is Nothing OrElse Not seen.Add(documentId) Then Throw New System.InvalidOperationException("Excel contains a missing, duplicate or unknown document ID. Restore hidden column A; when sorting, include the entire review row.")
                         Dim document As Global.SharedLibrary.TabularReview.ReviewDocument = merged.Documents.Find(Function(item As Global.SharedLibrary.TabularReview.ReviewDocument) item.Id = documentId)
-                        orderedDocuments.Add(document)
+                        If document IsNot Nothing Then orderedDocuments.Add(document)
                         Dim rowValues As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.Ordinal)
                         For Each definition As ProjectionColumn In columns
                             Dim column As System.Int32 = actualColumns(definition.Id)
@@ -525,12 +535,15 @@ Friend NotInheritable Class TabularReviewWorkbookStore
                             If formula.StartsWith("=", System.StringComparison.Ordinal) Then AssertNoFormula(sheet, firstRow + offset, column)
                             Dim text As System.String = ScalarText(ArrayItem(values, offset, column - 1))
                             rowValues.Add(definition.Id, text)
-                            If definition.Field = "id" OrElse definition.Field = "file" OrElse definition.Field = "path" OrElse definition.Field = "extraction" OrElse definition.Field = "import" OrElse definition.Field = "sources" Then
+                            If document Is Nothing OrElse definition.Field = "id" OrElse definition.Field = "file" OrElse definition.Field = "path" OrElse definition.Field = "extraction" OrElse definition.Field = "import" OrElse definition.Field = "sources" Then
                                 RequireUnchanged(text, DocumentValue(definition, original), If(definition.Field = "sources", "source reference/status", "document identity/source field"))
                             End If
                         Next
 
+                        If document Is Nothing Then Continue For
                         Dim previousMetadata As System.String = DocumentMetadata(original)
+                        If rowValues.ContainsKey("d:category") Then document.Category = EditableText(original.Category, rowValues("d:category"), "category").Trim()
+                        If rowValues.ContainsKey("d:group") Then document.GroupName = EditableText(original.GroupName, rowValues("d:group"), "group").Trim()
                         document.Number = EditableText(original.Number, rowValues("d:number"), "document number")
                         document.Priority = EditableText(original.Priority, rowValues("d:priority"), "priority")
                         document.Reviewer = EditableText(original.Reviewer, rowValues("d:reviewer"), "reviewer")
@@ -541,12 +554,24 @@ Friend NotInheritable Class TabularReviewWorkbookStore
                         Dim answerEdited As System.Boolean = False
                         For Each criterion As Global.SharedLibrary.TabularReview.ReviewCriterion In merged.Criteria
                             If criterion.Archived Then Continue For
+                            If Not criterion.AppliesTo(original) OrElse Not criterion.AppliesTo(document) Then
+                                For Each field As ProjectionColumn In columns
+                                    If field.CriterionId = criterion.Id Then RequireUnchanged(rowValues(field.Id), DocumentValue(field, original), "non-applicable answer (reload category changes before editing answers)")
+                                Next
+                                Continue For
+                            End If
                             Dim previous As Global.SharedLibrary.TabularReview.ReviewAnswer = Nothing
                             original.Answers.TryGetValue(criterion.Id, previous)
                             Dim text As System.String = EditableText(If(previous Is Nothing, "", previous.Text), rowValues("c:" & criterion.Id & ":answer"), "answer")
                             Dim assessment As System.String = If(previous Is Nothing, "", previous.Assessment)
                             If criterion.Kind = "analysis" Then assessment = EditableText(assessment, rowValues("c:" & criterion.Id & ":assessment"), "assessment")
-                            If text = If(previous Is Nothing, "", previous.Text) AndAlso assessment = If(previous Is Nothing, "", previous.Assessment) Then Continue For
+                            Dim oldFlag As System.String = If(previous Is Nothing, "", previous.RiskFlag)
+                            Dim newFlag As System.String = oldFlag
+                            If criterion.FlagValues().Count > 0 Then
+                                newFlag = EditableText(oldFlag, rowValues("c:" & criterion.Id & ":riskFlag"), "question flag")
+                                If newFlag <> oldFlag AndAlso newFlag.Length > 0 AndAlso Not criterion.FlagValues().Contains(newFlag) Then Throw New System.InvalidOperationException("Choose a configured flag for " & criterion.Title)
+                            End If
+                            If newFlag = oldFlag AndAlso text = If(previous Is Nothing, "", previous.Text) AndAlso assessment = If(previous Is Nothing, "", previous.Assessment) Then Continue For
                             If (criterion.Kind = "priority" OrElse criterion.Kind = "flag") AndAlso criterion.Options.Count > 0 AndAlso text.Length > 0 AndAlso Not criterion.Options.Contains(text) Then
                                 Throw New System.InvalidOperationException("Choose one of the exact values configured for the '" & criterion.Title & "' column before reloading Excel.")
                             End If
@@ -557,6 +582,7 @@ Friend NotInheritable Class TabularReviewWorkbookStore
                             Else
                                 Global.SharedLibrary.TabularReview.ReviewContract.ArchiveAnswer(answer, "Excel answer edit")
                             End If
+                            answer.RiskFlag = newFlag
                             answer.Text = text
                             answer.Assessment = assessment
                             answer.UserEdited = True
@@ -575,7 +601,7 @@ Friend NotInheritable Class TabularReviewWorkbookStore
                             If requestedStatus = "reviewed" Then EnsureDocumentCanBeReviewed(merged, document)
                             document.ReviewStatus = requestedStatus
                             document.LastReviewedUtc = If(requestedStatus = "reviewed", System.DateTime.UtcNow.ToString("o"), "")
-                        ElseIf answerEdited Then
+                        ElseIf answerEdited OrElse document.Category <> original.Category Then
                             document.ReviewStatus = "in_review"
                             document.LastReviewedUtc = ""
                         End If
@@ -605,7 +631,8 @@ Friend NotInheritable Class TabularReviewWorkbookStore
             Dim previousFingerprint As System.String = _expectedFingerprint
             Dim previousRows As System.Int32 = _expectedRows
             Dim previousColumns As System.Int32 = _expectedColumns
-            _expectedFingerprint = ComputeFingerprint(sheet, extent.Item1, extent.Item2)
+            If Not ProjectionMatches(sheet, extent.Item1, extent.Item2, readFingerprint) Then Throw New System.InvalidOperationException("Worksheet cells changed during reload. Let Excel finish synchronizing, then reload again.")
+            _expectedFingerprint = readFingerprint
             _expectedRows = extent.Item1
             _expectedColumns = extent.Item2
             Try
@@ -767,16 +794,16 @@ Friend NotInheritable Class TabularReviewWorkbookStore
 
     Private Shared Function DocumentMetadata(document As Global.SharedLibrary.TabularReview.ReviewDocument) As System.String
         Return Global.SharedLibrary.TabularReview.ReviewContract.Serialize(New With {
-            .number = document.Number, .reviewStatus = document.ReviewStatus, .priority = document.Priority,
+            .category = document.Category, .groupName = document.GroupName, .number = document.Number, .reviewStatus = document.ReviewStatus, .priority = document.Priority,
             .flags = document.Flags, .reviewer = document.Reviewer, .notes = document.Notes, .lastReviewedUtc = document.LastReviewedUtc
         })
     End Function
 
     Private Shared Sub EnsureDocumentCanBeReviewed(project As Global.SharedLibrary.TabularReview.ReviewProject, document As Global.SharedLibrary.TabularReview.ReviewDocument)
         For Each criterion As Global.SharedLibrary.TabularReview.ReviewCriterion In project.Criteria
-            If criterion.Archived OrElse criterion.Kind = "text" Then Continue For
+            If criterion.Archived OrElse criterion.Kind = "text" OrElse Not criterion.AppliesTo(document) Then Continue For
             Dim answer As Global.SharedLibrary.TabularReview.ReviewAnswer = Nothing
-            If Not document.Answers.TryGetValue(criterion.Id, answer) OrElse System.String.IsNullOrWhiteSpace(answer.Text) OrElse answer.Status = "stale" OrElse answer.Status = "error" OrElse answer.Status = "pending" Then
+            If Not document.Answers.TryGetValue(criterion.Id, answer) OrElse System.String.IsNullOrWhiteSpace(answer.Text) OrElse answer.Status = "stale" OrElse answer.Status = "error" OrElse answer.Status = "pending" OrElse (criterion.FlagValues().Count > 0 AndAlso Not criterion.FlagValues().Contains(answer.RiskFlag)) Then
                 Throw New System.InvalidOperationException("Resolve empty, stale or failed answers before marking this document reviewed.")
             End If
         Next
@@ -989,12 +1016,17 @@ Friend NotInheritable Class TabularReviewWorkbookStore
             New ProjectionColumn With {.Id = "d:extraction", .Title = "Source status", .Instruction = "Extraction/availability status and any incomplete-source notice.", .Field = "extraction"},
             New ProjectionColumn With {.Id = "d:import", .Title = "Imported from", .Instruction = "Provenance of an existing Excel result row, when applicable.", .Field = "import"}
         }
+        If project.SchemaVersion >= 4 Then
+            columns.Add(New ProjectionColumn With {.Id = "d:category", .Title = "Category", .Instruction = "The category selects the questions for this document.", .Field = "category"})
+            columns.Add(New ProjectionColumn With {.Id = "d:group", .Title = "Group", .Instruction = "Assign the same group name to documents to review together.", .Field = "group"})
+        End If
         For Each criterion As Global.SharedLibrary.TabularReview.ReviewCriterion In project.Criteria
             If criterion.Archived Then Continue For
-            columns.Add(New ProjectionColumn With {.Id = "c:" & criterion.Id & ":answer", .Title = criterion.Title, .Instruction = criterion.Instruction, .CriterionId = criterion.Id, .Field = "answer"})
+            columns.Add(New ProjectionColumn With {.Id = "c:" & criterion.Id & ":answer", .Title = criterion.Title, .Instruction = criterion.Instruction, .Category = criterion.Category, .CriterionId = criterion.Id, .Field = "answer"})
             If criterion.Kind = "analysis" Then
-                columns.Add(New ProjectionColumn With {.Id = "c:" & criterion.Id & ":assessment", .Title = criterion.Title & " — Assessment", .Instruction = "Assessment for: " & criterion.Title, .CriterionId = criterion.Id, .Field = "assessment"})
-                columns.Add(New ProjectionColumn With {.Id = "c:" & criterion.Id & ":sources", .Title = criterion.Title & " — Sources / status", .Instruction = "Answer status and host-validated source references. Edit answers or regenerate them in Tabular Review.", .CriterionId = criterion.Id, .Field = "sources"})
+                If criterion.FlagValues().Count > 0 Then columns.Add(New ProjectionColumn With {.Id = "c:" & criterion.Id & ":riskFlag", .Title = criterion.Title & " — Flag", .Instruction = System.String.Join(System.Environment.NewLine, criterion.FlagValues()), .Category = criterion.Category, .CriterionId = criterion.Id, .Field = "riskFlag"})
+                columns.Add(New ProjectionColumn With {.Id = "c:" & criterion.Id & ":assessment", .Title = criterion.Title & " — Assessment", .Instruction = "Assessment for: " & criterion.Title, .Category = criterion.Category, .CriterionId = criterion.Id, .Field = "assessment"})
+                columns.Add(New ProjectionColumn With {.Id = "c:" & criterion.Id & ":sources", .Title = criterion.Title & " — Sources / status", .Instruction = "Answer status and host-validated source references. Edit answers or regenerate them in Tabular Review.", .Category = criterion.Category, .CriterionId = criterion.Id, .Field = "sources"})
             End If
         Next
         Return columns
@@ -1005,6 +1037,21 @@ Friend NotInheritable Class TabularReviewWorkbookStore
         For Each document As Global.SharedLibrary.TabularReview.ReviewDocument In project.Documents
             If Not document.Archived Then result.Add(document)
         Next
+        Dim summaries = Global.SharedLibrary.TabularReview.ReviewContract.GroupSummaryRows(project)
+        If project.SchemaVersion >= 5 Then
+            Dim ordered As New System.Collections.Generic.List(Of Global.SharedLibrary.TabularReview.ReviewDocument)()
+            Dim emitted As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
+            For Each document As Global.SharedLibrary.TabularReview.ReviewDocument In result
+                If System.String.IsNullOrEmpty(document.GroupName) Then
+                    ordered.Add(document)
+                ElseIf emitted.Add(document.GroupName) Then
+                    ordered.Add(summaries.Find(Function(row As Global.SharedLibrary.TabularReview.ReviewDocument) row.GroupName = document.GroupName))
+                    ordered.AddRange(result.FindAll(Function(item As Global.SharedLibrary.TabularReview.ReviewDocument) item.GroupName = document.GroupName))
+                End If
+            Next
+            Return ordered
+        End If
+        result.AddRange(summaries)
         Return result
     End Function
 
@@ -1028,18 +1075,24 @@ Friend NotInheritable Class TabularReviewWorkbookStore
 
     Private Shared Function DocumentValue(definition As ProjectionColumn, document As Global.SharedLibrary.TabularReview.ReviewDocument) As System.String
         If definition.CriterionId.Length > 0 Then
+            Dim groupRow As System.Boolean = document.Id.StartsWith("group:", System.StringComparison.Ordinal)
+            If groupRow AndAlso Not document.Answers.ContainsKey(definition.CriterionId) Then Return ""
+            If Not groupRow AndAlso Not System.String.IsNullOrEmpty(definition.Category) AndAlso Not System.String.Equals(definition.Category, document.Category, System.StringComparison.OrdinalIgnoreCase) Then Return "N/A"
             Dim answer As Global.SharedLibrary.TabularReview.ReviewAnswer = Nothing
             If Not document.Answers.TryGetValue(definition.CriterionId, answer) Then
                 Return If(definition.Field = "sources", "Status: pending", "")
             End If
             Select Case definition.Field
                 Case "answer" : Return answer.Text
+                Case "riskFlag" : Return answer.RiskFlag
                 Case "assessment" : Return If(answer.Assessment, "")
                 Case "sources" : Return SourceDisplay(answer)
             End Select
         End If
         Select Case definition.Field
             Case "id" : Return document.Id
+            Case "category" : Return document.Category
+            Case "group" : Return document.GroupName
             Case "number" : Return If(document.Number, "")
             Case "file" : Return If(document.FileName, "")
             Case "path" : Return If(document.SourcePath, "")
@@ -1200,6 +1253,92 @@ Friend NotInheritable Class TabularReviewWorkbookStore
             ReleaseTemporary(body)
         End Try
     End Sub
+
+    Private Shared Sub ApplyQuestionFlagColors(sheet As Microsoft.Office.Interop.Excel.Worksheet,
+            project As Global.SharedLibrary.TabularReview.ReviewProject, columns As System.Collections.Generic.List(Of ProjectionColumn),
+            documents As System.Collections.Generic.List(Of Global.SharedLibrary.TabularReview.ReviewDocument), rows As System.Int32, width As System.Int32)
+        If rows < 5 Then Return
+        Const marker As System.String = "=N(""RedInk.TabularReview.Flag"")=0"
+        Dim area As Microsoft.Office.Interop.Excel.Range = Rectangle(sheet, 5, 1, rows, width)
+        Dim conditions As Microsoft.Office.Interop.Excel.FormatConditions = Nothing
+        Try
+            conditions = area.FormatConditions
+            For index As System.Int32 = conditions.Count To 1 Step -1
+                Dim existing As System.Object = conditions.Item(index)
+                Try
+                    Dim rule As Microsoft.Office.Interop.Excel.FormatCondition = TryCast(existing, Microsoft.Office.Interop.Excel.FormatCondition)
+                    If rule IsNot Nothing AndAlso rule.Type = Microsoft.Office.Interop.Excel.XlFormatConditionType.xlExpression AndAlso
+                       System.String.Equals(System.Convert.ToString(rule.Formula1), marker, System.StringComparison.OrdinalIgnoreCase) Then rule.Delete()
+                Finally
+                    ReleaseTemporary(existing)
+                End Try
+            Next
+        Finally
+            ReleaseTemporary(conditions)
+            ReleaseTemporary(area)
+        End Try
+        Dim fileColumn As System.Int32 = columns.FindIndex(Function(item As ProjectionColumn) item.Field = "file") + 1
+        If fileColumn > 0 AndAlso documents.Count > 0 AndAlso project.SchemaVersion >= 5 Then
+            Dim startRow As System.Int32 = 0
+            While startRow < documents.Count
+                Dim child As System.Boolean = IsGroupMember(documents(startRow))
+                Dim endRow As System.Int32 = startRow + 1
+                While endRow < documents.Count AndAlso IsGroupMember(documents(endRow)) = child
+                    endRow += 1
+                End While
+                Dim labels As Microsoft.Office.Interop.Excel.Range = Rectangle(sheet, startRow + 5, fileColumn, endRow + 4, fileColumn)
+                Try
+                    labels.IndentLevel = If(child, 1, 0)
+                Finally
+                    ReleaseTemporary(labels)
+                End Try
+                startRow = endRow
+            End While
+        End If
+        For column As System.Int32 = 0 To columns.Count - 1
+            Dim definition As ProjectionColumn = columns(column)
+            If definition.Field <> "riskFlag" Then Continue For
+            Dim start As System.Int32 = 0
+            While start < documents.Count
+                Dim label As System.String = VisibleFlag(definition, documents(start))
+                Dim finish As System.Int32 = start + 1
+                While finish < documents.Count AndAlso VisibleFlag(definition, documents(finish)) = label
+                    finish += 1
+                End While
+                Dim color As System.String = Nothing
+                If label.Length > 0 AndAlso project.FlagColors.TryGetValue(label, color) Then
+                    Dim target As Microsoft.Office.Interop.Excel.Range = Rectangle(sheet, start + 5, column + 1, finish + 4, column + 1)
+                    Dim rules As Microsoft.Office.Interop.Excel.FormatConditions = Nothing
+                    Dim rule As Microsoft.Office.Interop.Excel.FormatCondition = Nothing
+                    Dim fill As Microsoft.Office.Interop.Excel.Interior = Nothing
+                    Try
+                        rules = target.FormatConditions
+                        rule = DirectCast(rules.Add(Microsoft.Office.Interop.Excel.XlFormatConditionType.xlExpression, Formula1:=marker), Microsoft.Office.Interop.Excel.FormatCondition)
+                        fill = rule.Interior
+                        fill.Color = System.Drawing.ColorTranslator.ToOle(System.Drawing.ColorTranslator.FromHtml(color))
+                        rule.StopIfTrue = False
+                    Finally
+                        ReleaseTemporary(fill)
+                        ReleaseTemporary(rule)
+                        ReleaseTemporary(rules)
+                        ReleaseTemporary(target)
+                    End Try
+                End If
+                start = finish
+            End While
+        Next
+    End Sub
+
+    Private Shared Function IsGroupMember(document As Global.SharedLibrary.TabularReview.ReviewDocument) As System.Boolean
+        Return Not System.String.IsNullOrEmpty(document.GroupName) AndAlso Not document.Id.StartsWith("group:", System.StringComparison.Ordinal)
+    End Function
+
+    Private Shared Function VisibleFlag(definition As ProjectionColumn, document As Global.SharedLibrary.TabularReview.ReviewDocument) As System.String
+        If Not document.Id.StartsWith("group:", System.StringComparison.Ordinal) AndAlso
+           Not System.String.IsNullOrWhiteSpace(definition.Category) AndAlso Not System.String.Equals(definition.Category, document.Category, System.StringComparison.OrdinalIgnoreCase) Then Return ""
+        Dim answer As Global.SharedLibrary.TabularReview.ReviewAnswer = Nothing
+        Return If(document.Answers.TryGetValue(definition.CriterionId, answer), If(answer.RiskFlag, ""), "")
+    End Function
 
     Private Shared Function LiteralValue(text As System.String) As System.Object
         If System.String.IsNullOrEmpty(text) Then Return Nothing
