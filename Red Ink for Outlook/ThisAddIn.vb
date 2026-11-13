@@ -14,7 +14,7 @@
 '   the other ThisAddIn.* files.
 ' =============================================================================
 '
-' 12.11.2026
+' 13.11.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -381,7 +381,7 @@ Partial Public Class ThisAddIn
         StartStartupReconcileFallback()
 
         Try
-            activeChatId = If(My.Settings.Inky_LastChat = 2, 2, 1)
+            activeChatId = If(IsLocalChatId(My.Settings.Inky_LastChat), My.Settings.Inky_LastChat, 1)
         Catch
             activeChatId = 1
         End Try
