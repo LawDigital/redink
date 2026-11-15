@@ -232,8 +232,8 @@ Namespace SharedLibrary
         ' "Required" values are hard minimums: below these the agent is not exposed to the tooling loop.
         ' "Recommended" values are advisory: at or above "Required" but below "Recommended" the agent still
         ' runs, but the user is informed that an update is advisable.
-        Public Const PythonAgentMinRequiredVersion As System.String = "0.5.0"
-        Public Const PythonAgentMinRecommendedVersion As System.String = "0.5.0"
+        Public Const PythonAgentMinRequiredVersion As System.String = "0.6.10"
+        Public Const PythonAgentMinRecommendedVersion As System.String = "0.6.10"
         Public Const PythonAgentMinRequiredProtocolVersion As System.Int32 = 2
         Public Const PythonAgentMinRecommendedProtocolVersion As System.Int32 = 2
         Public Shared ReadOnly PythonAgentRemovalFiles As System.String() = {"README.txt", "redink-pythonagent-licenses.zip", "redink-pythonagent.exe"}

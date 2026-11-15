@@ -965,7 +965,7 @@ Namespace Agents
         Private Shared Function IsTransientCode(code As System.String) As System.Boolean
             Select Case code
                 Case "LLM_RATE_LIMITED", "LLM_PROVIDER_UNAVAILABLE", "WEB_REQUEST_TIMEOUT",
-                     "HOST_CALL_TIMEOUT", "ROOT_BUSY"
+                     "HOST_CALL_TIMEOUT", "ROOT_BUSY", "SESSION_LOST", "SESSION_CAPACITY_EXHAUSTED"
                     Return True
                 Case Else
                     Return False

@@ -407,10 +407,29 @@ Namespace SharedLibrary
                                                     Optional InsertButtonMaxOccurrences As System.Collections.Generic.IDictionary(Of System.String, System.Int32) = Nothing
                                                 ) As String
 
+            Return ShowCustomInputBoxCore(prompt, title, SimpleInput, DefaultValue, CtrlP, OptionalButtons, InsertButtons, Context, InsertButtonMaxOccurrences, If(SimpleInput, "", "ESC"))
+        End Function
+
+        ' Nothing distinguishes Cancel from an explicitly confirmed empty value.
+        Public Shared Function ShowOptionalSingleLineInput(prompt As System.String, title As System.String, defaultValue As System.String) As System.String
+            Return ShowCustomInputBoxCore(prompt, title, True, defaultValue, "", Nothing, Nothing, Nothing, Nothing, Nothing)
+        End Function
+
+        Private Shared Function ShowCustomInputBoxCore(
+                                                    prompt As String,
+                                                    title As String,
+                                                    SimpleInput As Boolean,
+                                                    DefaultValue As String,
+                                                    CtrlP As String,
+                                                    OptionalButtons As System.Tuple(Of System.String, System.String, System.String)(),
+                                                    InsertButtons As System.Tuple(Of System.String, System.String, System.String)(),
+                                                    Context As ISharedContext,
+                                                    InsertButtonMaxOccurrences As System.Collections.Generic.IDictionary(Of System.String, System.Int32),
+                                                    cancelledValue As System.String) As System.String
             RequireInteractiveExecution("input_dialog")
             If Not SharedMethods.IsOnHostUiThread AndAlso Not SharedMethods.IsOnHostNeutralSta Then
                 RequireCustomFormCallbackThread(Context IsNot Nothing)
-                Return RunOnStaThread(Function() ShowCustomInputBox(prompt, title, SimpleInput, DefaultValue, CtrlP, OptionalButtons, InsertButtons, Nothing, InsertButtonMaxOccurrences), "Red Ink input", alwaysUseWorker:=True)
+                Return RunOnStaThread(Function() ShowCustomInputBoxCore(prompt, title, SimpleInput, DefaultValue, CtrlP, OptionalButtons, InsertButtons, Nothing, InsertButtonMaxOccurrences, cancelledValue), "Red Ink input", alwaysUseWorker:=True)
             End If
 
             ' Screen working area (accounts for taskbar, etc.).
@@ -799,7 +818,7 @@ Namespace SharedLibrary
                 Debug.WriteLine("Final text: " & finalText)
                 Return finalText
             Else
-                Return If(Not SimpleInput, "ESC", "")
+                Return cancelledValue
             End If
 
             Finally

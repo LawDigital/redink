@@ -2908,8 +2908,8 @@ Namespace SharedLibrary
                 TruncateValue(change.NewValue, 100)
             )
 
-                ' Store the suspicious flag in the row's Tag for use in CellFormatting
-                dgv.Rows(rowIndex).Tag = change.IsSuspicious
+                ' Keep the change attached to its row when the grid is sorted.
+                dgv.Rows(rowIndex).Tag = change
 
                 ' Set default cell style for suspicious rows (will be overridden when selected)
                 If change.IsSuspicious Then
@@ -2923,7 +2923,8 @@ Namespace SharedLibrary
                                                If e.RowIndex < 0 OrElse e.RowIndex >= dgv.Rows.Count Then Return
 
                                                Dim row = dgv.Rows(e.RowIndex)
-                                               Dim isSuspicious = TypeOf row.Tag Is Boolean AndAlso CBool(row.Tag)
+                                               Dim change = TryCast(row.Tag, IniParameterChange)
+                                               Dim isSuspicious = change IsNot Nothing AndAlso change.IsSuspicious
 
                                                If isSuspicious Then
                                                    If row.Selected Then
@@ -2946,7 +2947,7 @@ Namespace SharedLibrary
             ' Handle checkbox changes
             AddHandler dgv.CellValueChanged, Sub(sender, e)
                                                  If e.ColumnIndex = 0 AndAlso e.RowIndex >= 0 Then
-                                                     changes(e.RowIndex).IsSelected = CBool(dgv.Rows(e.RowIndex).Cells(0).Value)
+                                                     DirectCast(dgv.Rows(e.RowIndex).Tag, IniParameterChange).IsSelected = CBool(dgv.Rows(e.RowIndex).Cells(0).Value)
                                                  End If
                                              End Sub
 
@@ -2964,7 +2965,7 @@ Namespace SharedLibrary
                 .FlowDirection = FlowDirection.LeftToRight,
                 .AutoSize = True,
                 .AutoSizeMode = AutoSizeMode.GrowAndShrink,
-                .WrapContents = False,
+                .WrapContents = True,
                 .Margin = New Padding(0, 5, 0, 5)
             }
             tblMain.Controls.Add(pnlButtons, 0, 2)
@@ -2981,6 +2982,24 @@ Namespace SharedLibrary
                 .Padding = New Padding(10, 5, 10, 5)
             }
 
+            Dim btnSelectAll As New System.Windows.Forms.Button() With {
+                .Text = "Select All", .AutoSize = True, .Padding = New System.Windows.Forms.Padding(10, 5, 10, 5)
+            }
+            Dim btnDeselectAll As New System.Windows.Forms.Button() With {
+                .Text = "Deselect All", .AutoSize = True, .Padding = New System.Windows.Forms.Padding(10, 5, 10, 5)
+            }
+            Dim setSelection As System.Action(Of System.Boolean) =
+                Sub(selected As System.Boolean)
+                    dgv.EndEdit()
+                    For Each row As System.Windows.Forms.DataGridViewRow In dgv.Rows
+                        row.Cells(colApply.Index).Value = selected
+                    Next
+                End Sub
+            AddHandler btnSelectAll.Click, Sub() setSelection(True)
+            AddHandler btnDeselectAll.Click, Sub() setSelection(False)
+
+            pnlButtons.Controls.Add(btnSelectAll)
+            pnlButtons.Controls.Add(btnDeselectAll)
             pnlButtons.Controls.Add(btnApprove)
             pnlButtons.Controls.Add(btnReject)
 

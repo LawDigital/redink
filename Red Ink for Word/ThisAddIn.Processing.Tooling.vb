@@ -291,6 +291,7 @@ Partial Public Class ThisAddIn
                    userText, otherPrompt, fullPromptOverride, workflowId, resumeWorkflowFromCheckpoint))
         Dim toolingLogScope As System.IDisposable =
             ToolingFileLogger.BeginSessionScope(originalRequestForLog)
+        Dim pythonRun As New SharedLibrary.Agents.PythonAgentRunScope()
         ' Cover setup before the central loop Try as well as every return/exception.
         ' Existing explicit completion paths are idempotent within this lease.
         Try
@@ -4475,6 +4476,7 @@ Partial Public Class ThisAddIn
             ToolingFileLogger.EndSession(False, "Tooling invocation failed.", ex:=toolingScopeError)
             Throw
         Finally
+            pythonRun.Dispose()
             toolingLogScope.Dispose()
         End Try
     End Function

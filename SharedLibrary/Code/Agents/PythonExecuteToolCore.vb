@@ -43,6 +43,11 @@ Namespace Agents
         Public Property Version As System.String
         Public Property MeetsRequired As System.Boolean
         Public Property MeetsRecommended As System.Boolean
+        Public Property SupportsSessions As System.Boolean
+        Public Property HasToolkit As System.Boolean
+        Public Property SafeHyperlinks As System.Boolean
+        Public Property DetailedDiagnostics As System.Boolean
+        Public Property CapabilityNote As System.String
         Public Property ErrorMessage As System.String
     End Class
 
@@ -159,11 +164,13 @@ Namespace Agents
             Public Property Target As System.String = System.String.Empty
             Public Property TargetMode As System.String = System.String.Empty
             Public Property RelationshipXml As System.String = System.String.Empty
+            Public Property Placeholder As System.String
             Public Property HyperlinkRef As System.String = System.String.Empty
         End Class
 
         Private NotInheritable Class TrustedXlsxExternalRelationshipBaseline
             Public Property OriginalSourcePath As System.String = System.String.Empty
+            Public Property AllowSafeHyperlinks As System.Boolean
             Public Property SanitizedSourcePath As System.String = System.String.Empty
             Public ReadOnly Property Entries As New System.Collections.Generic.List(Of TrustedXlsxExternalRelationshipBaselineEntry)()
         End Class
@@ -226,7 +233,8 @@ Namespace Agents
             ' with an update advisory surfaced elsewhere. The result is cached per executable
             ' (path + last-write-time + length), so the tooling loop pays no per-call process-launch cost.
             Dim status As PythonAgentVersionStatus = QueryVersionStatus(executable)
-            If status.Succeeded AndAlso Not status.MeetsRequired Then
+            If Not status.Succeeded Then Throw New RedInkPythonAgentConfigurationException(status.ErrorMessage)
+            If Not status.MeetsRequired Then
                 Throw New RedInkPythonAgentConfigurationException(
                     "The installed Python Agent version " & status.Version &
                     " is below the minimum required version " & SharedLibrary.SharedMethods.PythonAgentMinRequiredVersion &
@@ -336,7 +344,7 @@ Namespace Agents
             Dim status As PythonAgentVersionStatus = ProbeVersionStatus(executablePath)
 
             SyncLock VersionCacheLock
-                VersionCache(cacheKey) = status
+                If status.Succeeded Then VersionCache(cacheKey) = status
             End SyncLock
 
             Return status
@@ -378,13 +386,30 @@ Namespace Agents
             status.Version = versionText
             status.MeetsRequired = installedVersion >= requiredVersion
             status.MeetsRecommended = installedVersion >= recommendedVersion
+            If status.MeetsRequired AndAlso installedVersion > New System.Version(0, 5, 1) Then
+                Try
+                    Dim capabilities As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(QueryPythonAgentVersion(executablePath, "--capabilities"))
+                    Dim features = TryCast(capabilities("features"), Newtonsoft.Json.Linq.JArray)
+                    Dim protocols = TryCast(capabilities("protocols"), Newtonsoft.Json.Linq.JArray)
+                    If CStr(capabilities("name")) <> "redink-pythonagent" OrElse CStr(capabilities("version")) <> versionText OrElse features Is Nothing OrElse protocols Is Nothing Then
+                        Throw New System.FormatException("Unrecognized capabilities response.")
+                    End If
+                    Dim names As New System.Collections.Generic.HashSet(Of System.String)(features.Select(Function(item) CStr(item)), System.StringComparer.Ordinal)
+                    status.SupportsSessions = protocols.Any(Function(item) item.Type = Newtonsoft.Json.Linq.JTokenType.Integer AndAlso CInt(item) = 3) AndAlso names.Contains("service") AndAlso names.Contains("sessions") AndAlso names.Contains("executionNamespace")
+                    status.HasToolkit = names.Contains("toolkit")
+                    status.SafeHyperlinks = names.Contains("safeHyperlinks")
+                    status.DetailedDiagnostics = names.Contains("detailedDiagnostics")
+                Catch ex As System.Exception
+                    status.CapabilityNote = ex.Message
+                End Try
+            End If
             Return status
         End Function
 
-        Private Shared Function QueryPythonAgentVersion(executablePath As System.String) As System.String
+        Private Shared Function QueryPythonAgentVersion(executablePath As System.String, Optional argument As System.String = "--version") As System.String
             Dim startInfo As New System.Diagnostics.ProcessStartInfo() With {
                 .FileName = executablePath,
-                .Arguments = "--version",
+                .Arguments = argument,
                 .UseShellExecute = False,
                 .CreateNoWindow = True,
                 .RedirectStandardOutput = True,
@@ -539,6 +564,24 @@ Namespace Agents
                 resolvedInputFiles.Add(New RedInkPythonAgentInputFile(resolvedFullPath, relative))
             Next
 
+            Dim executable As System.String = ResolveAndValidateAvailability(options)
+            Dim status As PythonAgentVersionStatus = QueryVersionStatus(executable)
+            If status.CapabilityNote IsNot Nothing Then SafeLog(logDiag, "Using protocol 2 after capability probe: " & status.CapabilityNote)
+            Dim configuration As RedInkPythonAgentConfiguration = ResolveConfigurationRelativeToAssembly(options.AgentConfiguration)
+            Dim scope As PythonAgentRunScope = If(status.SupportsSessions, PythonAgentRunScope.Current, Nothing)
+            Dim callRoot As System.String = CreateCallRoot(options.RootDirectory)
+            Dim service As PythonAgentRunScope = Nothing
+            If scope IsNot Nothing Then Await scope.CallGate.WaitAsync(cancellationToken).ConfigureAwait(False)
+            Try
+                If scope IsNot Nothing Then
+                    Dim candidateRoot As System.String = callRoot
+                    Dim serviceCall As System.String = Await System.Threading.Tasks.Task.Run(
+                        Function() scope.PrepareCall(configuration, executable, candidateRoot, cancellationToken, logDiag), cancellationToken).ConfigureAwait(False)
+                    If serviceCall IsNot Nothing Then
+                        callRoot = serviceCall
+                        service = scope
+                    End If
+                End If
             Dim trustedBaselineDirectory As System.String = Nothing
             Dim trustedBaseline As TrustedXlsxExternalRelationshipBaseline = Nothing
             Dim trustedXlsxCandidates As System.Collections.Generic.List(Of RedInkPythonAgentInputFile) =
@@ -561,7 +604,7 @@ Namespace Agents
                     trustedXlsxCandidates(0).SourcePath,
                     sanitizedSourcePath,
                     candidateBaseline,
-                    logDiag) Then
+                    logDiag, status.SafeHyperlinks) Then
 
                     trustedBaseline = candidateBaseline
                     For index As System.Int32 = 0 To resolvedInputFiles.Count - 1
@@ -594,8 +637,6 @@ Namespace Agents
                 code = WrapCodeForStandardInput(code)
             End If
 
-            Dim callRoot As System.String = CreateCallRoot(options.RootDirectory)
-
             ' Decouple logical input names from physical staging paths only when the projected
             ' Windows path would approach the legacy path limit. The PythonAgent protocol and
             ' agent_api contract remain unchanged: user code still addresses the original logical
@@ -612,7 +653,6 @@ Namespace Agents
 
             Dim retainDiagnostics As System.Boolean = False
             Try
-                Dim configuration As RedInkPythonAgentConfiguration = ResolveConfigurationRelativeToAssembly(options.AgentConfiguration)
                 Dim limits As RedInkPythonAgentLimits = CreateLimits(options, effectiveTimeout)
                 Dim executionOptions As New RedInkPythonAgentExecutionOptions() With {
                 .OverallTimeout = System.TimeSpan.FromSeconds(limits.OverallWallTimeSeconds) + System.TimeSpan.FromSeconds(options.ProcessWaitShutdownMarginSeconds),
@@ -633,11 +673,11 @@ Namespace Agents
                 SafeLog(logStep, "Running secure Python script...")
                 Try
                     SafeLog(logDiag, "Validating secure Python executable...")
-                    Dim executable As System.String = RedInkPythonAgentClient.ValidateExecutableConfiguration(configuration)
+                    RedInkPythonAgentClient.ValidateExecutableConfiguration(configuration)
                     SafeLog(logDiag, "Secure Python executable verified.")
                     SafeLog(logDiag, "Verified PythonAgent executable: " & executable)
                     SafeLog(logDiag, "Python request source bytes: " & codeBytes.ToString(System.Globalization.CultureInfo.InvariantCulture))
-                    execution = client.CreateExecution(configuration, callRoot, code, stagedInputFiles, limits, options.HostServiceHandler, progress)
+                    execution = client.CreateExecution(configuration, callRoot, code, stagedInputFiles, limits, options.HostServiceHandler, progress, service, status.DetailedDiagnostics)
                     Using registration As System.Threading.CancellationTokenRegistration = cancellationToken.Register(
                     Sub()
                         If execution IsNot Nothing Then
@@ -752,7 +792,12 @@ Namespace Agents
                 If retainDiagnostics Then
                     RetainDiagnosticsBestEffort(callRoot, options.RootDirectory, logDiag)
                 End If
-                DeleteDirectoryBestEffort(callRoot, logDiag)
+                If service Is Nothing OrElse Not service.Stopping Then
+                    DeleteDirectoryBestEffort(callRoot, logDiag, If(service Is Nothing, 1, 6))
+                End If
+            End Try
+            Finally
+                If scope IsNot Nothing Then scope.CallGate.Release()
             End Try
         End Function
 
@@ -760,7 +805,7 @@ Namespace Agents
             sourcePath As System.String,
             sanitizedPath As System.String,
             ByRef baseline As TrustedXlsxExternalRelationshipBaseline,
-            logDiag As System.Action(Of System.String)) As System.Boolean
+            logDiag As System.Action(Of System.String), allowSafeHyperlinks As System.Boolean) As System.Boolean
 
             baseline = Nothing
             Dim sourceExtension As System.String = System.IO.Path.GetExtension(If(sourcePath, System.String.Empty))
@@ -778,6 +823,7 @@ Namespace Agents
                 Dim relationshipDocuments As New System.Collections.Generic.Dictionary(Of System.String, System.Xml.Linq.XDocument)(System.StringComparer.OrdinalIgnoreCase)
                 Dim ownerDocuments As New System.Collections.Generic.Dictionary(Of System.String, System.Xml.Linq.XDocument)(System.StringComparer.OrdinalIgnoreCase)
                 Dim discovered As New TrustedXlsxExternalRelationshipBaseline() With {
+                    .AllowSafeHyperlinks = allowSafeHyperlinks,
                     .OriginalSourcePath = System.IO.Path.GetFullPath(sourcePath),
                     .SanitizedSourcePath = System.IO.Path.GetFullPath(sanitizedPath)
                 }
@@ -849,6 +895,15 @@ Namespace Agents
                                     .RelationshipXml = relationship.ToString(System.Xml.Linq.SaveOptions.DisableFormatting),
                                     .HyperlinkRef = System.String.Empty
                                 }
+
+                                If allowSafeHyperlinks Then
+                                    discovered.Entries.Add(entry)
+                                    If Not IsSafeWebHyperlink(typeAttribute.Value, targetAttribute.Value) Then
+                                        entry.Placeholder = "https://redink.invalid/" & System.Guid.NewGuid().ToString("N")
+                                        targetAttribute.Value = entry.Placeholder
+                                    End If
+                                    Continue For
+                                End If
 
                                 If isWorksheetOwner Then
                                     ' Excel worksheets bind hyperlink relationships eagerly, so the body r:id must be
@@ -943,6 +998,16 @@ Namespace Agents
             validationFailure.MatchingOutputCount = matchingOutputs.Count
             If matchingOutputs.Count = 0 Then Return True
             If matchingOutputs.Count > 1 Then
+                If baseline.AllowSafeHyperlinks AndAlso Not baseline.Entries.Any(Function(entry) entry.Placeholder IsNot Nothing) Then
+                    matchingOutputs = matchingOutputs.Where(Function(item) System.String.Equals(System.IO.Path.GetFileName(item.FullPath),
+                        System.IO.Path.GetFileName(baseline.OriginalSourcePath), System.StringComparison.OrdinalIgnoreCase)).ToList()
+                    If matchingOutputs.Count <> 1 Then
+                        SafeLog(logDiag, "No unique same-name Office output for baseline restoration.")
+                        Return True
+                    End If
+                End If
+            End If
+            If matchingOutputs.Count <> 1 Then
                 validationFailure.CheckCode = "BASELINE_OUTPUT_AMBIGUOUS"
                 failureReason = "Trusted OOXML baseline restoration is ambiguous because the Python run produced more than one matching Office output."
                 Return False
@@ -999,6 +1064,23 @@ Namespace Agents
                                     End Using
                                 End If
                                 relationshipDocuments(baselineEntry.RelationshipPart) = relationshipDocument
+                            End If
+
+                            If baseline.AllowSafeHyperlinks Then
+                                If baselineEntry.Placeholder IsNot Nothing Then
+                                    Dim matches = relationshipDocument.Descendants(System.Xml.Linq.XName.Get("Relationship", PackageRelationshipsNamespace)).
+                                        Where(Function(rel) CStr(rel.Attribute("Target")) = baselineEntry.Placeholder AndAlso
+                                              CStr(rel.Attribute("Id")) = baselineEntry.RelationshipId AndAlso
+                                              CStr(rel.Attribute("Type")) = baselineEntry.RelationshipType AndAlso
+                                              CStr(rel.Attribute("TargetMode")) = baselineEntry.TargetMode).ToList()
+                                    If matches.Count <> 1 Then
+                                        validationFailure.CheckCode = "BASELINE_RELATIONSHIP_ID_CONFLICT"
+                                        failureReason = "The masked original hyperlink could not be matched uniquely."
+                                        Return False
+                                    End If
+                                    matches(0).SetAttributeValue("Target", baselineEntry.Target)
+                                End If
+                                Continue For
                             End If
 
                             Dim isWorksheetAnchored As System.Boolean = Not System.String.IsNullOrWhiteSpace(baselineEntry.HyperlinkRef)
@@ -1136,11 +1218,16 @@ Namespace Agents
                                 Return False
                             End If
 
-                            actualKeys.Add(TrustedRelationshipSemanticKey(
+                            Dim actualKey As System.String = TrustedRelationshipSemanticKey(
                                 archiveEntry.FullName,
                                 typeAttribute.Value,
                                 targetAttribute.Value,
-                                modeAttribute.Value))
+                                modeAttribute.Value)
+                            If baseline.AllowSafeHyperlinks AndAlso IsSafeWebHyperlink(typeAttribute.Value, targetAttribute.Value) Then
+                                expectedKeys.Remove(actualKey)
+                            Else
+                                actualKeys.Add(actualKey)
+                            End If
                         Next
                     Next
                 End Using
@@ -1161,6 +1248,16 @@ Namespace Agents
                 End If
             Next
             Return True
+        End Function
+
+        Private Shared Function IsSafeWebHyperlink(kind As System.String, target As System.String) As System.Boolean
+            If Not kind.EndsWith("/hyperlink", System.StringComparison.Ordinal) OrElse target.Length > 2048 OrElse
+               target <> target.Trim() OrElse target.Contains("\") OrElse target.Any(Function(ch) System.Char.IsControl(ch)) Then Return False
+            Dim uri As System.Uri = Nothing
+            If Not System.Uri.TryCreate(target, System.UriKind.Absolute, uri) Then Return False
+            If uri.Scheme = "mailto" Then Return target.Split("?"c, "#"c)(0).Substring(7).Contains("@")
+            Return (uri.Scheme = "http" OrElse uri.Scheme = "https") AndAlso uri.Host.Length > 0 AndAlso
+                   Not uri.Host.StartsWith(".", System.StringComparison.Ordinal)
         End Function
 
         Private Shared Function TrustedRelationshipSemanticKey(
@@ -1456,7 +1553,7 @@ Namespace Agents
                 New Newtonsoft.Json.Linq.JProperty("line", frame.Line),
                 New Newtonsoft.Json.Linq.JProperty("function", If(frame.Function Is Nothing, Newtonsoft.Json.Linq.JValue.CreateNull(), New Newtonsoft.Json.Linq.JValue(frame.Function)))))
             Next
-            Return New Newtonsoft.Json.Linq.JObject(
+            Dim json As New Newtonsoft.Json.Linq.JObject(
             New Newtonsoft.Json.Linq.JProperty("code", errorValue.Code),
             New Newtonsoft.Json.Linq.JProperty("phase", errorValue.Phase),
             New Newtonsoft.Json.Linq.JProperty("retryable", errorValue.Retryable),
@@ -1469,6 +1566,11 @@ Namespace Agents
             New Newtonsoft.Json.Linq.JProperty("missingAttribute", If(errorValue.MissingAttribute Is Nothing, Newtonsoft.Json.Linq.JValue.CreateNull(), New Newtonsoft.Json.Linq.JValue(errorValue.MissingAttribute))),
             New Newtonsoft.Json.Linq.JProperty("message", If(errorValue.Message Is Nothing, Newtonsoft.Json.Linq.JValue.CreateNull(), New Newtonsoft.Json.Linq.JValue(errorValue.Message))),
             New Newtonsoft.Json.Linq.JProperty("stack", stack))
+            If errorValue.Detail IsNot Nothing Then json("detail") = errorValue.Detail
+            If errorValue.Hint IsNot Nothing Then json("hint") = errorValue.Hint
+            If errorValue.Reason IsNot Nothing Then json("reason") = errorValue.Reason
+            If errorValue.FailedFile IsNot Nothing Then json("file") = errorValue.FailedFile
+            Return json
         End Function
 
         Private Shared Function CreateOutputValidationFailureResult(
@@ -1575,6 +1677,8 @@ Namespace Agents
                     Return "The secure Python executor returned an invalid response."
                 Case "EXECUTABLE_HASH_MISMATCH", "EXECUTABLE_SIGNATURE_INVALID", "EXECUTABLE_SIGNER_MISMATCH"
                     Return "The secure Python executor failed authenticity verification."
+                Case "WORKER_MEMORY_LIMIT"
+                    Return "Python reached the memory limit. Process the input in smaller parts."
                 Case "CONFIGURATION_INVALID", "REQUEST_INVALID"
                     Return "The Python execution request is invalid."
                 Case "INPUT_REFERENCE_INVALID"
@@ -1882,7 +1986,10 @@ Namespace Agents
             builder.Append(encodedSource)
             builder.AppendLine("').decode('utf-8')")
             builder.AppendLine("__redink_globals = {'__name__': '__main__', '__file__': 'code.py', '__package__': None, '__cached__': None}")
-            builder.AppendLine("exec(compile(__redink_source, 'code.py', 'exec'), __redink_globals, __redink_globals)")
+            builder.AppendLine("try:")
+            builder.AppendLine("    exec(compile(__redink_source, 'code.py', 'exec'), __redink_globals, __redink_globals)")
+            builder.AppendLine("finally:")
+            builder.AppendLine("    __redink_agent_api.input_path = __redink_original_input_path")
             Return builder.ToString()
         End Function
 
@@ -1939,7 +2046,10 @@ Namespace Agents
             builder.Append(encoded)
             builder.AppendLine("').decode('utf-8')")
             builder.AppendLine("__redink_globals = {'__name__': '__main__', '__file__': 'code.py', '__package__': None, '__cached__': None}")
-            builder.AppendLine("exec(compile(__redink_source, 'code.py', 'exec'), __redink_globals, __redink_globals)")
+            builder.AppendLine("try:")
+            builder.AppendLine("    exec(compile(__redink_source, 'code.py', 'exec'), __redink_globals, __redink_globals)")
+            builder.AppendLine("finally:")
+            builder.AppendLine("    __redink_agent_api.publish_result = __redink_original_publish_result")
             Return builder.ToString()
         End Function
 
@@ -2015,17 +2125,19 @@ Namespace Agents
             Return directory
         End Function
 
-        Private Shared Sub DeleteDirectoryBestEffort(path As System.String, logDiag As System.Action(Of System.String))
-            If System.String.IsNullOrWhiteSpace(path) Then
-                Return
-            End If
-            Try
-                If System.IO.Directory.Exists(path) Then
-                    System.IO.Directory.Delete(path, True)
-                End If
-            Catch ex As System.Exception
-                SafeLog(logDiag, ex.ToString())
-            End Try
+        Private Shared Sub DeleteDirectoryBestEffort(path As System.String, logDiag As System.Action(Of System.String), Optional attempts As System.Int32 = 1)
+            If System.String.IsNullOrWhiteSpace(path) Then Return
+            For attempt As System.Int32 = 1 To attempts
+                Try
+                    If System.IO.Directory.Exists(path) Then System.IO.Directory.Delete(path, True)
+                    Return
+                Catch ex As System.IO.IOException When attempt < attempts
+                    System.Threading.Thread.Sleep(50)
+                Catch ex As System.Exception
+                    SafeLog(logDiag, ex.ToString())
+                    Return
+                End Try
+            Next
         End Sub
 
         Private Shared Function Clamp(value As System.Int32, minimum As System.Int32, maximum As System.Int32) As System.Int32

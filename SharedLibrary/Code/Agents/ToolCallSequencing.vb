@@ -7601,11 +7601,25 @@ Namespace Agents
         ' Whole-path replacement is permitted only when the host explicitly opened that path.
         ' It cannot be inferred from an unrelated successful call or an arbitrary existing file.
         Private Shared Function HasVerifiedDeclaredPathReplacement(runState As ToolingRunState, failure As ToolFailureRecord) As System.Boolean
-            If Not failure.CrossScopeAlternativeRecoveryAllowed OrElse
-               runState.DeliverableCapableToolNames Is Nothing OrElse Not runState.DeliverableCapableToolNames.Contains(failure.ToolName) OrElse
-               Not runState.HasExpectedDeliverableContract OrElse runState.ExpectedDeliverableSlots Is Nothing OrElse
-               runState.ExpectedDeliverableSlots.Count = 0 OrElse runState.RegisteredDeliverableArtifacts Is Nothing Then
-                Return RecordOutcomeReconciliationDiagnostic(failure, False, "declared_alternative_prerequisites_not_met")
+            Dim unmetPrerequisite As System.String = System.String.Empty
+            If Not failure.CrossScopeAlternativeRecoveryAllowed Then
+                unmetPrerequisite = "cross_scope_recovery_not_allowed"
+            ElseIf runState.DeliverableCapableToolNames Is Nothing Then
+                unmetPrerequisite = "deliverable_tool_registry_missing"
+            ElseIf Not runState.DeliverableCapableToolNames.Contains(failure.ToolName) Then
+                unmetPrerequisite = "failed_tool_not_deliverable_capable"
+            ElseIf Not runState.HasExpectedDeliverableContract Then
+                unmetPrerequisite = "expected_contract_missing"
+            ElseIf runState.ExpectedDeliverableSlots Is Nothing Then
+                unmetPrerequisite = "expected_slots_missing"
+            ElseIf runState.ExpectedDeliverableSlots.Count = 0 Then
+                unmetPrerequisite = "expected_slots_empty"
+            ElseIf runState.RegisteredDeliverableArtifacts Is Nothing Then
+                unmetPrerequisite = "artifact_registry_missing"
+            End If
+            If unmetPrerequisite.Length > 0 Then
+                Return RecordOutcomeReconciliationDiagnostic(failure, False,
+                    "declared_alternative_prerequisites_not_met [prerequisite=" & unmetPrerequisite & "]")
             End If
             For Each expected As ExpectedDeliverableSlot In runState.ExpectedDeliverableSlots
                 If expected Is Nothing OrElse Not runState.IsExpectedDeliverableSlotSatisfied(expected.LogicalDeliverableId, expected.OutputSlotId) Then

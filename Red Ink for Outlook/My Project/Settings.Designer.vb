@@ -125,6 +125,28 @@ Namespace My
                 Me("ChatHistory_Inky2") = value
             End Set
         End Property
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property ChatHistory_Inky3() As String
+            Get
+                Return CType(Me("ChatHistory_Inky3"),String)
+            End Get
+            Set
+                Me("ChatHistory_Inky3") = value
+            End Set
+        End Property
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property ChatHistory_Inky4() As String
+            Get
+                Return CType(Me("ChatHistory_Inky4"),String)
+            End Get
+            Set
+                Me("ChatHistory_Inky4") = value
+            End Set
+        End Property
         
         <Global.System.Configuration.UserScopedSettingAttribute(),  _
          Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
