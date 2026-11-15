@@ -205,6 +205,8 @@ Public Class DiscussInky
     Private _suppressToolingLogPreferenceSync As Boolean = False
     Private _noPersonaLibraryConfigured As Boolean = False ' True when no persona path is defined
     Private _suppressTalkToMeForwarding As Boolean = False
+    Private _activeProjectTitle As System.String = ""
+    Private _sortArchiveByName As System.Boolean
     Private _activeDialogueArchiveName As String = ""
     Private _activeDialogueArchiveFilePath As String = ""
     Private _activeDialogueArchiveBaselineHash As String = ""
@@ -434,6 +436,7 @@ Public Class DiscussInky
     Public Sub New(context As ISharedContext)
         MyBase.New()
         _context = context
+        RestoreRunningArchiveLink()
 
         Me.Text = $"Discuss this, {AssistantName}"
         Me.AutoScaleDimensions = New System.Drawing.SizeF(96.0F, 96.0F)
@@ -695,7 +698,7 @@ Public Class DiscussInky
         End If
 
         If Not String.IsNullOrWhiteSpace(_activeDialogueArchiveName) Then
-            title &= $" {{Archive: {_activeDialogueArchiveName}}}"
+            title &= $" {{Archive: {_activeProjectTitle}}}"
         End If
 
         If Not String.IsNullOrEmpty(_knowledgeFilePath) Then
@@ -861,7 +864,7 @@ Public Class DiscussInky
                     archiveNameElement.Value.Trim(),
                     GetArchiveNameFromFilePath(_activeDialogueArchiveFilePath))
 
-            Dim archiveIndexDirectory As String = GetArchiveIndexDirectoryPath(archiveName)
+            Dim archiveIndexDirectory As String = GetArchiveIndexDirectoryPath(GetArchiveNameFromFilePath(_activeDialogueArchiveFilePath))
             Dim archiveKnowledgeElement As XElement = root.Element("Knowledge")
             Dim archiveHasKnowledge As Boolean =
                 archiveKnowledgeElement IsNot Nothing AndAlso
@@ -1592,19 +1595,21 @@ Public Class DiscussInky
         End If
 
         Try
-            For Each sidecarDir In Directory.GetDirectories(archiveDir, "*" & ArchiveIndexFolderSuffix, SearchOption.TopDirectoryOnly)
-                Dim folderName As String = Path.GetFileName(sidecarDir)
-                If Not folderName.EndsWith(ArchiveIndexFolderSuffix, StringComparison.OrdinalIgnoreCase) Then
-                    Continue For
-                End If
+            Using archiveLock = LockDialogueArchives()
+                For Each sidecarDir In Directory.GetDirectories(archiveDir, "*" & ArchiveIndexFolderSuffix, SearchOption.TopDirectoryOnly)
+                    Dim folderName As String = Path.GetFileName(sidecarDir)
+                    If Not folderName.EndsWith(ArchiveIndexFolderSuffix, StringComparison.OrdinalIgnoreCase) Then
+                        Continue For
+                    End If
 
-                Dim baseName As String = folderName.Substring(0, folderName.Length - ArchiveIndexFolderSuffix.Length)
-                Dim archiveFilePath As String = Path.Combine(archiveDir, baseName & DialogueArchiveFileExtension)
+                    Dim baseName As String = folderName.Substring(0, folderName.Length - ArchiveIndexFolderSuffix.Length)
+                    Dim archiveFilePath As String = Path.Combine(archiveDir, baseName & DialogueArchiveFileExtension)
 
-                If Not File.Exists(archiveFilePath) Then
-                    DeleteIndexDirectorySafe(sidecarDir)
-                End If
-            Next
+                    If Not File.Exists(archiveFilePath) Then
+                        DeleteIndexDirectorySafe(sidecarDir)
+                    End If
+                Next
+            End Using
         Catch ex As Exception
             System.Diagnostics.Debug.WriteLine(ex.Message)
         End Try
@@ -7666,11 +7671,12 @@ Public Class DiscussInky
 
     Private Class DialogueArchiveInfo
         Public Property Name As String
+        Public Property Folder As System.String = ""
         Public Property FilePath As String
         Public Property SavedAtLocal As DateTime
 
         Public Overrides Function ToString() As String
-            Return $"{Name} - {SavedAtLocal:yyyy-MM-dd HH:mm}"
+            Return If(Folder.Length = 0, "", Folder & " / ") & $"{Name} - {SavedAtLocal:yyyy-MM-dd HH:mm}"
         End Function
     End Class
 
@@ -7682,7 +7688,7 @@ Public Class DiscussInky
 
         If Not String.IsNullOrWhiteSpace(_activeDialogueArchiveName) Then
             sb.Append(" Current linked archive: ")
-            sb.Append(_activeDialogueArchiveName)
+            sb.Append(_activeProjectTitle)
             sb.Append(If(IsCurrentDialogueArchiveDirty(), " (modified).", " (unchanged)."))
         End If
 
@@ -7964,9 +7970,85 @@ Public Class DiscussInky
     End Function
 
     Private Sub SetCurrentActiveDialogueArchive(archiveName As String, archiveFilePath As String, baselineHash As String)
-        _activeDialogueArchiveName = If(archiveName, "").Trim()
+        _activeProjectTitle = If(archiveName, "").Trim()
+        _activeDialogueArchiveName = _activeProjectTitle
         _activeDialogueArchiveFilePath = If(archiveFilePath, "").Trim()
         _activeDialogueArchiveBaselineHash = If(baselineHash, "").Trim()
+    End Sub
+
+    Private Sub RestoreRunningArchiveLink()
+        Try
+            Dim state As System.String = My.Settings.DiscussLastSessionStateXml
+            If System.String.IsNullOrWhiteSpace(state) Then Return
+            Dim link = System.Xml.Linq.XDocument.Parse(state).Root.Element("ActiveArchive")
+            Dim savedPath = GetXmlAttributeValue(link, "filePath", "")
+            If System.String.IsNullOrWhiteSpace(savedPath) Then Return
+            Dim key = GetArchiveNameFromFilePath(savedPath)
+            Dim localPath = GetDialogueArchiveFilePath(key)
+            If Not System.String.Equals(localPath, savedPath, System.StringComparison.OrdinalIgnoreCase) OrElse Not System.IO.File.Exists(localPath) Then Return
+            Dim root = System.Xml.Linq.XDocument.Load(localPath).Root
+            If root Is Nothing OrElse root.Name <> "DiscussInkyState" Then Return
+            SetCurrentActiveDialogueArchive(key, localPath, GetXmlAttributeValue(link, "baselineHash", ""))
+            _activeProjectTitle = ProjectTitle(root, key)
+        Catch ex As System.Exception
+            System.Diagnostics.Trace.WriteLine("Could not restore dialogue archive link: " & ex.Message)
+        End Try
+    End Sub
+
+    Private Shared Function ProjectTitle(root As System.Xml.Linq.XElement, fallback As System.String) As System.String
+        For Each field In {"ProjectName", "ArchiveName"}
+            Dim title = CStr(root.Element(field))
+            If Not System.String.IsNullOrWhiteSpace(title) Then Return title.Trim()
+        Next
+        Return fallback
+    End Function
+
+    Private Function LockDialogueArchives() As System.IO.FileStream
+        Return New System.IO.FileStream(System.IO.Path.Combine(GetDialogueArchiveDirectoryPath(), "dialogue-archives.lock"),
+            System.IO.FileMode.OpenOrCreate, System.IO.FileAccess.ReadWrite, System.IO.FileShare.None)
+    End Function
+
+    Private Shared Sub WriteArchiveAtomically(path As System.String, document As System.Xml.Linq.XDocument)
+        Dim temp = path & "." & System.Guid.NewGuid().ToString("N") & ".tmp"
+        Try
+            document.Save(temp, System.Xml.Linq.SaveOptions.DisableFormatting)
+            If System.IO.File.Exists(path) Then
+                System.IO.File.Replace(temp, path, Nothing)
+            Else
+                System.IO.File.Move(temp, path)
+            End If
+        Finally
+            If System.IO.File.Exists(temp) Then System.IO.File.Delete(temp)
+        End Try
+    End Sub
+
+    Private Sub PruneReplacedArchiveIndexes(key As System.String, oldRoot As System.Xml.Linq.XElement, newRoot As System.Xml.Linq.XElement)
+        Try
+            Dim directoryPath = GetArchiveIndexDirectoryPath(key)
+            Dim referenced As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            For Each entry In newRoot.Elements("Indexes").SelectMany(Function(section) section.Elements("Index"))
+                referenced.Add(CStr(entry.Attribute("file")))
+            Next
+            For Each entry In oldRoot.Elements("Indexes").SelectMany(Function(section) section.Elements("Index"))
+                If Not GetXmlAttributeBoolean(entry, "archived", False) Then Continue For
+                Dim leaf = CStr(entry.Attribute("file"))
+                If System.String.IsNullOrEmpty(leaf) OrElse Not System.String.Equals(System.IO.Path.GetFileName(leaf), leaf, System.StringComparison.Ordinal) OrElse
+                   Not leaf.EndsWith(IndexCopyFileExtension, System.StringComparison.OrdinalIgnoreCase) OrElse referenced.Contains(leaf) Then Continue For
+                Dim candidate = System.IO.Path.Combine(directoryPath, leaf)
+                If Not _attachedIndexes.Any(Function(item) System.String.Equals(item.ActivePath, candidate, System.StringComparison.OrdinalIgnoreCase)) Then System.IO.File.Delete(candidate)
+            Next
+        Catch ex As System.Exception
+            System.Diagnostics.Trace.WriteLine("Archive index cleanup: " & ex.Message)
+        End Try
+    End Sub
+
+    Private Sub PersistArchiveLinkSettings()
+        Try
+            My.Settings.DiscussLastSessionStateXml = BuildSessionStateXml()
+            My.Settings.Save()
+        Catch ex As System.Exception
+            AppendSystemMessage("Archive saved or restored, but its link could not be persisted: " & ex.Message)
+        End Try
     End Sub
 
     Private Sub ClearCurrentActiveDialogueArchive()
@@ -8092,10 +8174,28 @@ Public Class DiscussInky
         Dim writtenByIndexId As Dictionary(Of String, String) = Nothing
 
         If copyToArchive Then
-            Dim archiveIndexDir As String = GetArchiveIndexDirectoryPath(archiveName)
-            ' Rewrite the sidecar from scratch so stale copies are not left behind.
-            DeleteIndexDirectorySafe(archiveIndexDir)
-            writtenByIndexId = CopyAttachedIndexesToDirectory(_attachedIndexes, archiveIndexDir, repointActivePath:=False)
+            Dim archiveIndexDir = GetArchiveIndexDirectoryPath(archiveName)
+            System.IO.Directory.CreateDirectory(archiveIndexDir)
+            writtenByIndexId = New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.OrdinalIgnoreCase)
+            For Each item In _attachedIndexes
+                Dim digest = ComputeFileSha256(item.ActivePath)
+                If digest.Length = 0 Then Throw New System.IO.IOException("Could not read attached index: " & item.DisplayName)
+                Dim leaf = System.BitConverter.ToString(System.Convert.FromBase64String(digest)).Replace("-", "").Substring(0, 24) & IndexCopyFileExtension
+                Dim destination = System.IO.Path.Combine(archiveIndexDir, leaf)
+                If Not System.IO.File.Exists(destination) Then
+                    Dim stage = destination & "." & System.Guid.NewGuid().ToString("N") & ".tmp"
+                    Try
+                        System.IO.File.Copy(item.ActivePath, stage)
+                        If ComputeFileSha256(stage) <> digest Then Throw New System.IO.IOException("Index changed during archiving: " & item.DisplayName)
+                        System.IO.File.Move(stage, destination)
+                    Finally
+                        If System.IO.File.Exists(stage) Then System.IO.File.Delete(stage)
+                    End Try
+                ElseIf ComputeFileSha256(destination) <> digest Then
+                    Throw New System.IO.IOException("Archived index failed verification: " & item.DisplayName)
+                End If
+                writtenByIndexId.Add(item.Id, leaf)
+            Next
         End If
 
         For Each idx In _attachedIndexes
@@ -8312,7 +8412,7 @@ Public Class DiscussInky
     End Sub
 
     Private Function RestoreSessionStateFromXml(stateXml As String,
-                                            sourceLabel As String,
+                                            sourceLabel As String, archiveFilePath As System.String,
                                             Optional announceRestore As Boolean = True,
                                             Optional resetChatHtml As Boolean = True) As Boolean
         If String.IsNullOrWhiteSpace(stateXml) Then Return False
@@ -8336,8 +8436,8 @@ Public Class DiscussInky
             Dim historyElement = root.Element("History")
 
             SetCurrentActiveDialogueArchive(
-                GetXmlAttributeValue(activeArchiveElement, "name", ""),
-                GetXmlAttributeValue(activeArchiveElement, "filePath", ""),
+                GetArchiveNameFromFilePath(archiveFilePath),
+                archiveFilePath,
                 GetXmlAttributeValue(activeArchiveElement, "baselineHash", ""))
 
             _currentPersonaName = GetXmlAttributeValue(personaElement, "name", DefaultPersonaName)
@@ -8501,7 +8601,7 @@ Public Class DiscussInky
 
             Dim resolvedPath As String
             If archived Then
-                Dim archiveName As String = If(_activeDialogueArchiveName, "")
+                Dim archiveName As String = _activeDialogueArchiveName
                 resolvedPath = System.IO.Path.Combine(GetArchiveIndexDirectoryPath(archiveName), fileValue)
             Else
                 resolvedPath = fileValue
@@ -8541,13 +8641,12 @@ Public Class DiscussInky
                 Dim root = doc.Root
 
                 Dim name = GetArchiveNameFromFilePath(filePath)
+                Dim folder As System.String = ""
                 Dim savedAtLocal = File.GetLastWriteTime(filePath)
 
                 If root IsNot Nothing Then
-                    Dim archiveNameElement = root.Element("ArchiveName")
-                    If archiveNameElement IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(archiveNameElement.Value) Then
-                        name = archiveNameElement.Value.Trim()
-                    End If
+                    name = ProjectTitle(root, name)
+                    folder = If(CStr(root.Element("ProjectFolder")), "")
 
                     Dim savedAtElement = root.Element("SavedAtUtc")
                     Dim parsedUtc As DateTime
@@ -8558,6 +8657,7 @@ Public Class DiscussInky
 
                 result.Add(New DialogueArchiveInfo With {
                     .Name = name,
+                    .Folder = folder,
                     .FilePath = filePath,
                     .SavedAtLocal = savedAtLocal
                 })
@@ -8576,67 +8676,84 @@ Public Class DiscussInky
     Private Function HasDialogueStateToArchive() As Boolean
         If _history.Count > 0 Then Return True
         If Not String.IsNullOrWhiteSpace(_knowledgeContent) Then Return True
+        If _attachedIndexes.Count > 0 Then Return True
         If Not String.IsNullOrWhiteSpace(_currentMissionName) Then Return True
         If Not String.Equals(_currentPersonaName, DefaultPersonaName, StringComparison.OrdinalIgnoreCase) Then Return True
         Return False
     End Function
 
     Private Function SaveCurrentDialogueArchive(archiveName As String,
-                                               Optional overwriteWithoutPrompt As Boolean = False) As Boolean
+                                               Optional overwriteWithoutPrompt As Boolean = False, Optional targetPath As System.String = Nothing) As Boolean
         If String.IsNullOrWhiteSpace(archiveName) Then Return False
 
         Dim trimmedArchiveName = archiveName.Trim()
-        Dim filePath = GetDialogueArchiveFilePath(trimmedArchiveName)
-        Dim fileAlreadyExists = File.Exists(filePath)
-
-        If fileAlreadyExists AndAlso Not overwriteWithoutPrompt Then
-            Dim overwriteAnswer = ShowCustomYesNoBox(
-                $"An archived dialogue named '{trimmedArchiveName}' already exists. Do you want to overwrite it?",
-                "Yes, overwrite",
-                "No, keep existing",
-                $"{AN} - Overwrite Dialogue Archive")
-
-            If overwriteAnswer <> 1 Then
-                Return False
-            End If
-        End If
-
         Dim previousArchiveName = _activeDialogueArchiveName
         Dim previousArchiveFilePath = _activeDialogueArchiveFilePath
         Dim previousBaselineHash = _activeDialogueArchiveBaselineHash
-
+        Dim previousTitle = _activeProjectTitle
         Try
-            Dim archiveDir = GetDialogueArchiveDirectoryPath()
-            If Not Directory.Exists(archiveDir) Then
-                Directory.CreateDirectory(archiveDir)
-            End If
+            Using archiveLock = LockDialogueArchives()
+                Dim filePath = targetPath
+                If filePath Is Nothing AndAlso overwriteWithoutPrompt Then filePath = _activeDialogueArchiveFilePath
+                If filePath Is Nothing Then
+                    Dim matching = GetDialogueArchives().Where(Function(item) System.String.Equals(item.Name, trimmedArchiveName, System.StringComparison.OrdinalIgnoreCase)).ToList()
+                    If matching.Count > 1 Then Throw New System.IO.IOException("Several archives have that name. Select the intended project.")
+                    filePath = If(matching.Count = 1, matching(0).FilePath, GetDialogueArchiveFilePath(trimmedArchiveName))
+                    If matching.Count = 0 AndAlso System.IO.File.Exists(filePath) Then
+                        filePath = GetDialogueArchiveFilePath(System.Guid.NewGuid().ToString("N"))
+                    End If
+                End If
+                Dim fileAlreadyExists = System.IO.File.Exists(filePath)
+                If overwriteWithoutPrompt AndAlso Not fileAlreadyExists Then Throw New System.IO.FileNotFoundException("The linked archive no longer exists.")
+                If fileAlreadyExists AndAlso Not overwriteWithoutPrompt Then
+                    If ShowCustomYesNoBox($"Overwrite archived dialogue '{trimmedArchiveName}'?", "Yes, overwrite", "No, keep existing", $"{AN} - Overwrite Dialogue Archive") <> 1 Then Return False
+                End If
+                Dim key = GetArchiveNameFromFilePath(filePath)
+                Dim oldRoot As System.Xml.Linq.XElement = Nothing
+                If fileAlreadyExists Then
+                    oldRoot = System.Xml.Linq.XDocument.Load(filePath).Root
+                    If oldRoot Is Nothing OrElse oldRoot.Name <> "DiscussInkyState" Then Throw New System.IO.InvalidDataException("Invalid dialogue archive.")
+                End If
+                Dim title = If(oldRoot Is Nothing, trimmedArchiveName, ProjectTitle(oldRoot, key))
+                Dim archiveDir = GetDialogueArchiveDirectoryPath()
+                If Not Directory.Exists(archiveDir) Then
+                    Directory.CreateDirectory(archiveDir)
+                End If
 
-            SetCurrentActiveDialogueArchive(trimmedArchiveName, filePath, "")
-            Dim xmlToSave = BuildSessionStateXml(trimmedArchiveName)
-            File.WriteAllText(filePath, xmlToSave, Encoding.UTF8)
+                SetCurrentActiveDialogueArchive(key, filePath, "")
+                _activeProjectTitle = title
+                Dim document = System.Xml.Linq.XDocument.Parse(BuildSessionStateXml(key), System.Xml.Linq.LoadOptions.PreserveWhitespace)
+                document.Root.SetElementValue("ProjectName", title)
+                If oldRoot IsNot Nothing Then document.Root.SetElementValue("ProjectFolder", CStr(oldRoot.Element("ProjectFolder")))
+                WriteArchiveAtomically(filePath, document)
+                If oldRoot IsNot Nothing Then PruneReplacedArchiveIndexes(key, oldRoot, document.Root)
 
-            PersistCurrentSessionSettings()
-            UpdateWindowTitle()
+                PersistCurrentSessionSettings()
+                UpdateWindowTitle()
 
-            If fileAlreadyExists Then
-                AppendSystemMessage($"Dialogue archive updated: '{trimmedArchiveName}'.")
-            Else
-                AppendSystemMessage($"Dialogue archived as '{trimmedArchiveName}'.")
-            End If
+                If fileAlreadyExists Then
+                    AppendSystemMessage($"Dialogue archive updated: '{title}'.")
+                Else
+                    AppendSystemMessage($"Dialogue archived as '{title}'.")
+                End If
 
-            ' Capture the baseline from the LIVE session state (the same representation the dirty
-            ' check uses) AFTER all side effects, so a freshly stored dialogue is never considered
-            ' dirty. The archive-format XML written to disk uses a different index representation
-            ' (relative sidecar paths), so it must not be used as the comparison baseline.
-            SetCurrentActiveDialogueArchive(
-                trimmedArchiveName,
-                filePath,
-                GetCurrentSessionComparisonHash())
+                ' Capture the baseline from the LIVE session state (the same representation the dirty
+                ' check uses) AFTER all side effects, so a freshly stored dialogue is never considered
+                ' dirty. The archive-format XML written to disk uses a different index representation
+                ' (relative sidecar paths), so it must not be used as the comparison baseline.
+                SetCurrentActiveDialogueArchive(
+                    key,
+                    filePath,
+                    GetCurrentSessionComparisonHash())
+                _activeProjectTitle = title
+                PersistArchiveLinkSettings()
+            End Using
 
             Return True
 
         Catch ex As Exception
             SetCurrentActiveDialogueArchive(previousArchiveName, previousArchiveFilePath, previousBaselineHash)
+            _activeProjectTitle = previousTitle
             AppendSystemMessage($"Failed to archive dialogue: {ex.Message}")
             Return False
         End Try
@@ -8648,7 +8765,7 @@ Public Class DiscussInky
             Return False
         End If
 
-        Dim defaultArchiveName = If(_activeDialogueArchiveName, "")
+        Dim defaultArchiveName = _activeProjectTitle
 
         Dim archiveName = ShowCustomInputBox(
             "Enter a name for the archived dialogue:",
@@ -8666,7 +8783,7 @@ Public Class DiscussInky
     Private Function PromptToPersistDirtyArchiveBackedDialogue() As Boolean
         If HasTrackedDialogueArchive() Then
             Dim answer = ShowCustomYesNoBox(
-                $"The current dialogue is linked to archive '{_activeDialogueArchiveName}' and has changed. Do you want to update that archive or store the dialogue as a new archive?",
+                $"The current dialogue is linked to archive '{_activeProjectTitle}' and has changed. Do you want to update that archive or store the dialogue as a new archive?",
                 "Update existing archive",
                 "Store as new archive",
                 $"{AN} - Save Dialogue Changes",
@@ -8727,7 +8844,7 @@ Public Class DiscussInky
             End If
 
             Dim stateXml = File.ReadAllText(filePath, Encoding.UTF8)
-            Dim restored = RestoreSessionStateFromXml(stateXml, displayName, announceRestore:=True)
+            Dim restored = RestoreSessionStateFromXml(stateXml, displayName, filePath, announceRestore:=True)
 
             If restored Then
                 PersistCurrentSessionSettings()
@@ -8738,9 +8855,12 @@ Public Class DiscussInky
                 ' on-disk archive XML here would mismatch (different index path representation) and
                 ' make the restored dialogue look changed immediately.
                 SetCurrentActiveDialogueArchive(
-                    displayName,
+                    GetArchiveNameFromFilePath(filePath),
                     filePath,
                     GetCurrentSessionComparisonHash())
+                _activeProjectTitle = displayName
+                UpdateWindowTitle()
+                PersistArchiveLinkSettings()
             End If
 
             Return restored
@@ -8807,6 +8927,14 @@ Public Class DiscussInky
                 .Margin = New Padding(0)
             }
 
+            Dim sortByName As New System.Windows.Forms.CheckBox() With {.Text = "Sort by name (A–Z)", .AutoSize = True, .Checked = _sortArchiveByName}
+            Dim btnRename As New System.Windows.Forms.Button() With {.Text = "Rename Selected", .AutoSize = True}
+            Dim btnFolder As New System.Windows.Forms.Button() With {.Text = "Set Project Folder", .AutoSize = True}
+            Dim folderFilter As New System.Windows.Forms.ComboBox() With {
+                .DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList, .Width = 240,
+                .AccessibleName = "Filter projects by folder"
+            }
+            Dim refreshing As System.Boolean = False
             Dim btnSave As New Button() With {.Text = "Store Current", .AutoSize = True}
             Dim btnUpdate As New Button() With {.Text = "Update Current Archive", .AutoSize = True}
             Dim btnRestore As New Button() With {.Text = "Restore Selected", .AutoSize = True}
@@ -8817,6 +8945,10 @@ Public Class DiscussInky
             buttonBar.Controls.Add(btnUpdate)
             buttonBar.Controls.Add(btnRestore)
             buttonBar.Controls.Add(btnDelete)
+            buttonBar.Controls.Add(btnRename)
+            buttonBar.Controls.Add(btnFolder)
+            buttonBar.Controls.Add(sortByName)
+            buttonBar.Controls.Add(folderFilter)
             buttonBar.Controls.Add(btnClose)
 
             layout.Controls.Add(lblInfo, 0, 0)
@@ -8841,6 +8973,27 @@ Public Class DiscussInky
                     End If
 
                     Dim archives = GetDialogueArchives()
+                    Dim previousFolder As System.String = If(folderFilter.SelectedIndex > 0, CStr(folderFilter.SelectedItem), Nothing)
+                    refreshing = True
+                    Try
+                        folderFilter.Items.Clear()
+                        folderFilter.Items.Add("All project folders")
+                        For Each folderName In archives.Select(Function(item) item.Folder).Where(Function(name) name <> "").
+                                Distinct(System.StringComparer.CurrentCultureIgnoreCase).OrderBy(Function(name) name, System.StringComparer.CurrentCultureIgnoreCase)
+                            folderFilter.Items.Add(folderName)
+                        Next
+                        Dim longest As System.Int32 = folderFilter.Items.Cast(Of System.String)().Max(
+                            Function(text) System.Windows.Forms.TextRenderer.MeasureText(text, folderFilter.Font).Width)
+                        Dim desiredWidth As System.Int32 = longest + System.Windows.Forms.SystemInformation.VerticalScrollBarWidth + 12
+                        folderFilter.DropDownWidth = System.Math.Min(System.Windows.Forms.Screen.FromControl(frm).WorkingArea.Width,
+                            System.Math.Max(folderFilter.Width, desiredWidth))
+                        folderFilter.Width = System.Math.Max(240, System.Math.Min(folderFilter.DropDownWidth, 420))
+                        folderFilter.SelectedIndex = If(previousFolder Is Nothing, 0, System.Math.Max(0, folderFilter.Items.IndexOf(previousFolder)))
+                    Finally
+                        refreshing = False
+                    End Try
+                    If folderFilter.SelectedIndex > 0 Then archives = archives.Where(Function(item) System.String.Equals(item.Folder, CStr(folderFilter.SelectedItem), System.StringComparison.CurrentCultureIgnoreCase)).ToList()
+                    If _sortArchiveByName Then archives = archives.OrderBy(Function(item) item.Name, System.StringComparer.CurrentCultureIgnoreCase).ThenBy(Function(item) item.FilePath, System.StringComparer.OrdinalIgnoreCase).ToList()
 
                     lstArchives.BeginUpdate()
                     lstArchives.Items.Clear()
@@ -8870,7 +9023,10 @@ Public Class DiscussInky
                     Dim hasSelection = (TryCast(lstArchives.SelectedItem, DialogueArchiveInfo) IsNot Nothing)
                     btnRestore.Enabled = hasSelection
                     btnDelete.Enabled = hasSelection
-                    btnUpdate.Enabled = Not String.IsNullOrWhiteSpace(_activeDialogueArchiveName)
+                    btnRename.Enabled = hasSelection
+                    btnFolder.Enabled = hasSelection
+                    btnUpdate.Text = If(HasTrackedDialogueArchive(), "Update Current Archive", "Update Selected Archive…")
+                    btnUpdate.Enabled = If(HasTrackedDialogueArchive(), System.IO.File.Exists(_activeDialogueArchiveFilePath), hasSelection AndAlso HasDialogueStateToArchive())
 
                     updateInfoLabel.Invoke()
                 End Sub
@@ -8885,7 +9041,58 @@ Public Class DiscussInky
                     Dim hasSelection = (TryCast(lstArchives.SelectedItem, DialogueArchiveInfo) IsNot Nothing)
                     btnRestore.Enabled = hasSelection
                     btnDelete.Enabled = hasSelection
+                    btnRename.Enabled = hasSelection
+                    btnFolder.Enabled = hasSelection
                 End Sub
+
+            AddHandler folderFilter.SelectedIndexChanged,
+                Sub()
+                    If Not refreshing Then refreshArchives.Invoke()
+                End Sub
+
+            AddHandler sortByName.CheckedChanged,
+                Sub()
+                    _sortArchiveByName = sortByName.Checked
+                    refreshArchives.Invoke()
+                End Sub
+
+            Dim editProject As System.Action(Of System.Boolean) =
+                Sub(editFolder As System.Boolean)
+                    Dim selected = TryCast(lstArchives.SelectedItem, DialogueArchiveInfo)
+                    If selected Is Nothing Then Return
+                    Dim prompt = If(editFolder, "Enter a project folder, or leave it empty to remove the folder:", "Enter the new project name:")
+                    Dim value = If(editFolder,
+                        SharedMethods.ShowOptionalSingleLineInput(prompt, $"{AN} - Dialogue Archive", selected.Folder),
+                        ShowCustomInputBox(prompt, $"{AN} - Dialogue Archive", True, selected.Name))
+                    If value Is Nothing OrElse value = "ESC" Then Return
+                    value = value.Trim()
+                    If Not editFolder AndAlso value.Length = 0 Then Return
+                    If value.Any(Function(ch) System.Char.IsControl(ch)) Then
+                        ShowCustomMessageBox("Use a single line for the name.")
+                        Return
+                    End If
+                    Try
+                        Using archiveLock = LockDialogueArchives()
+                            If Not editFolder AndAlso GetDialogueArchives().Any(Function(item) Not System.String.Equals(item.FilePath, selected.FilePath, System.StringComparison.OrdinalIgnoreCase) AndAlso
+                                System.String.Equals(item.Name, value, System.StringComparison.OrdinalIgnoreCase)) Then
+                                Throw New System.IO.IOException("An archive with that name already exists.")
+                            End If
+                            Dim document = System.Xml.Linq.XDocument.Load(selected.FilePath, System.Xml.Linq.LoadOptions.PreserveWhitespace)
+                            If document.Root Is Nothing OrElse document.Root.Name <> "DiscussInkyState" Then Throw New System.IO.InvalidDataException("Invalid dialogue archive.")
+                            document.Root.SetElementValue(If(editFolder, "ProjectFolder", "ProjectName"), value)
+                            WriteArchiveAtomically(selected.FilePath, document)
+                        End Using
+                        If Not editFolder AndAlso System.String.Equals(selected.FilePath, _activeDialogueArchiveFilePath, System.StringComparison.OrdinalIgnoreCase) Then
+                            _activeProjectTitle = value
+                            UpdateWindowTitle()
+                        End If
+                        refreshArchives.Invoke()
+                    Catch ex As System.Exception
+                        ShowCustomMessageBox(ex.Message)
+                    End Try
+                End Sub
+            AddHandler btnRename.Click, Sub() editProject(False)
+            AddHandler btnFolder.Click, Sub() editProject(True)
 
             AddHandler btnClose.Click,
                 Sub()
@@ -8901,12 +9108,16 @@ Public Class DiscussInky
 
             AddHandler btnUpdate.Click,
                 Sub()
-                    If String.IsNullOrWhiteSpace(_activeDialogueArchiveName) Then
-                        AppendSystemMessage("There is no linked archive to update.")
-                        Return
+                    Dim target = _activeDialogueArchiveFilePath
+                    Dim title = _activeProjectTitle
+                    If Not HasTrackedDialogueArchive() Then
+                        Dim selected = TryCast(lstArchives.SelectedItem, DialogueArchiveInfo)
+                        If selected Is Nothing OrElse Not HasDialogueStateToArchive() Then Return
+                        If ShowCustomYesNoBox($"Replace '{selected.Name}' with the current dialogue and link it to this project?", "Update selected archive", "Cancel", $"{AN} - Update Archive") <> 1 Then Return
+                        target = selected.FilePath
+                        title = selected.Name
                     End If
-
-                    If SaveCurrentDialogueArchive(_activeDialogueArchiveName, overwriteWithoutPrompt:=True) Then
+                    If SaveCurrentDialogueArchive(title, overwriteWithoutPrompt:=True, targetPath:=target) Then
                         refreshArchives.Invoke()
                     End If
                 End Sub
@@ -8927,8 +9138,10 @@ Public Class DiscussInky
                     End If
 
                     Try
-                        File.Delete(selected.FilePath)
-                        DeleteIndexDirectorySafe(GetArchiveIndexDirectoryPath(selected.Name))
+                        Using archiveLock = LockDialogueArchives()
+                            File.Delete(selected.FilePath)
+                            DeleteIndexDirectorySafe(GetArchiveIndexDirectoryPath(GetArchiveNameFromFilePath(selected.FilePath)))
+                        End Using
 
                         If String.Equals(selected.FilePath, _activeDialogueArchiveFilePath, StringComparison.OrdinalIgnoreCase) Then
                             ClearCurrentActiveDialogueArchive()
@@ -8966,7 +9179,9 @@ Public Class DiscussInky
                 End Sub
 
             refreshArchives.Invoke()
-            frm.ShowDialog(Me)
+            Using dialogOwner = SharedMethods.PushDialogOwner(frm)
+                frm.ShowDialog(Me)
+            End Using
         End Using
     End Sub
 

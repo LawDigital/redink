@@ -82,9 +82,15 @@ Namespace Agents
             If Not IsAvailable(ignoredErrorCode) Then
                 Throw New RedInkPythonAgentConfigurationException("The python_execute tool is unavailable: " & ignoredErrorCode)
             End If
+            Dim options = GetConfiguredOptionsOrNothing()
+            Dim executable = Agents.PythonExecuteToolCore.ResolveAndValidateAvailability(options)
+            Dim instructions As System.String = Agents.PythonExecuteToolCore.ToolInstructionsPrompt
+            If Agents.PythonExecuteToolCore.QueryVersionStatus(executable).HasToolkit Then
+                instructions &= " The installed worker includes from redink_pythonagent import toolkit as tk. Use tk.inputs(), tk.read_text(), tk.read_table(), tk.write_table(), tk.write_docx(), tk.save_chart() and tk.progress() as appropriate. Pass inputs explicitly on every call."
+            End If
             Dim tool As New ModelConfig() With {
                 .ToolName = ToolName,
-                .ToolInstructionsPrompt = Agents.PythonExecuteToolCore.ToolInstructionsPrompt,
+                .ToolInstructionsPrompt = instructions,
                 .ToolDefinition = Agents.PythonExecuteToolCore.ToolDefinitionJson,
                 .ModelDescription = "Secure Python Execution" & displaySuffix,
                 .Tool = True,
