@@ -80,6 +80,7 @@ Partial Public Class ThisAddIn
     Private Class LocalChatContinuationInputManifest
         Public Property UpdatedUtc As System.DateTime = System.DateTime.UtcNow
         Public Property RequestFileCachedName As System.String = System.String.Empty
+        Public Property RequestFileOriginalName As System.String = System.String.Empty
         Public Property Files As System.Collections.Generic.List(Of LocalChatContinuationInputFile) = New System.Collections.Generic.List(Of LocalChatContinuationInputFile)()
     End Class
 
@@ -174,20 +175,12 @@ Partial Public Class ThisAddIn
             End If
         End If
 
-        Dim destPath = Path.Combine(_chatAgentTempDir, fileName)
+        fileName = UniqueSessionFileName(fileName)
+        Dim destPath As System.String = Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(_chatAgentTempDir, fileName)
+        System.IO.File.Copy(sourcePath, destPath, overwrite:=False)
+        LogCompactSessionCopy(fileName, destPath)
 
-        ' Prevent collision
-        Dim counter = 1
-        While File.Exists(destPath)
-            Dim baseName = Path.GetFileNameWithoutExtension(fileName)
-            Dim ext = Path.GetExtension(fileName)
-            destPath = Path.Combine(_chatAgentTempDir, baseName & $"_{counter}{ext}")
-            counter += 1
-        End While
-
-        File.Copy(sourcePath, destPath, overwrite:=True)
-
-        ChatAgentWorkspaceSaveDroppedFile(destPath)
+        ChatAgentWorkspaceSaveDroppedFile(destPath, fileName)
 
         ' Delete the source upload file — the copy in the agent temp dir is the working copy
         Try
@@ -197,7 +190,7 @@ Partial Public Class ThisAddIn
 
         Dim fi = New FileInfo(destPath)
         Dim att As New AutoPilotAttachmentInfo() With {
-            .OriginalFileName = Path.GetFileName(destPath),
+            .OriginalFileName = fileName,
             .TempFilePath = destPath,
             .Extension = fi.Extension.ToLowerInvariant(),
             .SizeBytes = fi.Length,
@@ -309,7 +302,8 @@ Partial Public Class ThisAddIn
         Dim outputDir = System.IO.Path.Combine(desktopPath, "Inky")
         Directory.CreateDirectory(outputDir)
 
-        Dim destName = System.IO.Path.GetFileName(path)
+        ' The chip name is the logical filename; never export a compact private-copy alias.
+        Dim destName As System.String = System.IO.Path.GetFileName(fileName.Trim())
         Dim destPath = System.IO.Path.Combine(outputDir, destName)
 
         Dim counter = 1
@@ -320,7 +314,11 @@ Partial Public Class ThisAddIn
             counter += 1
         End While
 
-        File.Copy(path, destPath, overwrite:=False)
+        Try
+            System.IO.File.Copy(path, destPath, overwrite:=False)
+        Catch ex As System.IO.PathTooLongException
+            Throw New System.IO.PathTooLongException(Global.SharedLibrary.Agents.FilePathBudget.PathTooLongMessage, ex)
+        End Try
         Return destPath
     End Function
 
@@ -348,22 +346,15 @@ Partial Public Class ThisAddIn
         End If
 
         Dim tempDir = EnsureChatAgentTempDir()
-        Dim destName = Path.GetFileName(att.SourcePath)
-        Dim destPath = Path.Combine(tempDir, destName)
-
-        Dim counter = 1
-        While File.Exists(destPath)
-            destPath = Path.Combine(
-                tempDir,
-                Path.GetFileNameWithoutExtension(destName) & $"_{counter}" & Path.GetExtension(destName))
-            counter += 1
-        End While
-
-        File.Copy(att.SourcePath, destPath, overwrite:=False)
+        Dim logicalName As System.String = If(System.String.IsNullOrWhiteSpace(att.OriginalFileName), System.IO.Path.GetFileName(att.SourcePath), att.OriginalFileName)
+        logicalName = UniqueSessionFileName(logicalName, att)
+        Dim destPath As System.String = Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(tempDir, logicalName)
+        System.IO.File.Copy(att.SourcePath, destPath, overwrite:=False)
+        LogCompactSessionCopy(logicalName, destPath)
 
         Dim fi As New FileInfo(destPath)
         att.TempFilePath = destPath
-        att.OriginalFileName = Path.GetFileName(destPath)
+        att.OriginalFileName = logicalName
         att.Extension = fi.Extension.ToLowerInvariant()
         att.SizeBytes = fi.Length
         att.CreatedTime = fi.CreationTimeUtc
@@ -559,10 +550,7 @@ Partial Public Class ThisAddIn
     ''' Returns the combined tool list (internal agent tools + selected external tools).
     ''' </summary>
     Private Function ChatAgentSetupToolContext(Optional selectedTools As List(Of ModelConfig) = Nothing) As List(Of ModelConfig)
-        If String.IsNullOrWhiteSpace(_chatAgentTempDir) OrElse Not Directory.Exists(_chatAgentTempDir) Then
-            _chatAgentTempDir = Path.Combine(Path.GetTempPath(), CA_TempPrefix & Guid.NewGuid().ToString("N"))
-            Directory.CreateDirectory(_chatAgentTempDir)
-        End If
+        EnsureChatAgentTempDir()
 
         Dim hydratedFiles As New List(Of AutoPilotAttachmentInfo)()
         For Each att In _chatAgentFiles.ToList()
@@ -598,20 +586,24 @@ Partial Public Class ThisAddIn
         SyncWorkspaceToPathPolicy(includeSessionTempFallback:=True)
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "AutoPilot (Local) invoked")
 
-        Dim tools As New List(Of ModelConfig)()
+        Return BuildChatAgentToolSelection(If(selectedTools, _selectedToolsForChat))
+    End Function
 
-        If selectedTools IsNot Nothing Then
-            tools.AddRange(selectedTools)
-        ElseIf _selectedToolsForChat IsNot Nothing Then
-            tools.AddRange(_selectedToolsForChat)
+    ' Share the exact Local Chat selection assembly with other host-managed runs.
+    Private Function BuildChatAgentToolSelection(
+        selectedTools As System.Collections.Generic.IEnumerable(Of Global.SharedLibrary.SharedLibrary.ModelConfig),
+        Optional includeWorkspaceTools As System.Boolean = True) As System.Collections.Generic.List(Of Global.SharedLibrary.SharedLibrary.ModelConfig)
+
+        Dim tools As New System.Collections.Generic.List(Of Global.SharedLibrary.SharedLibrary.ModelConfig)()
+        If selectedTools IsNot Nothing Then tools.AddRange(selectedTools)
+        If includeWorkspaceTools Then
+            tools.AddRange(GetChatAgentWorkspaceTools())
+            tools.AddRange(Global.SharedLibrary.Agents.WorkspaceTools.BuildAll())
         End If
 
-        tools.AddRange(GetChatAgentWorkspaceTools())
-        tools.AddRange(SharedLibrary.Agents.WorkspaceTools.BuildAll())
-
         Return tools.
-            Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
-            GroupBy(Function(t) t.ToolName, StringComparer.OrdinalIgnoreCase).
+            Where(Function(t) t IsNot Nothing AndAlso Not System.String.IsNullOrWhiteSpace(t.ToolName)).
+            GroupBy(Function(t) t.ToolName, System.StringComparer.OrdinalIgnoreCase).
             Select(Function(g) g.First()).
             ToList()
     End Function
@@ -982,10 +974,11 @@ Partial Public Class ThisAddIn
 
             Dim root As System.String = System.IO.Path.GetDirectoryName(directoryPath)
             If System.String.IsNullOrWhiteSpace(root) Then Return False
-            System.IO.Directory.CreateDirectory(root)
-
-            temporaryDirectoryPath = directoryPath & ".tmp_" & System.Guid.NewGuid().ToString("N")
-            backupDirectoryPath = directoryPath & ".bak_" & System.Guid.NewGuid().ToString("N")
+            ' Sibling transaction folders need one unique token, not the session token twice.
+            ' The final session directory remains unchanged so existing checkpoints still resolve.
+            temporaryDirectoryPath = System.IO.Path.Combine(root, ".tmp_" & System.Guid.NewGuid().ToString("N"))
+            backupDirectoryPath = System.IO.Path.Combine(root, ".bak_" & System.Guid.NewGuid().ToString("N"))
+            Global.SharedLibrary.Agents.FilePathBudget.RequireGeneratedPath(System.IO.Path.Combine(temporaryDirectoryPath, CA_ContinuationInputManifestName))
             System.IO.Directory.CreateDirectory(temporaryDirectoryPath)
 
             Dim manifest As New LocalChatContinuationInputManifest()
@@ -1001,8 +994,10 @@ Partial Public Class ThisAddIn
                     Dim sourceFull As System.String = System.IO.Path.GetFullPath(hydrated.TempFilePath)
                     If Not copiedSources.Add(sourceFull) Then Continue For
                     index += 1
-                    Dim cachedName As System.String = index.ToString("D4", System.Globalization.CultureInfo.InvariantCulture) & "_" & System.IO.Path.GetFileName(hydrated.TempFilePath)
-                    System.IO.File.Copy(hydrated.TempFilePath, System.IO.Path.Combine(temporaryDirectoryPath, cachedName), overwrite:=True)
+                    Dim cachedPath As System.String = Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(temporaryDirectoryPath,
+                        index.ToString("D4", System.Globalization.CultureInfo.InvariantCulture) & "_" & System.IO.Path.GetFileName(hydrated.TempFilePath))
+                    Dim cachedName As System.String = System.IO.Path.GetFileName(cachedPath)
+                    System.IO.File.Copy(hydrated.TempFilePath, cachedPath, overwrite:=False)
                     manifest.Files.Add(New LocalChatContinuationInputFile() With {
                         .OriginalFileName = If(hydrated.OriginalFileName, System.IO.Path.GetFileName(hydrated.TempFilePath)),
                         .CachedFileName = cachedName
@@ -1013,9 +1008,12 @@ Partial Public Class ThisAddIn
             If Not System.String.IsNullOrWhiteSpace(requestFilePath) AndAlso System.IO.File.Exists(requestFilePath) Then
                 Dim requestFull As System.String = System.IO.Path.GetFullPath(requestFilePath)
                 index += 1
-                Dim cachedName As System.String = index.ToString("D4", System.Globalization.CultureInfo.InvariantCulture) & "_request_" & System.IO.Path.GetFileName(requestFilePath)
-                System.IO.File.Copy(requestFilePath, System.IO.Path.Combine(temporaryDirectoryPath, cachedName), overwrite:=True)
+                Dim cachedPath As System.String = Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(temporaryDirectoryPath,
+                    index.ToString("D4", System.Globalization.CultureInfo.InvariantCulture) & "_request_" & System.IO.Path.GetFileName(requestFilePath))
+                Dim cachedName As System.String = System.IO.Path.GetFileName(cachedPath)
+                System.IO.File.Copy(requestFilePath, cachedPath, overwrite:=False)
                 manifest.RequestFileCachedName = cachedName
+                manifest.RequestFileOriginalName = System.IO.Path.GetFileName(requestFilePath)
 
                 If copiedSources.Add(requestFull) Then
                     manifest.Files.Add(New LocalChatContinuationInputFile() With {
@@ -1124,26 +1122,23 @@ Partial Public Class ThisAddIn
                                 Not System.String.IsNullOrWhiteSpace(a.TempFilePath) AndAlso System.IO.File.Exists(a.TempFilePath))
                 If existing IsNot Nothing Then Continue For
 
-                Dim fileName As System.String = If(System.String.IsNullOrWhiteSpace(item.OriginalFileName), System.IO.Path.GetFileName(cachedPath), item.OriginalFileName)
-                Dim destPath As System.String = System.IO.Path.Combine(tempDir, fileName)
-                Dim counter As System.Int32 = 1
-                While System.IO.File.Exists(destPath)
-                    destPath = System.IO.Path.Combine(
-                        tempDir,
-                        System.IO.Path.GetFileNameWithoutExtension(fileName) & "_" & counter.ToString(System.Globalization.CultureInfo.InvariantCulture) & System.IO.Path.GetExtension(fileName))
-                    counter += 1
-                End While
+                Dim fileName As System.String = UniqueSessionFileName(If(System.String.IsNullOrWhiteSpace(item.OriginalFileName), System.IO.Path.GetFileName(cachedPath), item.OriginalFileName))
+                Dim destPath As System.String = Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(tempDir, fileName)
                 System.IO.File.Copy(cachedPath, destPath, overwrite:=False)
                 createdPaths.Add(System.IO.Path.GetFullPath(destPath))
-                RegisterSessionFile(destPath, "Restored for Local Chat retry", isToolOutput:=False)
+                RegisterSessionFile(destPath, "Restored for Local Chat retry", isToolOutput:=False, logicalFileName:=fileName)
             Next
 
             If Not System.String.IsNullOrWhiteSpace(manifest.RequestFileCachedName) Then
                 Dim cachedRequest As System.String = System.IO.Path.Combine(directoryPath, manifest.RequestFileCachedName)
-                Dim requestName As System.String = System.IO.Path.GetFileName(cachedRequest)
-                Dim marker As System.String = "_request_"
-                Dim markerIndex As System.Int32 = requestName.IndexOf(marker, System.StringComparison.Ordinal)
-                If markerIndex >= 0 Then requestName = requestName.Substring(markerIndex + marker.Length)
+                Dim requestName As System.String = If(manifest.RequestFileOriginalName, System.String.Empty)
+                If System.String.IsNullOrWhiteSpace(requestName) Then
+                    ' Preserve the exact older cache contract when no explicit logical name exists.
+                    requestName = System.IO.Path.GetFileName(cachedRequest)
+                    Dim marker As System.String = "_request_"
+                    Dim markerIndex As System.Int32 = requestName.IndexOf(marker, System.StringComparison.Ordinal)
+                    If markerIndex >= 0 Then requestName = requestName.Substring(markerIndex + marker.Length)
+                End If
 
                 Dim matching As AutoPilotAttachmentInfo = _chatAgentFiles.FirstOrDefault(
                     Function(a) a IsNot Nothing AndAlso
@@ -1152,17 +1147,11 @@ Partial Public Class ThisAddIn
                 If matching IsNot Nothing Then
                     requestFilePath = matching.TempFilePath
                 Else
-                    Dim destRequest As System.String = System.IO.Path.Combine(tempDir, requestName)
-                    Dim counter As System.Int32 = 1
-                    While System.IO.File.Exists(destRequest)
-                        destRequest = System.IO.Path.Combine(
-                            tempDir,
-                            System.IO.Path.GetFileNameWithoutExtension(requestName) & "_request_" & counter.ToString(System.Globalization.CultureInfo.InvariantCulture) & System.IO.Path.GetExtension(requestName))
-                        counter += 1
-                    End While
+                    requestName = UniqueSessionFileName(requestName)
+                    Dim destRequest As System.String = Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(tempDir, requestName)
                     System.IO.File.Copy(cachedRequest, destRequest, overwrite:=False)
                     createdPaths.Add(System.IO.Path.GetFullPath(destRequest))
-                    RegisterSessionFile(destRequest, "Restored request file for Local Chat retry", isToolOutput:=False)
+                    RegisterSessionFile(destRequest, "Restored request file for Local Chat retry", isToolOutput:=False, logicalFileName:=requestName)
                     requestFilePath = destRequest
                 End If
             End If
@@ -1320,10 +1309,10 @@ Partial Public Class ThisAddIn
     End Sub
 
     ''' <summary>
-    ''' Returns True if the chat agent mode is blocked because AutoPilot is running.
+    ''' Returns True while AutoPilot or a batch job owns the agent context.
     ''' </summary>
     Private Function IsChatAgentBlocked() As Boolean
-        Return _apActive
+        Return _apActive OrElse System.Threading.Volatile.Read(_batchAgentRunning) <> 0
     End Function
 
 
@@ -1894,7 +1883,7 @@ Partial Public Class ThisAddIn
 
         Dim rel = If(relativePath, "").Trim()
         If rel = "" Then
-            If allowRoot Then Return Path.GetFullPath(_chatAgentWorkspace.RootPath)
+            If allowRoot Then Return Global.SharedLibrary.Agents.FilePathBudget.GetFullPath(_chatAgentWorkspace.RootPath)
             Return Nothing
         End If
 
@@ -1905,8 +1894,8 @@ Partial Public Class ThisAddIn
             Return Nothing
         End If
 
-        Dim root = Path.GetFullPath(_chatAgentWorkspace.RootPath)
-        Dim candidate = Path.GetFullPath(Path.Combine(root, rel))
+        Dim root = Global.SharedLibrary.Agents.FilePathBudget.GetFullPath(_chatAgentWorkspace.RootPath)
+        Dim candidate = Global.SharedLibrary.Agents.FilePathBudget.GetFullPath(Path.Combine(root, rel))
 
         If Not IsPathWithinOrEqual(candidate, root) Then Return Nothing
         If ContainsReparsePointBetween(root, candidate) Then Return Nothing
@@ -1976,6 +1965,8 @@ Partial Public Class ThisAddIn
             Return (attr And FileAttributes.Hidden) = FileAttributes.Hidden OrElse
                    (attr And FileAttributes.System) = FileAttributes.System OrElse
                    (attr And FileAttributes.ReparsePoint) = FileAttributes.ReparsePoint
+        Catch ex As System.IO.PathTooLongException
+            Throw
         Catch
             Return True
         End Try
@@ -2012,13 +2003,32 @@ Partial Public Class ThisAddIn
         Return _chatAgentTempDir
     End Function
 
+    Private Function UniqueSessionFileName(preferredName As System.String, Optional ignored As AutoPilotAttachmentInfo = Nothing) As System.String
+        Dim name As System.String = preferredName
+        Dim counter As System.Int32 = 1
+        While _chatAgentFiles.Any(Function(value) value IsNot Nothing AndAlso Not System.Object.ReferenceEquals(value, ignored) AndAlso
+            System.String.Equals(value.OriginalFileName, name, System.StringComparison.OrdinalIgnoreCase))
+            name = System.IO.Path.GetFileNameWithoutExtension(preferredName) & "_" & counter.ToString(System.Globalization.CultureInfo.InvariantCulture) & System.IO.Path.GetExtension(preferredName)
+            counter += 1
+        End While
+        Return name
+    End Function
+
+    Private Shared Sub LogCompactSessionCopy(logicalName As System.String, physicalPath As System.String)
+        If Not System.String.Equals(logicalName, System.IO.Path.GetFileName(physicalPath), System.StringComparison.Ordinal) Then
+            ToolingFileLogger.LogStep("The host uses a compact working-copy name while preserving the session filename: " & logicalName & " -> " & System.IO.Path.GetFileName(physicalPath))
+        End If
+    End Sub
+
     Private Function RegisterSessionFile(filePath As String,
                                          statusMessage As String,
                                          Optional sourcePath As String = Nothing,
-                                         Optional isToolOutput As Boolean = False) As AutoPilotAttachmentInfo
+                                         Optional isToolOutput As Boolean = False,
+                                         Optional logicalFileName As System.String = Nothing) As AutoPilotAttachmentInfo
         If String.IsNullOrWhiteSpace(filePath) OrElse Not File.Exists(filePath) Then Return Nothing
 
-        Dim fileName = Path.GetFileName(filePath)
+        Dim fileName As System.String = If(System.String.IsNullOrWhiteSpace(logicalFileName), System.IO.Path.GetFileName(filePath), logicalFileName)
+        LogCompactSessionCopy(fileName, filePath)
         Dim existing = _chatAgentFiles.FirstOrDefault(
             Function(a)
                 Return a IsNot Nothing AndAlso
@@ -2082,19 +2092,10 @@ Partial Public Class ThisAddIn
         End If
 
         Dim tempDir = EnsureChatAgentTempDir()
-        Dim destName = Path.GetFileName(sourcePath)
-        Dim destPath = Path.Combine(tempDir, destName)
-
-        Dim counter = 1
-        While File.Exists(destPath)
-            destPath = Path.Combine(
-                tempDir,
-                Path.GetFileNameWithoutExtension(destName) & $"_{counter}" & Path.GetExtension(destName))
-            counter += 1
-        End While
-
-        File.Copy(sourcePath, destPath, overwrite:=False)
-        Return RegisterSessionFile(destPath, "Loaded from agent workspace", sourcePath:=sourcePath)
+        Dim logicalName As System.String = UniqueSessionFileName(System.IO.Path.GetFileName(sourcePath))
+        Dim destPath As System.String = Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(tempDir, logicalName)
+        System.IO.File.Copy(sourcePath, destPath, overwrite:=False)
+        Return RegisterSessionFile(destPath, "Loaded from agent workspace", sourcePath:=sourcePath, logicalFileName:=logicalName)
     End Function
 
     Private Function CopySessionFileToWorkspace(sessionFileName As String, targetRelativePath As String, overwrite As Boolean) As String
@@ -2132,7 +2133,7 @@ Partial Public Class ThisAddIn
         Return $"Saved '{sessionFileName}' to workspace path '{ToWorkspaceRelativePath(targetPath)}'."
     End Function
 
-    Private Sub ChatAgentWorkspaceSaveDroppedFile(sourcePath As String)
+    Private Sub ChatAgentWorkspaceSaveDroppedFile(sourcePath As String, Optional originalFileName As System.String = Nothing)
         LoadChatAgentWorkspaceIfNeeded()
 
         If Not IsChatAgentWorkspaceConnected() Then Return
@@ -2141,7 +2142,7 @@ Partial Public Class ThisAddIn
         If String.IsNullOrWhiteSpace(sourcePath) OrElse Not File.Exists(sourcePath) Then Return
 
         Try
-            Dim destName = Path.GetFileName(sourcePath)
+            Dim destName As System.String = If(System.String.IsNullOrWhiteSpace(originalFileName), System.IO.Path.GetFileName(sourcePath), originalFileName)
             Dim destPath = Path.Combine(_chatAgentWorkspace.RootPath, destName)
             Dim counter = 1
 
@@ -2153,7 +2154,10 @@ Partial Public Class ThisAddIn
             End While
 
             File.Copy(sourcePath, destPath, overwrite:=False)
-        Catch
+        Catch ex As System.Exception
+            ToolingFileLogger.LogWarn("The host kept the session input but could not also save its dropped-file copy in the workspace.", ex:=ex)
+            RecordWorkspaceHistory("The host kept the session input '" & If(originalFileName, System.IO.Path.GetFileName(sourcePath)) & "' but did not save its workspace copy. " &
+                If(TypeOf ex Is System.IO.PathTooLongException, Global.SharedLibrary.Agents.FilePathBudget.PathTooLongMessage, "Use agent_workspace_save_session_file to save it to an accessible workspace path."))
         End Try
     End Sub
 
@@ -2464,6 +2468,10 @@ Partial Public Class ThisAddIn
                     response.ErrorMessage = response.Response
                 End If
             End If
+        Catch ex As System.IO.PathTooLongException
+            response.Success = False
+            response.ErrorCode = "path_too_long"
+            response.ErrorMessage = Global.SharedLibrary.Agents.FilePathBudget.PathTooLongMessage
         Catch ex As OperationCanceledException
             response.Success = False
             response.ErrorMessage = "Operation was cancelled"
@@ -2564,47 +2572,51 @@ Partial Public Class ThisAddIn
 
         Try
             cancellationToken.ThrowIfCancellationRequested()
-            Select Case ext
-                Case ".txt", ".ini", ".csv", ".tsv", ".log", ".json", ".xml", ".html", ".htm",
-                     ".md", ".yaml", ".yml", ".ics", ".vcf",
-                     ".vb", ".cs", ".js", ".ts", ".py", ".java", ".cpp", ".c", ".h", ".sql"
-                    Return SharedMethods.ReadTextFile(filePath, ReturnErrorInsteadOfEmpty:=False)
-                Case ".rtf"
-                    Return SharedMethods.ReadRtfAsText(filePath, ReturnErrorInsteadOfEmpty:=False)
+            Using readerInput As Global.SharedLibrary.Agents.FilePathBudget.ReaderInput = Global.SharedLibrary.Agents.FilePathBudget.PrepareReaderInput(filePath)
+                Select Case ext
+                    Case ".txt", ".ini", ".csv", ".tsv", ".log", ".json", ".xml", ".html", ".htm",
+                         ".md", ".yaml", ".yml", ".ics", ".vcf",
+                         ".vb", ".cs", ".js", ".ts", ".py", ".java", ".cpp", ".c", ".h", ".sql"
+                        Return SharedMethods.ReadTextFile(readerInput.Path, ReturnErrorInsteadOfEmpty:=False)
+                    Case ".rtf"
+                        Return SharedMethods.ReadRtfAsText(readerInput.Path, ReturnErrorInsteadOfEmpty:=False)
 
-                Case ".doc"
-                    If INI_AllowLegacyDocFiles Then
-                        Return Await SharedMethods.PostToHostUiAsync(Of String)(
-                            Function() SharedMethods.ReadWordDocument(filePath, ReturnErrorInsteadOfEmpty:=False)).ConfigureAwait(False)
-                    End If
-                    Return ""
-
-                Case ".docx", ".docm"
-                    Return SharedMethods.ReadDocxSandboxed(filePath)
-                Case ".xlsx", ".xlsm"
-                    Return SharedMethods.ReadXlsxSandboxed(filePath, silent:=True, askWorksheetSelection:=False)
-                Case ".pptx", ".pptm"
-                    Return SharedMethods.ReadPptxSandboxed(filePath)
-                Case ".eml"
-                    Return SharedMethods.ReadEmlSandboxed(filePath)
-                Case ".msg"
-                    Return ReadMsgAttachmentText(filePath)
-
-                Case ".pdf"
-                    Dim r = Await SharedMethods.ReadPdfAsTextEx(filePath, True, DoOCR:=True, AskUser:=False, context:=_context, CancellationToken:=cancellationToken).ConfigureAwait(False)
-                    Return If(r?.Content, "")
-
-                Case Else
-                    If SharedMethods.IsBinaryMediaExtension(ext) Then
-                        Dim taskFlag = SharedMethods.TaskFlagForExtension(ext)
-                        If SharedMethods.IsBinaryMediaSupported(_context, ext, taskFlag) Then
-                            Return Await SharedMethods.ReadBinaryFileViaLLM(filePath, _context, "", askUser:=False, taskFlag:=taskFlag).ConfigureAwait(False)
+                    Case ".doc"
+                        If INI_AllowLegacyDocFiles Then
+                            Return Await SharedMethods.PostToHostUiAsync(Of String)(
+                                Function() SharedMethods.ReadWordDocument(readerInput.Path, ReturnErrorInsteadOfEmpty:=False)).ConfigureAwait(False)
                         End If
-                    End If
-                    Return ""
-            End Select
+                        Return ""
+
+                    Case ".docx", ".docm"
+                        Return SharedMethods.ReadDocxSandboxed(readerInput.Path)
+                    Case ".xlsx", ".xlsm"
+                        Return SharedMethods.ReadXlsxSandboxed(readerInput.Path, silent:=True, askWorksheetSelection:=False)
+                    Case ".pptx", ".pptm"
+                        Return SharedMethods.ReadPptxSandboxed(readerInput.Path)
+                    Case ".eml"
+                        Return SharedMethods.ReadEmlSandboxed(readerInput.Path)
+                    Case ".msg"
+                        Return ReadMsgAttachmentText(readerInput.Path)
+
+                    Case ".pdf"
+                        Dim r = Await SharedMethods.ReadPdfAsTextEx(readerInput.Path, True, DoOCR:=True, AskUser:=False, context:=_context, CancellationToken:=cancellationToken).ConfigureAwait(False)
+                        Return If(r?.Content, "")
+
+                    Case Else
+                        If SharedMethods.IsBinaryMediaExtension(ext) Then
+                            Dim taskFlag = SharedMethods.TaskFlagForExtension(ext)
+                            If SharedMethods.IsBinaryMediaSupported(_context, ext, taskFlag) Then
+                                Return Await SharedMethods.ReadBinaryFileViaLLM(readerInput.Path, _context, "", askUser:=False, taskFlag:=taskFlag).ConfigureAwait(False)
+                            End If
+                        End If
+                        Return ""
+                End Select
+            End Using
         Catch ex As System.OperationCanceledException
             Throw
+        Catch ex As System.IO.PathTooLongException
+            Throw New System.IO.PathTooLongException(Global.SharedLibrary.Agents.FilePathBudget.PathTooLongMessage, ex)
         Catch ex As System.Exception
             Debug.WriteLine("ChatAgentExtractFileText failed for '" & filePath & "': " & ex.Message)
             Return ""
@@ -3028,6 +3040,8 @@ Partial Public Class ThisAddIn
             Else
                 sb.AppendLine("Top-level visible workspace items: (none)")
             End If
+        Catch ex As System.IO.PathTooLongException
+            sb.AppendLine("Top-level visible workspace items: unavailable. " & Global.SharedLibrary.Agents.FilePathBudget.PathTooLongMessage)
         Catch
             sb.AppendLine("Top-level visible workspace items: (could not enumerate)")
         End Try
@@ -3076,7 +3090,7 @@ Partial Public Class ThisAddIn
         Dim stagingRoot As System.String = SharedLibrary.Agents.PathPolicy.SessionStagingRoot
         If Not System.String.IsNullOrWhiteSpace(stagingRoot) Then
             sb.AppendLine("Session staging directory: " & Newtonsoft.Json.JsonConvert.SerializeObject(stagingRoot))
-            sb.AppendLine("For a staged file, use its full path under this directory. Workspace-relative paths continue to refer to the connected workspace; do not guess between files with the same name.")
+            sb.AppendLine("For a staged file, use the explicit physical path when one is listed below; the host may shorten a private working-copy name. Workspace-relative paths continue to refer to the connected workspace; do not guess between files with the same name.")
         End If
         sb.AppendLine("These files currently exist in the active agent session, persist across follow-up chat turns, and may be referenced by session tools or agent_workspace_save_session_file.")
         If Not IsChatAgentWorkspaceConnected() Then
@@ -3084,6 +3098,12 @@ Partial Public Class ThisAddIn
         End If
         For Each name In names
             sb.AppendLine("  - " & name)
+            Dim attachment As AutoPilotAttachmentInfo = _chatAgentFiles.FirstOrDefault(Function(value) value IsNot Nothing AndAlso
+                System.String.Equals(value.OriginalFileName, name, System.StringComparison.OrdinalIgnoreCase))
+            If attachment IsNot Nothing AndAlso Not System.String.IsNullOrWhiteSpace(attachment.TempFilePath) AndAlso
+               Not System.String.Equals(name, System.IO.Path.GetFileName(attachment.TempFilePath), System.StringComparison.Ordinal) Then
+                sb.AppendLine("    Physical working copy: " & Newtonsoft.Json.JsonConvert.SerializeObject(attachment.TempFilePath))
+            End If
         Next
         sb.AppendLine("[/SESSION FILES]")
         Return sb.ToString().TrimEnd()
@@ -3462,6 +3482,8 @@ Partial Public Class ThisAddIn
                 If ShouldSkipHiddenSystem(filePath) Then Continue For
                 results.Add(filePath)
             Next
+        Catch ex As System.IO.PathTooLongException
+            Throw
         Catch
         End Try
 
@@ -3563,6 +3585,8 @@ Partial Public Class ThisAddIn
                 If ShouldSkipHiddenSystem(filePath) Then Continue For
                 total += New FileInfo(filePath).Length
             Next
+        Catch ex As System.IO.PathTooLongException
+            Throw
         Catch
         End Try
 

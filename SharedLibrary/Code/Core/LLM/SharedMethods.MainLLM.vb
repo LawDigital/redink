@@ -3451,8 +3451,15 @@ PostProcess:
         ''' <param name="TLife">Lifetime in seconds used to compute expiry timestamps in <paramref name="context"/>.</param>
         ''' <param name="SecondAPI">If <c>True</c>, updates the secondary token fields in <paramref name="context"/>.</param>
         ''' <returns>Access token string; returns an empty string on errors.</returns>
-        Public Shared Async Function GetFreshAccessToken(context As ISharedContext, ByVal clientEmail As String, ByVal ClientScopes As String, ByVal PrivateKey As String, ByVal AuthServer As String, ByVal TLife As Long, ByVal SecondAPI As Boolean, Optional ByVal silent As Boolean = False, Optional ByVal forceRefresh As Boolean = False, Optional cancellationToken As System.Threading.CancellationToken = Nothing) As System.Threading.Tasks.Task(Of String)
+        Public Shared Async Function GetFreshAccessToken(context As ISharedContext, ByVal clientEmail As String, ByVal ClientScopes As String, ByVal PrivateKey As String, ByVal AuthServer As String, ByVal TLife As Long, ByVal SecondAPI As Boolean, Optional ByVal silent As Boolean = False, Optional ByVal forceRefresh As Boolean = False, Optional cancellationToken As System.Threading.CancellationToken = Nothing, Optional mcpEndpoint As System.String = "", Optional rejectedMcpToken As System.String = "") As System.Threading.Tasks.Task(Of String)
             cancellationToken.ThrowIfCancellationRequested()
+            If IsAutomaticMCPOAuth(AuthServer) Then
+                Dim resourceEndpoint As System.String = mcpEndpoint
+                If System.String.IsNullOrWhiteSpace(resourceEndpoint) Then resourceEndpoint = If(SecondAPI, context.INI_Endpoint_2, context.INI_Endpoint)
+                Dim authorization As MCPProtectedResourceOAuthResult = Await GetAutomaticMCPAuthorizationAsync(
+                    resourceEndpoint, ClientScopes, forceRefresh, rejectedMcpToken, silent, cancellationToken).ConfigureAwait(False)
+                Return authorization.AccessToken
+            End If
             Try
 
                 Dim accessToken As String = String.Empty

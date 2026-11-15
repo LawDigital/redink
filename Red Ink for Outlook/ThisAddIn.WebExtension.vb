@@ -15,7 +15,7 @@
 ' Key Responsibilities:
 '   - Serve UI (GET `InkyUiRoute`) and authenticated JSON API (POST `InkyApiRoute`) under `/inky`.
 '   - Route commands (`inky_*`) and fall back to legacy dispatcher commands.
-'   - Persist per-chat state (chat 1/2) via `InkyState`/`ChatTurn` in application settings.
+'   - Persist per-chat state (four fixed chats) via `InkyState`/`ChatTurn` in application settings.
 '   - Run LLM requests as background jobs (`LlmJob`) with cancellation + TTL cleanup.
 '   - Support optional file uploads (DataURL) and inline extraction for known types,
 '     with bounded transport, per-file, aggregate-size, and file-count limits.
@@ -98,7 +98,17 @@ Partial Public Class ThisAddIn
     Private Const AllToolUseDescription As String =
         "Turns selected advanced tools on or off. Configure which advanced tools are callable through the Agents button."
 
-    Private activeChatId As Integer = 1   ' 1 or 2 – in‑memory only (not persisted)
+    Private Const LocalChatCount As System.Int32 = 4
+    Private activeChatId As System.Int32 = 1
+
+    Private Shared Function IsLocalChatId(chatId As System.Int32) As System.Boolean
+        Return chatId >= 1 AndAlso chatId <= LocalChatCount
+    End Function
+
+    Private Shared Function LocalChatSetting(chatId As System.Int32) As System.String
+        If Not IsLocalChatId(chatId) Then Throw New System.ArgumentOutOfRangeException(NameOf(chatId))
+        Return If(chatId = 1, "ChatHistory_Inky", "ChatHistory_Inky" & chatId.ToString(System.Globalization.CultureInfo.InvariantCulture))
+    End Function
 
     Private ReadOnly OriginalSecondaryModelName As String = INI_Model_2
 
@@ -1624,7 +1634,7 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Function LoadInkyState(Optional chatId As Integer = -1) As InkyState
         If chatId = -1 Then chatId = activeChatId
-        Dim settingKey As String = If(chatId = 2, "ChatHistory_Inky2", "ChatHistory_Inky")
+        Dim settingKey As String = LocalChatSetting(chatId)
         Try
             Dim raw As String = ""
             Try : raw = DirectCast(My.Settings.[GetType]().GetProperty(settingKey).GetValue(My.Settings, Nothing), String) : Catch : raw = "" : End Try
@@ -1655,7 +1665,7 @@ Partial Public Class ThisAddIn
                                   Optional operationName As String = "") As Boolean
         If chatId = -1 Then chatId = activeChatId
 
-        Dim settingKey As String = If(chatId = 2, "ChatHistory_Inky2", "ChatHistory_Inky")
+        Dim settingKey As String = LocalChatSetting(chatId)
         Dim opName As String = If(String.IsNullOrWhiteSpace(operationName), "SaveInkyState", operationName)
 
         Try
@@ -1682,7 +1692,8 @@ Partial Public Class ThisAddIn
                                             assistantHtml As String) As Boolean
         If job Is Nothing Then Return False
 
-        Dim targetChatId As Integer = If(job.ChatId = 2, 2, 1)
+        If Not IsLocalChatId(job.ChatId) Then Return False
+        Dim targetChatId As System.Int32 = job.ChatId
 
         Try
             Dim stJob As InkyState = LoadInkyState(targetChatId)
@@ -1790,6 +1801,32 @@ Partial Public Class ThisAddIn
             Return selectedKey
         End If
         Return If(System.String.IsNullOrWhiteSpace(INI_Model_2), "Second API model", INI_Model_2)
+    End Function
+
+    ' Build the same base guidance for interactive and host-managed Local Chat runs.
+    Private Function BuildLocalChatSystemPrompt(advancedToolsEnabled As System.Boolean,
+                                               Optional includeCurrentTime As System.Boolean = True) As System.String
+        Dim systemPrompt As System.String = _context.SP_Chat.Replace("{Location}", Location)
+        If includeCurrentTime Then
+            Dim nowLocal As System.String = System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss zzz", System.Globalization.CultureInfo.InvariantCulture)
+            systemPrompt &= System.Environment.NewLine & "Current local date/time: " & nowLocal
+        End If
+        systemPrompt &= System.Environment.NewLine & $"Your name is '{AN6}'. "
+
+        If advancedToolsEnabled Then
+            systemPrompt &= System.Environment.NewLine &
+                "Local Chat Agent behavior: Tools are optional. If the user's latest request can be answered directly, especially for creative writing, drafting, rewriting, brainstorming, summarizing, explanation, or ordinary chat, answer directly without using tools. Do not claim that you are unable to perform a normal language-generation task merely because no tool, attachment, or workspace action is required. Use tools only when they are actually needed for files, workspace operations, document processing, or external/source-backed work."
+        End If
+
+        ' Inject InkyMemory into the system prompt if the user enabled it.
+        If My.Settings.Inky_InkyMemory Then
+            Dim memoryContent As System.String = ReadInkyMemory(_context.INI_InkyMemoryCap)
+            systemPrompt &= System.Environment.NewLine & _context.SP_Add_InkyMemory
+            If Not System.String.IsNullOrWhiteSpace(memoryContent) Then
+                systemPrompt &= System.Environment.NewLine & "<INKY_MEMORY_CURRENT>" & System.Environment.NewLine & memoryContent & System.Environment.NewLine & "</INKY_MEMORY_CURRENT>"
+            End If
+        End If
+        Return systemPrompt
     End Function
 
     ''' <summary>
@@ -2136,8 +2173,10 @@ Partial Public Class ThisAddIn
         html.AppendLine("    <button id=""copyBtn"" title=""Copy last answer to clipboard"">Copy last</button>")
         html.AppendLine("    <button id=""toWordBtn"" title=""Move this chat thread into a new Word document"">To Word</button>")
         html.AppendLine("    <button id=""clearBtn"" title=""Clear current conversation"">Clear</button>")
-        html.AppendLine("    <button id=""chat1Btn"" class=""chatTab"" data-chat=""1"" title=""Chat 1"">1</button>")
-        html.AppendLine("    <button id=""chat2Btn"" class=""chatTab"" data-chat=""2"" title=""Chat 2"">2</button>")
+        For chatNumber As System.Int32 = 1 To LocalChatCount
+            Dim slot As System.String = chatNumber.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            html.AppendLine($"    <button id=""chat{slot}Btn"" class=""chatTab"" data-chat=""{slot}"" title=""Chat {slot}"">{slot}</button>")
+        Next
         html.AppendLine("    <button id=""toolsBtn"" title=""Select " & System.Net.WebUtility.HtmlEncode(ToolFriendlyName) & """ style=""display:none;"">" & System.Net.WebUtility.HtmlEncode(ToolFriendlyName) & "</button>")
 
         html.AppendLine("    <div id=""toolingSlot"" class=""toolingSlot"">")
@@ -2258,8 +2297,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("const themeBtn=document.getElementById('themeBtn');")
         html.AppendLine("const playBtn=document.getElementById('playBtn');")
         html.AppendLine("const cancelBtn=document.getElementById('cancelBtn');")
-        html.AppendLine("const chat1Btn=document.getElementById('chat1Btn');")
-        html.AppendLine("const chat2Btn=document.getElementById('chat2Btn');")
+        html.AppendLine("const chatButtons=document.querySelectorAll('.chatTab');")
         html.AppendLine("const sendBtn=document.getElementById('sendBtn');")
         html.AppendLine("const pureBtn=document.getElementById('pureBtn');")
         html.AppendLine("const topbar=document.querySelector('.topbar');")
@@ -2297,7 +2335,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("function setTheme(isDark){dark=!!isDark;document.documentElement.classList.toggle('light',!dark);var icon=document.getElementById('themeIcon');if(icon){if(dark){icon.innerHTML='<path d=""M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z""/>';}else{icon.innerHTML='<circle cx=""12"" cy=""12"" r=""5""/><line x1=""12"" y1=""1"" x2=""12"" y2=""3""/><line x1=""12"" y1=""21"" x2=""12"" y2=""23""/><line x1=""4.22"" y1=""4.22"" x2=""5.64"" y2=""5.64""/><line x1=""18.36"" y1=""18.36"" x2=""19.78"" y2=""19.78""/><line x1=""1"" y1=""12"" x2=""3"" y2=""12""/><line x1=""21"" y1=""12"" x2=""23"" y2=""12""/><line x1=""4.22"" y1=""19.78"" x2=""5.64"" y2=""18.36""/><line x1=""18.36"" y1=""5.64"" x2=""19.78"" y2=""4.22""/>';}}} ")
         html.AppendLine("function forceExternalLinks(scope){try{(scope||document).querySelectorAll('a[href]').forEach(a=>{a.target='_blank';a.rel='noopener noreferrer';});}catch{}}")
         html.AppendLine("function setActiveChatBtn(id){document.querySelectorAll('.chatTab').forEach(b=>b.classList.toggle('active',b.dataset.chat==String(id)));}")
-        html.AppendLine("function disableChatSwitch(dis){chat1Btn.disabled=dis;chat2Btn.disabled=dis;}")
+        html.AppendLine("function disableChatSwitch(dis){chatButtons.forEach(b=>b.disabled=dis);}")
 
         ' Tooltip updates & responsive adjustment
         html.AppendLine("function updateModelTooltip(){try{if(!modelSel) return;const opt=modelSel.options[modelSel.selectedIndex];if(opt){modelSel.title=opt.textContent||'Model';}}catch{}}")
@@ -2352,8 +2390,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("cancelBtn.addEventListener('click',async()=>{if(!__currentJobId||__jobCanceled)return;__jobCanceled=true;cancelBtn.disabled=true;setTypingStatus('Cancelling…');await api('inky_cancel',{Job:__currentJobId});});")
         html.AppendLine("chatEl.addEventListener('click',async e=>{const a=e.target&&e.target.closest&&e.target.closest('a[href]');if(!a)return;const href=String(a.getAttribute('href')||'').trim();if(!href)return;if(/^file:\/\//i.test(href)||/^[A-Za-z]:[\\/]/.test(href)){e.preventDefault();e.stopPropagation();if(e.stopImmediatePropagation)e.stopImmediatePropagation();const r=await api('inky_openpath',{Path:href});if(!r||!r.ok)alert((r&&r.error)||'Could not open file link');return;}if(a.target!=='_blank'){a.target='_blank';a.rel='noopener noreferrer';}},true);")
         html.AppendLine("async function switchChat(n){if(__currentJobId)return;const r=await api('inky_switch',{Chat:String(n)});if(!r.ok){alert(r.error||'Switch failed');return;}setActiveChatBtn(r.activeChat||n);render(r.history||[]);if(r.greeting){msgEl.placeholder=r.greeting;}if(r.models&&r.models.length){modelSel.innerHTML='';for(const m of r.models){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}}if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}syncAdvancedToolsUi({advancedToolsEnabled:r.advancedToolsEnabled===true,agentWorkspace:r.agentWorkspace,agentFiles:r.agentFiles||[],agentModelAvailable:r.agentModelAvailable===true,agentModelActive:r.agentModelActive===true});syncRuntimeStatus(r);updateModelTooltip();adjustModelSel();}")
-        html.AppendLine("chat1Btn.addEventListener('click',()=>switchChat(1));")
-        html.AppendLine("chat2Btn.addEventListener('click',()=>switchChat(2));")
+        html.AppendLine("chatButtons.forEach(b=>b.addEventListener('click',()=>switchChat(Number(b.dataset.chat))));")
 
         ' Tooling UI visibility + coupling logic
         html.AppendLine("function updateToolingVisibility(){const show=__modelSupportsTooling===true;toolsBtn.style.display=show?'inline-block':'none';toolingSlot.style.display=show?'flex':'none';toolLogBtn.style.display=show?'flex':'none';if(!show){__toolingEnabled=false;toolingChk.checked=false;__advancedToolsEnabled=false;advancedToolsChk.checked=false;__agentModelActive=false;updateAgentWorkspaceDisplay(null);updateAgentFilesDisplay([]);}updateAgentModelBtn();applyCoupling();}")
@@ -2565,6 +2602,18 @@ Partial Public Class ThisAddIn
                     Newtonsoft.Json.Linq.JObject.Parse(body),
                     New Newtonsoft.Json.Linq.JObject())
                 Dim cmd As System.String = j("Command")?.ToString()
+
+                ' Local Chat command preparation can mutate the same model, workspace
+                ' and file fields as a batch before it enters AgentGate. Protect that
+                ' boundary too; status and cancellation of an existing browser job stay
+                ' available. Once the batch owns the context, cancel it in its dialog.
+                Dim batchState As System.Int32 = System.Threading.Volatile.Read(_batchAgentRunning)
+                If batchState <> 0 AndAlso If(cmd, "").StartsWith("inky", System.StringComparison.OrdinalIgnoreCase) AndAlso
+                   Not System.String.Equals(cmd, "inky_jobstatus", System.StringComparison.OrdinalIgnoreCase) AndAlso
+                   Not System.String.Equals(cmd, "inky_canceljob", System.StringComparison.OrdinalIgnoreCase) AndAlso
+                   Not (batchState = 1 AndAlso System.String.Equals(cmd, "inky_cancel", System.StringComparison.OrdinalIgnoreCase)) Then
+                    Return JsonErr("A Batch Agent Job is active. Use its progress dialog to cancel or finish it before changing Local Chat state.")
+                End If
 
                 If System.String.Equals(cmd, "inky_send", System.StringComparison.OrdinalIgnoreCase) Then
                     ' Protect Local Agent request preparation as well as the background run.
@@ -3407,7 +3456,11 @@ Partial Public Class ThisAddIn
 
                     Case "inky_switch"
                         Dim which As String = j("Chat")?.ToString()
-                        activeChatId = If(which = "2", 2, 1)
+                        Dim requestedChat As System.Int32
+                        If Not System.Int32.TryParse(which, requestedChat) OrElse Not IsLocalChatId(requestedChat) Then
+                            Return JsonOk(New With {.ok = False, .error = "Invalid chat number."})
+                        End If
+                        activeChatId = requestedChat
                         Dim stSw = LoadInkyState()
                         _chatAdvancedToolsEnabled = stSw.AgentModeEnabled
                         If stSw.History.Count = 0 AndAlso Not stSw.DarkMode Then stSw.DarkMode = True
@@ -4008,24 +4061,7 @@ Partial Public Class ThisAddIn
                         ' Persist state with user turn BEFORE returning (important)
                         SaveInkyState(st)
                         ' ------------------ (D) Prepare system prompt (same logic) ------------------
-                        Dim sysPromptBase As String = _context.SP_Chat.Replace("{Location}", Location)
-                        Dim nowLocal As String = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss zzz", Globalization.CultureInfo.InvariantCulture)
-                        sysPromptBase &= Environment.NewLine & "Current local date/time: " & nowLocal
-                        sysPromptBase &= Environment.NewLine & $"Your name is '{AN6}'. "
-
-                        If advancedToolsForRequest Then
-                            sysPromptBase &= Environment.NewLine &
-                                "Local Chat Agent behavior: Tools are optional. If the user's latest request can be answered directly, especially for creative writing, drafting, rewriting, brainstorming, summarizing, explanation, or ordinary chat, answer directly without using tools. Do not claim that you are unable to perform a normal language-generation task merely because no tool, attachment, or workspace action is required. Use tools only when they are actually needed for files, workspace operations, document processing, or external/source-backed work."
-                        End If
-
-                        ' Inject InkyMemory into system prompt if enabled
-                        If My.Settings.Inky_InkyMemory Then
-                            Dim memoryContent = ReadInkyMemory(_context.INI_InkyMemoryCap)
-                            sysPromptBase &= Environment.NewLine & _context.SP_Add_InkyMemory
-                            If Not String.IsNullOrWhiteSpace(memoryContent) Then
-                                sysPromptBase &= Environment.NewLine & "<INKY_MEMORY_CURRENT>" & Environment.NewLine & memoryContent & Environment.NewLine & "</INKY_MEMORY_CURRENT>"
-                            End If
-                        End If
+                        Dim sysPromptBase As System.String = BuildLocalChatSystemPrompt(advancedToolsForRequest)
 
                         Dim useSecondApiLocal As Boolean = If(isLocalChatRetry, st.PendingContinuationUseSecondApi, st.UseSecondApi)
                         Dim selectedModelKeyLocal As String = If(isLocalChatRetry, If(st.PendingContinuationSelectedModelKey, System.String.Empty), st.SelectedModelKey)
@@ -5052,23 +5088,24 @@ Partial Public Class ThisAddIn
                             End If
                         End If
 
-                        ' Auto-enable tooling when switching TO a tooling-capable model
-                        ' if sources are already selected (or were previously).
+                        ' A manually selected tooling-capable model uses the same initial
+                        ' gates as the Agent button. Resolve the actual selection afresh:
+                        ' SelectedToolNames and _selectedToolsForChat can belong to the
+                        ' previously selected model or to an earlier agent-mode state.
+                        ' The opt-out lists remain untouched, so each user's selection of
+                        ' individual agents and tools is shared across model changes.
                         If supportsTooling Then
-                            If Not st.ToolingEnabled Then
-                                Dim hasTools As Boolean = (st.SelectedToolNames IsNot Nothing AndAlso st.SelectedToolNames.Count > 0) OrElse
-                                                          (_selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0)
-                                If hasTools Then
-                                    st.ToolingEnabled = True
-                                    _chatToolingEnabled = True
-                                End If
-                            End If
+                            st.AgentModeEnabled = True
+                            Dim hasCallableTools As System.Boolean =
+                                HasLocalChatAnyCallableTools(st, includeInteractiveM365Tools:=True)
 
-                            ' IMPORTANT:
-                            ' Do NOT auto-enable AgentModeEnabled ("Use all tools") here.
-                            ' The checkbox must remain a deliberate user choice.
-                            ' When it is unchecked, Local Chat should use only the selected
-                            ' Sources from the normal tooling pipeline.
+                            ' Do not silently reselect tools the user disabled. As with the
+                            ' Agent button, no active tools and no workspace means neither
+                            ' gate may be enabled until the user changes the selection.
+                            st.ToolingEnabled = hasCallableTools
+                            st.AgentModeEnabled = hasCallableTools
+                            _chatToolingEnabled = hasCallableTools
+                            _chatAdvancedToolsEnabled = hasCallableTools
                         End If
 
                         SaveInkyState(st)

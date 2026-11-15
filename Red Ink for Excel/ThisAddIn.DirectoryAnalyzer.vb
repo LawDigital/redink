@@ -3,15 +3,15 @@
 
 ' =============================================================================
 ' File: ThisAddIn.DirectoryAnalyzer.vb
-' Purpose: Provides directory-of-TXT-files analysis via an LLM and writes
+' Purpose: Provides directory-of-TXT-and-Markdown-files analysis via an LLM and writes
 '          structured results into the active Excel worksheet.
-'          Reads every .txt file in a chosen folder on demand (streamed),
+'          Reads every .txt or .md file in a chosen folder on demand (streamed),
 '          constructs a virtual CSV (Filename + Content), then reuses the
 '          chunk-processing / LLM / Excel-output pipeline from the CSV Analyzer.
 '
 ' Architecture:
 '   1. Folder Selection: Prompts user to pick a directory.
-'   2. File Discovery: Enumerates *.txt files; shows count and confirms.
+'   2. File Discovery: Enumerates .txt and .md files; shows count and confirms.
 '   3. Parameter Collection: Prompt, chunk size, content truncation limit,
 '      file range (start / count), output placement, retries, secondary model.
 '   4. Secondary Model Prep: Optionally loads an alternate model configuration.
@@ -43,6 +43,7 @@ Option Explicit On
 
 Imports System.Diagnostics
 Imports System.IO
+Imports System.Linq
 Imports System.Threading.Tasks
 Imports SharedLibrary.SharedLibrary
 Imports SharedLibrary.SharedLibrary.SharedMethods
@@ -51,7 +52,7 @@ Imports SLib = SharedLibrary.SharedLibrary.SharedMethods
 Partial Public Class ThisAddIn
 
     ''' <summary>
-    ''' Main entry to analyze all .txt files in a user-selected directory using an LLM.
+    ''' Main entry to analyze all .txt and .md files in a user-selected directory using an LLM.
     ''' Each file becomes one virtual CSV row (Filename + Content), processed in chunks,
     ''' with results written to the active Excel worksheet.
     ''' Files are read on demand to keep memory usage constant regardless of directory size.
@@ -67,7 +68,7 @@ Partial Public Class ThisAddIn
             Dim selectedFolder As String = Nothing
             Try
                 Using dlg As New System.Windows.Forms.FolderBrowserDialog()
-                    dlg.Description = "Select folder containing .txt files to analyze"
+                    dlg.Description = "Select folder containing .txt and .md files to analyze"
                     dlg.ShowNewFolderButton = False
                     If dlg.ShowDialog() <> System.Windows.Forms.DialogResult.OK OrElse String.IsNullOrWhiteSpace(dlg.SelectedPath) Then
                         ShowCustomMessageBox("No folder selected — will abort.")
@@ -80,17 +81,19 @@ Partial Public Class ThisAddIn
                 Return
             End Try
 
-            ' 2) Enumerate .txt files (only paths — no content loaded yet)
+            ' 2) Enumerate .txt and .md files (only paths — no content loaded yet)
             Dim txtFiles() As String = {}
             Try
-                txtFiles = Directory.GetFiles(selectedFolder, "*.txt", SearchOption.TopDirectoryOnly)
+                txtFiles = System.IO.Directory.GetFiles(selectedFolder, "*", System.IO.SearchOption.TopDirectoryOnly).
+                    Where(Function(filePath) System.String.Equals(System.IO.Path.GetExtension(filePath), ".txt", System.StringComparison.OrdinalIgnoreCase) OrElse
+                                             System.String.Equals(System.IO.Path.GetExtension(filePath), ".md", System.StringComparison.OrdinalIgnoreCase)).ToArray()
             Catch ex As Exception
                 ShowCustomMessageBox("Failed to enumerate files: " & ex.Message)
                 Return
             End Try
 
             If txtFiles.Length = 0 Then
-                ShowCustomMessageBox("The selected folder contains no .txt files.")
+                ShowCustomMessageBox("The selected folder contains no .txt or .md files.")
                 Return
             End If
 
@@ -104,7 +107,7 @@ Partial Public Class ThisAddIn
                 filePathByIndex(CStr(idx + 1)) = txtFiles(idx)
             Next
 
-            ShowCustomMessageBox("Found " & txtFiles.Length & " .txt file(s) in:" & vbCrLf & selectedFolder, $"{AN} Text File Analyzer")
+            ShowCustomMessageBox("Found " & txtFiles.Length & " .txt/.md file(s) in:" & vbCrLf & selectedFolder, $"{AN} Text File Analyzer")
 
             Dim proceed = ShowCustomYesNoBox("Proceed with analysis?", "Yes", "No", $"{AN} Text File Analyzer")
             If proceed <> 1 Then Return

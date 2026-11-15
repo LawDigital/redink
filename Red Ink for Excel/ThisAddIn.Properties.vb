@@ -2008,6 +2008,24 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_TabularReviewPath As System.String
+        Get
+            Return _context.INI_TabularReviewPath
+        End Get
+        Set(value As System.String)
+            _context.INI_TabularReviewPath = value
+        End Set
+    End Property
+
+    Public Shared Property INI_TabularReviewPathLocal As System.String
+        Get
+            Return _context.INI_TabularReviewPathLocal
+        End Get
+        Set(value As System.String)
+            _context.INI_TabularReviewPathLocal = value
+        End Set
+    End Property
+
     Public Shared Property INI_RenameLibPath As String
         Get
             Return _context.INI_RenameLibPath

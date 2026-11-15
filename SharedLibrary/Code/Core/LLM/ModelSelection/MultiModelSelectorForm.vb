@@ -683,6 +683,12 @@ Namespace SharedLibrary
             UpdatePreferredDialogWidth()
         End Sub
 
+        Public Sub ShowOptionCheckBox(caption As System.String, selected As System.Boolean)
+            Me.chkReset.Text = caption
+            Me.chkReset.Checked = selected
+            Me.chkReset.Visible = True
+        End Sub
+
     End Class
 
 End Namespace

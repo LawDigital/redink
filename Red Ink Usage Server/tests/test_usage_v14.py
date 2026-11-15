@@ -1,5 +1,6 @@
 """Regression fixtures for primary accounting, diagnostic framing and lossless log archival."""
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -8,7 +9,7 @@ import unittest
 from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from zipfile import ZipFile
 
 from fixtures import log_line
@@ -84,9 +85,54 @@ class UsageV14Tests(unittest.TestCase):
     def test_archive_preview_verified_bytes_apply_then_replay(self):
         blob=log_line().replace('\n','\r\n').encode('utf-8-sig'); self.path.write_bytes(blob);self.scan()
         self.assertEqual(self.archive()['eligible'],1);self.assertTrue(self.path.exists());self.assertFalse((self.root/'archive').exists())
-        self.assertEqual(self.archive(True)['archived'],1);self.assertFalse(self.path.exists())
+        result = self.archive(True)
+        self.assertEqual(result['archived'],1,result);self.assertFalse(self.path.exists())
         with ZipFile(next((self.root/'archive').glob('*.zip'))) as z:self.assertEqual(z.read(self.path.name),blob)
         self.path.write_bytes(blob);self.scan();self.assertEqual(self.store.log_analysis('all')['entries'],1)
+    def test_archive_sync_requires_writable_descriptor_without_changing_bytes(self):
+        blob = log_line().replace('\n', '\r\n').encode('utf-8-sig')
+        self.path.write_bytes(blob); self.scan()
+        real_fsync = os.fsync
+        def require_writable_descriptor(fd):
+            # Enforce Windows' writable-handle requirement on every platform.
+            # A zero-byte write checks access without changing the ZIP bytes.
+            os.write(fd, b'')
+            return real_fsync(fd)
+        with patch('redink_server.archive_logs.os.fsync', side_effect=require_writable_descriptor) as sync:
+            result = self.archive(True)
+        self.assertEqual(result['archived'], 1, result)
+        sync.assert_called_once()
+        self.assertFalse(self.path.exists())
+        with ZipFile(next((self.root/'archive').glob('*.zip'))) as z:
+            self.assertEqual(z.read(self.path.name), blob)
+        self.path.write_bytes(blob); self.scan()
+        self.assertEqual(self.store.log_analysis('all')['entries'], 1)
+
+    def test_archive_sync_failure_keeps_source_and_previous_bundle_then_retries(self):
+        blob = log_line().encode('utf-8-sig')
+        self.path.write_bytes(blob); self.scan()
+        first = self.archive(True)
+        self.assertEqual(first['archived'], 1, first)
+        archive = next((self.root/'archive').glob('*.zip'))
+        previous = archive.read_bytes()
+        newer = blob + log_line(timestamp='2026-10-30 15:00:00.000').encode('utf-8')
+        self.path.write_bytes(newer); self.scan()
+        with patch('redink_server.archive_logs.os.fsync', side_effect=OSError('Injected durable-sync failure')) as sync:
+            result = self.archive(True)
+        sync.assert_called_once()
+        self.assertEqual((result['archived'], result['held']), (0, 1), result)
+        self.assertEqual(self.path.read_bytes(), newer)
+        self.assertEqual(archive.read_bytes(), previous)
+        self.assertFalse(list(self.logs.glob('*.archive-hold-*')))
+        retry = self.archive(True)
+        self.assertEqual(retry['archived'], 1, retry)
+        self.assertFalse(self.path.exists())
+        with ZipFile(archive) as z:
+            snapshots = [z.read(n) for n in z.namelist() if n.endswith('.log')]
+        self.assertIn(blob, snapshots)
+        self.assertIn(newer, snapshots)
+        self.assertEqual(self.store.log_analysis('all')['entries'], 2)
+
     def test_archive_never_discards_unseen_or_pruned_data(self):
         self.path.write_text(log_line(),'utf-8');self.assertEqual(self.archive(True)['held'],1)
         self.scan()

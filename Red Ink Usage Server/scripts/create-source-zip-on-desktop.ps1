@@ -18,7 +18,7 @@ if ([string]::IsNullOrWhiteSpace($desktop) -or -not (Test-Path -LiteralPath $des
 # Allowlist: all runnable source, assets, tests, build configuration and documentation.
 # Never copy runtime data, the private server.toml, tokens, secrets, certs or logs.
 $directories = @('redink_server','tests','scripts','packaging','build','config','examples','docs','validation')
-$topLevel = @('.gitignore','README.md','RedInkUsageServer.spec','run_server.py',
+$topLevel = @('.gitignore','README.md','Tasks.md','RedInkUsageServer.spec','run_server.py',
               'build-windows.bat','build-windows.ps1','requirements.txt','requirements-build.txt')
 $skipDirectoryNames = @('.git','.venv','venv','env','__pycache__','.pytest_cache','.mypy_cache',
                         '.ruff_cache','dist','data','config-files','backups','logs','node_modules',

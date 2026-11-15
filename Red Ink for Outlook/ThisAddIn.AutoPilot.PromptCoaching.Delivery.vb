@@ -270,11 +270,9 @@ Partial Public Class ThisAddIn
                                                                      Optional immediateOnly As System.Boolean = False) As System.Threading.Tasks.Task
         Dim preference As Newtonsoft.Json.Linq.JObject = GetAutoPilotPromptCoachingPreferenceStatus(sender)
         If Not preference.Value(Of System.Boolean)("effectiveEnabled") Then
-            If preference.Value(Of System.String)("preference") = "disabled" OrElse preference.Value(Of System.String)("reason") = "opt_in_required" Then
-                For Each job As Newtonsoft.Json.Linq.JObject In jobs
-                    FinishAutoPilotPromptCoachingJob(job, "suppressed")
-                Next
-            End If
+            For Each job As Newtonsoft.Json.Linq.JObject In jobs
+                ApplyAutoPilotPromptCoachingPreference(job, preference)
+            Next
             Return
         End If
         Dim isDaily As System.Boolean = preference.Value(Of System.String)("deliveryMode") <> "immediate"

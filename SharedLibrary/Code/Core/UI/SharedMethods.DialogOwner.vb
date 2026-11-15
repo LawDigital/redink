@@ -99,6 +99,15 @@ Namespace SharedLibrary
             Return System.String.Equals(name.ToString(), _hostWindowClass, System.StringComparison.Ordinal)
         End Function
 
+        ' Validate the exact window captured before a modeless progress display.
+        ' Never substitute another document or use a cross-thread modal owner.
+        Friend Shared Function CanReceiveHostForeground(hwnd As System.IntPtr) As System.Boolean
+            SyncLock _hostWindowLock
+                Return IsHostWindowCandidate(hwnd) AndAlso NativeMethods.IsWindowVisible(hwnd) AndAlso
+                    NativeMethods.IsWindowEnabled(hwnd) AndAlso Not NativeMethods.IsIconic(hwnd)
+            End SyncLock
+        End Function
+
         Public Shared Function GetHostWindowHandle() As System.IntPtr
             SyncLock _hostWindowLock
                 If IsHostWindowCandidate(_hostWindowHandle) AndAlso NativeMethods.IsWindowVisible(_hostWindowHandle) Then
@@ -259,6 +268,15 @@ Namespace SharedLibrary
                 End SyncLock
             End Get
         End Property
+
+        ''' <summary>
+        ''' Posts the awaiting continuation itself to the registered Office STA.
+        ''' Use after an asynchronous read/model/browser wait before accessing Office
+        ''' or the modeless host form. Works even without a WinForms sync context.
+        ''' </summary>
+        Public Shared Function SwitchToHostUiThread() As OfficeUiThreadAwaitable
+            Return AwaitHostUiThread()
+        End Function
 
         Private Shared Function AwaitHostUiThread() As OfficeUiThreadAwaitable
             SyncLock _hostUiDispatchLock

@@ -407,10 +407,29 @@ Namespace SharedLibrary
                                                     Optional InsertButtonMaxOccurrences As System.Collections.Generic.IDictionary(Of System.String, System.Int32) = Nothing
                                                 ) As String
 
+            Return ShowCustomInputBoxCore(prompt, title, SimpleInput, DefaultValue, CtrlP, OptionalButtons, InsertButtons, Context, InsertButtonMaxOccurrences, If(SimpleInput, "", "ESC"))
+        End Function
+
+        ' Nothing distinguishes Cancel from an explicitly confirmed empty value.
+        Public Shared Function ShowOptionalSingleLineInput(prompt As System.String, title As System.String, defaultValue As System.String) As System.String
+            Return ShowCustomInputBoxCore(prompt, title, True, defaultValue, "", Nothing, Nothing, Nothing, Nothing, Nothing)
+        End Function
+
+        Private Shared Function ShowCustomInputBoxCore(
+                                                    prompt As String,
+                                                    title As String,
+                                                    SimpleInput As Boolean,
+                                                    DefaultValue As String,
+                                                    CtrlP As String,
+                                                    OptionalButtons As System.Tuple(Of System.String, System.String, System.String)(),
+                                                    InsertButtons As System.Tuple(Of System.String, System.String, System.String)(),
+                                                    Context As ISharedContext,
+                                                    InsertButtonMaxOccurrences As System.Collections.Generic.IDictionary(Of System.String, System.Int32),
+                                                    cancelledValue As System.String) As System.String
             RequireInteractiveExecution("input_dialog")
             If Not SharedMethods.IsOnHostUiThread AndAlso Not SharedMethods.IsOnHostNeutralSta Then
                 RequireCustomFormCallbackThread(Context IsNot Nothing)
-                Return RunOnStaThread(Function() ShowCustomInputBox(prompt, title, SimpleInput, DefaultValue, CtrlP, OptionalButtons, InsertButtons, Nothing, InsertButtonMaxOccurrences), "Red Ink input", alwaysUseWorker:=True)
+                Return RunOnStaThread(Function() ShowCustomInputBoxCore(prompt, title, SimpleInput, DefaultValue, CtrlP, OptionalButtons, InsertButtons, Nothing, InsertButtonMaxOccurrences, cancelledValue), "Red Ink input", alwaysUseWorker:=True)
             End If
 
             ' Screen working area (accounts for taskbar, etc.).
@@ -799,7 +818,7 @@ Namespace SharedLibrary
                 Debug.WriteLine("Final text: " & finalText)
                 Return finalText
             Else
-                Return If(Not SimpleInput, "ESC", "")
+                Return cancelledValue
             End If
 
             Finally
@@ -2445,13 +2464,14 @@ Namespace SharedLibrary
                 Else
                     Dim stringValue As String = rawValue.ToString()
                     Dim useMultiline As Boolean =
-                        TypeOf rawValue Is String AndAlso
+                        Not param.MaskInput AndAlso TypeOf rawValue Is String AndAlso
                         (param.Multiline OrElse
                          stringValue.Contains(vbCr) OrElse
                          stringValue.Contains(vbLf))
 
                     Dim txt As New TextBox() With {
                         .Text = stringValue,
+                        .UseSystemPasswordChar = param.MaskInput,
                         .Anchor = If(useMultiline,
                                      AnchorStyles.Top Or AnchorStyles.Left Or AnchorStyles.Right,
                                      AnchorStyles.Left Or AnchorStyles.Right),
@@ -3083,6 +3103,7 @@ Namespace SharedLibrary
         ''' including the UI control created to edit the parameter.
         ''' </summary>
         Public Class InputParameter
+            Public Property MaskInput As System.Boolean
             ''' <summary>Optional explanatory tooltip for both the label and its input.</summary>
             Public Property ToolTipText As System.String
             ''' <summary>

@@ -232,8 +232,8 @@ Namespace SharedLibrary
         ' "Required" values are hard minimums: below these the agent is not exposed to the tooling loop.
         ' "Recommended" values are advisory: at or above "Required" but below "Recommended" the agent still
         ' runs, but the user is informed that an update is advisable.
-        Public Const PythonAgentMinRequiredVersion As System.String = "0.5.0"
-        Public Const PythonAgentMinRecommendedVersion As System.String = "0.5.0"
+        Public Const PythonAgentMinRequiredVersion As System.String = "0.6.10"
+        Public Const PythonAgentMinRecommendedVersion As System.String = "0.6.10"
         Public Const PythonAgentMinRequiredProtocolVersion As System.Int32 = 2
         Public Const PythonAgentMinRecommendedProtocolVersion As System.Int32 = 2
         Public Shared ReadOnly PythonAgentRemovalFiles As System.String() = {"README.txt", "redink-pythonagent-licenses.zip", "redink-pythonagent.exe"}
@@ -549,7 +549,9 @@ Namespace SharedLibrary
         Public Const DEFAULT_M365SCOPES As String = "openid profile Calendars.Read Chat.Read ChannelMessage.Read.All Files.Read Mail.Read Notes.Read.All offline_access Sites.Read.All User.Read"
 
         ' Simple Menu
-        Public Const DEFAULT_SIMPLEMENUHIDE As String = "Markup Time Span; Regex Search && Replace; Context Search; Talk to me!; Create Podcast; Apply Comment (Edit);  Apply Comment To Para (Edit); Freestyle (redo); Apply MyStyle; Define MyStyle; Document Check; Find Clause; Add Clause; Run WebAgent; Edit WebAgent; Convert Markdown; Remove Content Controls; Propose PDF Redactions; Finalize PDF Redactions; Anonymize Text (terms); Edit Instructions; Filibuster (Expand Text); Apply MyDocStyle; Learn MyDocStyle; Edit/Create Diagrams (draw.io); Snapshot && Compare; Remove RI: Reference; Flowchart to Webapp; Store Clause for Justification; Justify Markup; Stamp PDF Exhibits; Switch Model; Flatten PDFs To Images; Create Audio; Transcriptor; Switch Party; Tabular Overview; Mail Mover; Expert Tools; Microsoft 365 Mail Search; Scheduler Dashboard; Excel Helpers; Analyze Tools"
+        ' Word and Outlook retain these Simple Menu exclusions alongside custom hide lists.
+        Public Const SIMPLEMENU_HELPER_CONTROLS As System.String = "Semantic Archives; Markdown Editor; Reset Spacing; Import Text File"
+        Public Const DEFAULT_SIMPLEMENUHIDE As String = "Markup Time Span; Regex Search && Replace; Context Search; Talk to me!; Create Podcast; Apply Comment (Edit);  Apply Comment To Para (Edit); Freestyle (redo); Apply MyStyle; Define MyStyle; Document Check; Find Clause; Add Clause; Run WebAgent; Edit WebAgent; Convert Markdown; Remove Content Controls; Propose PDF Redactions; Finalize PDF Redactions; Anonymize Text (terms); Edit Instructions; Filibuster (Expand Text); Apply MyDocStyle; Learn MyDocStyle; Edit/Create Diagrams (draw.io); Snapshot && Compare; Remove RI: Reference; Flowchart to Webapp; Store Clause for Justification; Justify Markup; Stamp PDF Exhibits; Switch Model; Flatten PDFs To Images; Create Audio; Transcriptor; Switch Party; Tabular Overview; Mail Mover; Expert Tools; Microsoft 365 Mail Search; Scheduler Dashboard; Excel Helpers; Analyze Tools" & "; " & SIMPLEMENU_HELPER_CONTROLS
         Public Const DEFAULT_SIMPLEMENUDEFAULT As Boolean = False
 
         ' Language defaults
@@ -587,6 +589,7 @@ Namespace SharedLibrary
         Public Const DEFAULT_BOOL_REPLACETEXT2 As Boolean = True
         Public Const DEFAULT_BOOL_DOMARKUPOUTLOOK As Boolean = True
         Public Const DEFAULT_BOOL_DOMARKUPWORD As Boolean = True
+        Public Const DEFAULT_BOOL_WORDCOMMENTSELECTIONTRACKING As System.Boolean = True
         Public Const DEFAULT_BOOL_CONTEXTMENU As Boolean = True
 
         Public Const DEFAULT_BOOL_ISEARCH_ENABLED As Boolean = True

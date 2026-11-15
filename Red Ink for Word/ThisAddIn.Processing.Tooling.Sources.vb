@@ -776,7 +776,8 @@ Partial Public Class ThisAddIn
                message.IndexOf("Invalid or expired access token", StringComparison.OrdinalIgnoreCase) >= 0
     End Function
 
-    Private Async Function ForceRefreshToolOAuthToken(toolConfig As ModelConfig, toolName As String) As Task(Of Boolean)
+    Private Async Function ForceRefreshToolOAuthToken(toolConfig As ModelConfig, toolName As System.String,
+            Optional cancellationToken As System.Threading.CancellationToken = Nothing) As System.Threading.Tasks.Task(Of System.Boolean)
         Try
             toolConfig.DecodedAPI = Await SharedMethods.GetFreshAccessToken(
                 _context,
@@ -787,7 +788,10 @@ Partial Public Class ThisAddIn
                 toolConfig.OAuth2ATExpiry,
                 True,
                 False,
-                forceRefresh:=True).ConfigureAwait(False)
+                forceRefresh:=True,
+                cancellationToken:=cancellationToken,
+                mcpEndpoint:=toolConfig.Endpoint,
+                rejectedMcpToken:=toolConfig.DecodedAPI).ConfigureAwait(False)
 
             If String.IsNullOrWhiteSpace(toolConfig.DecodedAPI) Then
                 ToolingFileLogger.LogError(
@@ -798,7 +802,9 @@ Partial Public Class ThisAddIn
 
             Return True
 
-        Catch refreshEx As Exception
+        Catch cancelled As System.OperationCanceledException When cancellationToken.IsCancellationRequested
+            Throw
+        Catch refreshEx As System.Exception
             ToolingFileLogger.LogError(
                 "Forced MCP OAuth refresh failed.",
                 details:=$"ToolName='{toolName}'",

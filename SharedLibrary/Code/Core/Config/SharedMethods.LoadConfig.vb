@@ -171,6 +171,9 @@ Namespace SharedLibrary
                     End If
                 Next
 
+                ' Read this before model and licence validation. Word installs the observer after configuration returns.
+                context.INI_WordCommentSelectionTracking = ParseBoolean(configDict, "WordCommentSelectionTracking", DEFAULT_BOOL_WORDCOMMENTSELECTIONTRACKING)
+
                 ' Assign and validate configuration values.
                 context.INI_APIKey = If(configDict.ContainsKey("APIKey"), configDict("APIKey"), "")
                 context.INI_Endpoint = If(configDict.ContainsKey("Endpoint"), configDict("Endpoint"), "")
@@ -442,6 +445,8 @@ Namespace SharedLibrary
                 context.INI_RedactionInstructionsPathLocal = If(configDict.ContainsKey("RedactionInstructionsPathLocal"), configDict("RedactionInstructionsPathLocal"), "")
                 context.INI_ExtractorPath = If(configDict.ContainsKey("ExtractorPath"), configDict("ExtractorPath"), "")
                 context.INI_ExtractorPathLocal = If(configDict.ContainsKey("ExtractorPathLocal"), configDict("ExtractorPathLocal"), "")
+                context.INI_TabularReviewPath = If(configDict.ContainsKey("TabularReviewPath"), configDict("TabularReviewPath"), "")
+                context.INI_TabularReviewPathLocal = If(configDict.ContainsKey("TabularReviewPathLocal"), configDict("TabularReviewPathLocal"), "")
                 context.INI_RenameLibPath = If(configDict.ContainsKey("RenameLibPath"), configDict("RenameLibPath"), "")
                 context.INI_RenameLibPathLocal = If(configDict.ContainsKey("RenameLibPathLocal"), configDict("RenameLibPathLocal"), "")
                 context.INI_MailMoverPath = If(configDict.ContainsKey("MailMoverPath"), configDict("MailMoverPath"), "")

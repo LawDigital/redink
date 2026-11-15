@@ -52,6 +52,17 @@ keep_months = 0
 # Optional scheduled cleanup on scans (false = manual cleanup from Settings).
 auto_cleanup = false
 
+[log_storage]
+# Independent of licence retention. Always bound function-statistics history.
+statistics_months = 12
+# Archive fully imported closed months once per day; retain three online months.
+archive_enabled = true
+online_months = 3
+# Empty selects log-archives below the server data directory (outside import roots).
+archive_directory = ""
+# Expire verified monthly archives after twelve calendar months (current included).
+archive_months = 12
+
 [billing]
 # Leave unit_price empty for a usage-only report. No tax is calculated.
 unit_price = ""
@@ -60,6 +71,16 @@ currency = "CHF"
 [publishing]
 # Empty = DATA_DIR/config-files; alternately use an absolute share or folder.
 source_directory = ""
+
+[websites]
+# Optional separate static sites on their own ports/URL paths.
+# Use Settings to add, edit, enable and disable individual websites.
+# Static content is public to every client allowed through the network firewall.
+# HTTPS sites reuse the Usage Server's [tls] certificate and private key.
+# "directory" must be an absolute server-side path outside the private data folder.
+# Example (enable only after creating the folder and configuring HTTPS):
+# sites = [{ name = "Apps", enabled = true, host = "0.0.0.0", port = 9443, path = "/apps", directory = "D:/CompanyApps/Portal", https = true, spa_fallback = false }]
+sites = []
 
 [authentication]
 # Encrypted policy set only from the authenticated Settings page.

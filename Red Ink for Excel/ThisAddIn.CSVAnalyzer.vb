@@ -10,12 +10,12 @@
 ' Architecture:
 '   1. File Selection: Prompts user to choose a CSV/TXT file (drag/drop dialog).
 '   2. Separator Input: Retrieves or prompts for the CSV separator (persisted in settings).
-'   3. Header/Line Scan: Reads first line (header) and counts remaining lines efficiently.
+'   3. Header/Line Scan: Reads the header record and counts remaining CSV records.
 '   4. Parameter Collection: Gathers analysis parameters (prompt, chunk size, column subset, line range, output placement, retries, secondary model).
 '   5. Column Resolution: Maps requested column names to indices; defaults to all when unspecified.
 '   6. Secondary Model Prep: Optionally loads an alternate model configuration.
 '   7. Excel Output Prep: Lazily inserts a report header block (title, metadata, column headers) when first needed.
-'   8. Chunk Processing Loop: Streams file lines in selected range, builds chunk bodies with a synthetic header line, and flushes chunks.
+'   8. Chunk Processing Loop: Streams CSV records in selected range, builds chunk bodies with a synthetic header line, and flushes chunks.
 '   9. LLM Interaction: For each chunk, invokes the model, parses structured response (line-key/result pairs) or handles errors/NORESULT.
 '  10. Result Insertion: Writes findings (or diagnostic line) to Excel, aligning and wrapping cells.
 '  11. Progress Reporting: Updates a global progress bar; supports cancellation.
@@ -74,28 +74,15 @@ Partial Public Class ThisAddIn
             ' 3) Open minimally, read header + count lines efficiently
             Dim headerColumns As List(Of String) = Nothing
             Dim dataLinesCount As Long = 0
-            Using fs As New FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1 << 20, FileOptions.SequentialScan)
-                Using sr As New StreamReader(fs, detectEncodingFromByteOrderMarks:=True)
-                    Dim header As String = sr.ReadLine()
-                    If header Is Nothing Then
-                        ShowCustomMessageBox("The file appears to be empty.")
-                        Return
-                    End If
-                    headerColumns = ParseCsvLine(header, Separator)
-
-                    ' Count remaining lines efficiently
-                    Dim line As String = Nothing
-                    While True
-                        line = sr.ReadLine()
-                        If line Is Nothing Then Exit While
-                        dataLinesCount += 1
-                    End While
-                End Using
-            End Using
+            ScanCsvRecords(filePath, sepInput, headerColumns, dataLinesCount)
+            If headerColumns Is Nothing Then
+                ShowCustomMessageBox("The file appears to be empty.")
+                Return
+            End If
 
             ' Show header + line count and confirm
             Dim headerMsg As String = "Header columns (" & headerColumns.Count & "): " & String.Join(" | ", headerColumns)
-            Dim linesMsg As String = "Number of lines (excluding header): " & dataLinesCount
+            Dim linesMsg As String = "Number of CSV records (excluding header): " & dataLinesCount
             ShowCustomMessageBox(linesMsg & vbCrLf & headerMsg, $"{AN} CSV Analyzer")
 
             Dim proceed = ShowCustomYesNoBox("Proceed with parsing and analysis?", "Yes", "No", $"{AN} CSV Analyzer")
@@ -128,9 +115,9 @@ Partial Public Class ThisAddIn
             Dim p1 As New SLib.InputParameter("CSV separator", Separator)
             Dim p2 As New SLib.InputParameter("Columns to process (empty = all; separate names by same separator)", colsDefault)
 
-            Dim p3 As New SLib.InputParameter("Chunk size in lines", chunkDefault)
-            Dim p4 As New SLib.InputParameter("Starting line in file (0 = entire file)", startSelDefault)
-            Dim p5 As New SLib.InputParameter("Ending line in file (0 = entire file)", endSelDefault)
+            Dim p3 As New SLib.InputParameter("Chunk size in CSV records", chunkDefault)
+            Dim p4 As New SLib.InputParameter("Starting CSV row (1 = header, 0 = entire file)", startSelDefault)
+            Dim p5 As New SLib.InputParameter("Ending CSV row (1 = header, 0 = entire file)", endSelDefault)
 
             Dim p6 As New SLib.InputParameter("Result start line (row in Excel)", resultStartLineDefault)
             Dim p7 As New SLib.InputParameter("Result start column (1 = A)", resultStartColDefault)
@@ -153,7 +140,12 @@ Partial Public Class ThisAddIn
 
             ' Read back + persist
             OtherPrompt = CStr(prms(0).Value)
-            Separator = CStr(prms(1).Value)
+            Dim analysisSeparator As String = CStr(prms(1).Value)
+            If String.IsNullOrEmpty(analysisSeparator) Then analysisSeparator = sepInput
+            Separator = analysisSeparator
+            If Not System.String.Equals(analysisSeparator, sepInput, System.StringComparison.Ordinal) Then
+                ScanCsvRecords(filePath, analysisSeparator, headerColumns, dataLinesCount)
+            End If
             Dim columnsToProcessRaw As String = CStr(prms(2).Value)
 
             Dim chunkSize As Integer = CInt(SafeToInt(prms(3).Value, 50))
@@ -192,7 +184,7 @@ Partial Public Class ThisAddIn
             ' 5) Resolve columns to extract (by header names)
             Dim selectedHeaders As New List(Of String)()
             Dim selectedIdx As New List(Of Integer)()
-            Dim err As String = ResolveColumns(headerColumns, columnsToProcessRaw, Separator, selectedHeaders, selectedIdx)
+            Dim err As String = ResolveColumns(headerColumns, columnsToProcessRaw, analysisSeparator, selectedHeaders, selectedIdx)
             If Not String.IsNullOrEmpty(err) Then
                 ShowCustomMessageBox(err)
                 Return
@@ -326,7 +318,7 @@ Partial Public Class ThisAddIn
             Dim chunkCounter As Integer = 0
 
             ' Compute the chunk header once, make it visible to FlushChunk
-            Dim headerOut As String = BuildChunkHeader("LineInFile", selectedHeaders, Separator)
+            Dim headerOut As String = BuildChunkHeader("LineInFile", selectedHeaders, analysisSeparator)
 
             ' Progress bar initialization
             Dim totalLinesToProcess As Integer = CInt(Math.Max(0, lastDataAbsLine - firstDataAbsLine + 1))
@@ -368,7 +360,7 @@ Partial Public Class ThisAddIn
                                     End Sub,
                                     ws,
                                     outCol,
-                                    Separator
+                                    analysisSeparator
                                 )
                                 Dim linesProcessedThisChunk As Integer = CInt(chunkLastLine - chunkFirstLine + 1)
                                 processedLines += linesProcessedThisChunk
@@ -388,17 +380,17 @@ Partial Public Class ThisAddIn
             Using fs2 As New FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1 << 20, FileOptions.SequentialScan)
                 Using sr2 As New StreamReader(fs2, detectEncodingFromByteOrderMarks:=True)
                     ' Skip header
-                    Dim headerLine As String = sr2.ReadLine()
+                    ReadCsvRecord(sr2, analysisSeparator, 1, Nothing)
                     Dim absLine As Long = 1
 
                     ' Skip to firstDataAbsLine
                     While absLine < firstDataAbsLine - 1
-                        If sr2.ReadLine() Is Nothing Then Exit While
+                        If Not ReadCsvRecord(sr2, analysisSeparator, absLine + 1, Nothing) Then Exit While
                         absLine += 1
                     End While
 
                     chunkBuffer.Clear()
-                    Dim line As String = Nothing
+                    Dim fields As New System.Collections.Generic.List(Of String)()
 
                     While True
                         If ProgressBarModule.CancelOperation Then
@@ -406,13 +398,11 @@ Partial Public Class ThisAddIn
                             Exit While
                         End If
 
-                        line = sr2.ReadLine()
-                        If line Is Nothing Then Exit While
+                        If absLine >= lastDataAbsLine Then Exit While
+                        If Not ReadCsvRecord(sr2, analysisSeparator, absLine + 1, fields) Then Exit While
                         absLine += 1
-                        If absLine > lastDataAbsLine Then Exit While
 
-                        Dim fields As List(Of String) = ParseCsvLine(line, Separator)
-                        Dim one As String = BuildChunkLine(absLine, fields, selectedIdx, Separator)
+                        Dim one As String = BuildChunkLine(absLine, fields, selectedIdx, analysisSeparator)
                         If chunkCounter = 0 Then
                             chunkBuffer.AppendLine(headerOut)
                             chunkFirstLine = absLine
@@ -643,7 +633,7 @@ Partial Public Class ThisAddIn
     ''' Builds the synthetic header line for chunk bodies: first header token followed by column headers joined by separator.
     ''' </summary>
     Private Function BuildChunkHeader(ByVal firstHeader As String, ByVal headers As List(Of String), ByVal separator As String) As String
-        Return firstHeader & separator & String.Join(separator, headers)
+        Return firstHeader & separator & String.Join(separator, headers.Select(Function(value) EncodeCsvField(value, separator)))
     End Function
 
     ''' <summary>
@@ -653,7 +643,7 @@ Partial Public Class ThisAddIn
         Dim vals As New List(Of String)(selectedIdx.Count)
         For Each idx In selectedIdx
             Dim v As String = If(idx >= 0 AndAlso idx < fields.Count, fields(idx), "")
-            vals.Add(v)
+            vals.Add(EncodeCsvField(v, separator))
         Next
         Return absLine.ToString() & separator & String.Join(separator, vals)
     End Function
@@ -726,46 +716,79 @@ Partial Public Class ThisAddIn
         Return ""
     End Function
 
-    ''' <summary>
-    ''' Parses a CSV line with support for quoted fields and escaped quotes using the chosen separator.
-    ''' </summary>
-    Private Function ParseCsvLine(ByVal line As String, ByVal separator As String) As List(Of String)
-        Dim sep As Char = If(String.IsNullOrEmpty(separator), ";"c, separator(0))
-        Dim res As New List(Of String)()
-        If line Is Nothing Then Return res
+    Private Shared Function EncodeCsvField(value As String, separator As String) As String
+        Const quote As String = """"
+        If value.Contains(separator) OrElse value.Contains(quote) OrElse value.Contains(vbCr) OrElse value.Contains(vbLf) Then
+            Return quote & value.Replace(quote, quote & quote) & quote
+        End If
+        Return value
+    End Function
 
-        Dim sb As New System.Text.StringBuilder()
-        Dim inQuotes As Boolean = False
-        Dim i As Integer = 0
-
-        While i < line.Length
-            Dim c As Char = line(i)
-            If c = """"c Then
-                If inQuotes AndAlso i + 1 < line.Length AndAlso line(i + 1) = """"c Then
-                    ' escaped quote
-                    sb.Append(""""c)
-                    i += 2
-                    Continue While
-                Else
-                    inQuotes = Not inQuotes
-                    i += 1
-                    Continue While
+    Private Shared Sub ScanCsvRecords(filePath As String, separator As String,
+                                      ByRef headers As System.Collections.Generic.List(Of String), ByRef count As Long)
+        count = 0
+        Using stream As New System.IO.FileStream(filePath, System.IO.FileMode.Open, System.IO.FileAccess.Read,
+                                                 System.IO.FileShare.ReadWrite, 1 << 20, System.IO.FileOptions.SequentialScan)
+            Using reader As New System.IO.StreamReader(stream, detectEncodingFromByteOrderMarks:=True)
+                headers = New System.Collections.Generic.List(Of String)()
+                If Not ReadCsvRecord(reader, separator, 1, headers) Then
+                    headers = Nothing
+                    Return
                 End If
+                While ReadCsvRecord(reader, separator, count + 2, Nothing)
+                    count += 1
+                End While
+            End Using
+        End Using
+    End Sub
+
+    ' Passing Nothing for fields scans the same record boundaries without allocating field data.
+    Private Shared Function ReadCsvRecord(reader As System.IO.TextReader, separator As String, recordNumber As Long,
+                                          fields As System.Collections.Generic.List(Of String)) As Boolean
+        If reader.Peek() < 0 Then Return False
+        Dim delimiter As Char = If(String.IsNullOrEmpty(separator), ";"c, separator(0))
+        Dim field As System.Text.StringBuilder = Nothing
+        If fields IsNot Nothing Then
+            fields.Clear()
+            field = New System.Text.StringBuilder()
+        End If
+        Dim inQuotes As Boolean = False
+        Dim atFieldStart As Boolean = True
+        Do
+            Dim code As Integer = reader.Read()
+            If code < 0 Then
+                If inQuotes Then Throw New System.FormatException($"Unclosed quoted field in CSV row {recordNumber}.")
+                Exit Do
             End If
-
-            If Not inQuotes AndAlso c = sep Then
-                res.Add(sb.ToString())
-                sb.Clear()
-                i += 1
-                Continue While
+            Dim ch As Char = Microsoft.VisualBasic.ChrW(code)
+            If inQuotes Then
+                If ch <> """"c Then
+                    field?.Append(ch)
+                ElseIf reader.Peek() = 34 Then
+                    reader.Read()
+                    field?.Append(ch)
+                Else
+                    inQuotes = False
+                End If
+            ElseIf ch = """"c AndAlso atFieldStart Then
+                inQuotes = True
+                atFieldStart = False
+            ElseIf ch = delimiter Then
+                If fields IsNot Nothing Then
+                    fields.Add(field.ToString())
+                    field.Clear()
+                End If
+                atFieldStart = True
+            ElseIf code = 13 OrElse code = 10 Then
+                If code = 13 AndAlso reader.Peek() = 10 Then reader.Read()
+                Exit Do
+            Else
+                field?.Append(ch)
+                atFieldStart = False
             End If
-
-            sb.Append(c)
-            i += 1
-        End While
-
-        res.Add(sb.ToString())
-        Return res
+        Loop
+        If fields IsNot Nothing Then fields.Add(field.ToString())
+        Return True
     End Function
 
     ''' <summary>

@@ -180,22 +180,26 @@ Partial Public Class ThisAddIn
         Dim commentSelectionDetected As System.Boolean = False
         If Not TryResolveSelectedComment(selection, origin, activeComment,
                                          selectedCommentRange, commentSelectionDetected, evidence) Then
-            If commentSelectionDetected Then
-                ' A card/comment-story selection was attempted but its identity
-                ' was not established. The old body selection is NOT its target.
+            Dim anchored As System.Collections.Generic.List(Of Microsoft.Office.Interop.Word.Comment) = Nothing
+            ' A known but unresolved card must never inherit a stale body caret. In
+            ' explicit tracking-off mode the selection Word exposes is the command's input.
+            If Not commentSelectionDetected AndAlso (_commentSelectionTracker IsNot Nothing OrElse _commentSelectionTrackingDisabled) Then
+                anchored = FindCommandCommentsInBodyRange(doc, origin)
+                Dim lookup As System.String = "body_anchor"
+                If anchored.Count = 0 AndAlso selectWholeParagraph AndAlso originStory = Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory Then
+                    anchored = FindCommandCommentsInBodyRange(doc, GetCommentCommandParagraphRange(origin))
+                    lookup = "paragraph"
+                End If
+                LogCommentCommandResolution(lookup & "; matches=" & anchored.Count.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                If anchored.Count = 0 AndAlso Not _commentSelectionTrackingDisabled Then Return Nothing
+            End If
+            If anchored Is Nothing OrElse anchored.Count = 0 Then
                 If doc.Comments.Count = 0 Then Return Nothing
                 activeComment = ChooseCommentForCommand(doc, "Apply Comment")
+            ElseIf anchored.Count = 1 Then
+                activeComment = anchored(0)
             Else
-                ' Main document text selection/caret takes precedence over a
-                ' fallback picker. A partial overlap is sufficient; a large
-                ' selection with several comments is genuinely ambiguous here.
-                Dim anchored As System.Collections.Generic.List(Of Microsoft.Office.Interop.Word.Comment) =
-                    FindCommandCommentsInBodyRange(doc, origin)
-                If anchored.Count = 1 Then
-                    activeComment = anchored(0)
-                ElseIf anchored.Count > 1 Then
-                    activeComment = ChooseCommentForCommand(doc, "Apply Comment", anchored)
-                End If
+                activeComment = ChooseCommentForCommand(doc, "Apply Comment", anchored)
             End If
         End If
         If activeComment Is Nothing Then Return Nothing
@@ -206,25 +210,11 @@ Partial Public Class ThisAddIn
         End If
 
         Dim anchorRange As Microsoft.Office.Interop.Word.Range = activeComment.Scope.Duplicate
-        If Not IsSameProcessingDocument(doc, anchorRange.Document) OrElse
+        If Not IsSameCommentDocument(doc, anchorRange.Document) OrElse
            anchorRange.StoryType = Microsoft.Office.Interop.Word.WdStoryType.wdCommentsStory Then
             Throw New WordCommandNoticeException("The text linked to this comment is no longer available. Please select another comment.")
         End If
-        Dim targetRange As Microsoft.Office.Interop.Word.Range
-        If selectWholeParagraph Then
-            If anchorRange.Paragraphs.Count > 0 Then
-                Dim firstPara As Microsoft.Office.Interop.Word.Range = anchorRange.Paragraphs(1).Range
-                Dim lastPara As Microsoft.Office.Interop.Word.Range = anchorRange.Paragraphs(anchorRange.Paragraphs.Count).Range
-                targetRange = anchorRange.Duplicate
-                targetRange.SetRange(firstPara.Start, lastPara.End)
-            Else
-                targetRange = anchorRange.Duplicate
-                targetRange.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseStart)
-                targetRange = targetRange.Paragraphs(1).Range
-            End If
-        Else
-            targetRange = anchorRange.Duplicate
-        End If
+        Dim targetRange As Microsoft.Office.Interop.Word.Range = If(selectWholeParagraph, GetCommentCommandParagraphRange(anchorRange), anchorRange)
 
         Dim inComment As System.Boolean = selectedCommentRange IsNot Nothing
         Dim selectedCommentText As System.String = System.String.Empty
@@ -254,6 +244,19 @@ Partial Public Class ThisAddIn
             .FullCommentText = fullCommentText,
             .SelectedCommentText = selectedCommentText
         }
+    End Function
+
+    Private Shared Function GetCommentCommandParagraphRange(source As Microsoft.Office.Interop.Word.Range) As Microsoft.Office.Interop.Word.Range
+        Dim span As Microsoft.Office.Interop.Word.Range = source.Duplicate
+        If span.Paragraphs.Count = 0 Then
+            span.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseStart)
+            Return span.Paragraphs(1).Range
+        End If
+        Dim lastCharacter As Microsoft.Office.Interop.Word.Range = source.Duplicate
+        ' End is exclusive. The beginning of the next paragraph must not widen the lookup or writeback.
+        If lastCharacter.Start < lastCharacter.End Then lastCharacter.Start = lastCharacter.End - 1
+        span.SetRange(span.Paragraphs(1).Range.Start, lastCharacter.Paragraphs(1).Range.End)
+        Return span
     End Function
 
     ''' <summary>
@@ -311,7 +314,7 @@ Partial Public Class ThisAddIn
         Try
             Dim paneSelection As Microsoft.Office.Interop.Word.Selection = selection.Application.ActiveWindow.ActivePane.Selection
             If paneSelection IsNot Nothing AndAlso paneSelection.Active AndAlso
-               IsSameProcessingDocument(doc, paneSelection.Document) Then
+               IsSameCommentDocument(doc, paneSelection.Document) Then
                 Dim paneOrigin As Microsoft.Office.Interop.Word.Range = paneSelection.Range.Duplicate
                 Dim paneDetected As System.Boolean = False
                 Dim resolved As System.Boolean = TryResolveSelectedCommentInSelection(
@@ -391,7 +394,7 @@ Partial Public Class ThisAddIn
             End If
 
             Dim matchedRange As Microsoft.Office.Interop.Word.Range = matched.Range
-            If Not IsSameProcessingDocument(doc, matchedRange.Document) OrElse
+            If Not IsSameCommentDocument(doc, matchedRange.Document) OrElse
                matchedRange.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdCommentsStory Then
                 diagnostic &= "; invalid_comment_document_or_story"
                 Return False
@@ -420,7 +423,7 @@ Partial Public Class ThisAddIn
                                                         candidate As Microsoft.Office.Interop.Word.Comment,
                                                         ByRef matched As Microsoft.Office.Interop.Word.Comment) As System.Boolean
         Dim candidateRange As Microsoft.Office.Interop.Word.Range = candidate.Range
-        If IsSameProcessingDocument(doc, candidateRange.Document) AndAlso origin.InRange(candidateRange) Then
+        If IsSameCommentDocument(doc, candidateRange.Document) AndAlso origin.InRange(candidateRange) Then
             If matched IsNot Nothing AndAlso Not SameCommandComment(matched, candidate) Then Return False
             matched = candidate
         End If
@@ -610,7 +613,7 @@ Partial Public Class ThisAddIn
             ' Word. Do not start the model/writeback path unless the intended document,
             ' story and exact range have actually become the active selection.
             Dim selected As Microsoft.Office.Interop.Word.Selection = Globals.ThisAddIn.Application.Selection
-            If selected Is Nothing OrElse Not IsSameProcessingDocument(targetRange.Document, selected.Document) OrElse
+            If selected Is Nothing OrElse Not IsSameCommentDocument(targetRange.Document, selected.Document) OrElse
                selected.StoryType <> targetRange.StoryType OrElse Not selected.Range.IsEqual(targetRange) Then
                 Throw New System.InvalidOperationException("Word did not activate the comment's document range.")
             End If

@@ -34,6 +34,14 @@ Namespace SharedLibrary
         Public Shared Function IsWindowVisible(hwnd As System.IntPtr) As System.Boolean
         End Function
 
+        <System.Runtime.InteropServices.DllImport("user32.dll")>
+        Friend Shared Function IsWindowEnabled(hwnd As System.IntPtr) As System.Boolean
+        End Function
+
+        <System.Runtime.InteropServices.DllImport("user32.dll")>
+        Friend Shared Function IsIconic(hwnd As System.IntPtr) As System.Boolean
+        End Function
+
         <System.Runtime.InteropServices.DllImport("user32.dll", CharSet:=System.Runtime.InteropServices.CharSet.Unicode)>
         Public Shared Function GetClassName(hwnd As System.IntPtr, name As System.Text.StringBuilder, capacity As System.Int32) As System.Int32
         End Function

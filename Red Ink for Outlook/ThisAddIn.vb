@@ -14,7 +14,7 @@
 '   the other ThisAddIn.* files.
 ' =============================================================================
 '
-' 2.11.2026
+' 15.11.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -80,7 +80,7 @@ Partial Public Class ThisAddIn
     Public Const AN4 As String = "redink_"
     Public Const AN3 As String = "redink"
 
-    Public Shared Version As String = "V.021126" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.151126" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -381,7 +381,7 @@ Partial Public Class ThisAddIn
         StartStartupReconcileFallback()
 
         Try
-            activeChatId = If(My.Settings.Inky_LastChat = 2, 2, 1)
+            activeChatId = If(IsLocalChatId(My.Settings.Inky_LastChat), My.Settings.Inky_LastChat, 1)
         Catch
             activeChatId = 1
         End Try

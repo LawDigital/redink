@@ -1419,6 +1419,12 @@
         }
         "Entry"
         {
+        "MsmKey" = "8:_E1AB64B44E807872F996F0CE9CF71DDA"
+        "OwnerKey" = "8:_UNDEFINED"
+        "MsmSig" = "8:_UNDEFINED"
+        }
+        "Entry"
+        {
         "MsmKey" = "8:_D761BE2D5AC66D8FE767AD6DCC0E4B35"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
@@ -1426,6 +1432,18 @@
         "Entry"
         {
         "MsmKey" = "8:_807969307D58C16A97E7D39227E3E411"
+        "OwnerKey" = "8:_UNDEFINED"
+        "MsmSig" = "8:_UNDEFINED"
+        }
+        "Entry"
+        {
+        "MsmKey" = "8:_7505E080394FC8373D39502CB716D0AF"
+        "OwnerKey" = "8:_UNDEFINED"
+        "MsmSig" = "8:_UNDEFINED"
+        }
+        "Entry"
+        {
+        "MsmKey" = "8:_A63011F111257DD0D41A1925143D049A"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
@@ -2248,6 +2266,18 @@
         "Entry"
         {
         "MsmKey" = "8:_5E88188A1AEB8289032B4289E0820EAD"
+        "OwnerKey" = "8:_UNDEFINED"
+        "MsmSig" = "8:_UNDEFINED"
+        }
+        "Entry"
+        {
+        "MsmKey" = "8:_198D46E186BCC145DE893312760ABEAD"
+        "OwnerKey" = "8:_UNDEFINED"
+        "MsmSig" = "8:_UNDEFINED"
+        }
+        "Entry"
+        {
+        "MsmKey" = "8:_6A9084E7A7923E81D0B70D856750BA34"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
         }
@@ -7023,6 +7053,26 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_E1AB64B44E807872F996F0CE9CF71DDA"
+            {
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\x64\\Release\\nl\\PdfiumViewer.resources.dll"
+            "TargetName" = "8:PdfiumViewer.resources.dll"
+            "Tag" = "8:REDINK_AUTOPAYLOAD"
+            "Folder" = "8:_8BAE306E0D153248E8990C599341F9C2"
+            "Condition" = "8:"
+            "Transitive" = "11:FALSE"
+            "Vital" = "11:TRUE"
+            "ReadOnly" = "11:FALSE"
+            "Hidden" = "11:FALSE"
+            "System" = "11:FALSE"
+            "Permanent" = "11:FALSE"
+            "SharedLegacy" = "11:FALSE"
+            "PackageAs" = "3:1"
+            "Register" = "3:1"
+            "Exclude" = "11:FALSE"
+            "IsDependency" = "11:FALSE"
+            "IsolateTo" = "8:"
+            }
             "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_D761BE2D5AC66D8FE767AD6DCC0E4B35"
             {
             "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\x64\\Release\\onnxruntime.dll"
@@ -7047,6 +7097,46 @@
             {
             "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\x64\\Release\\onnxruntime_providers_shared.dll"
             "TargetName" = "8:onnxruntime_providers_shared.dll"
+            "Tag" = "8:REDINK_AUTOPAYLOAD"
+            "Folder" = "8:_C62F62C9734E47BDBF9B8574F80ADDBB"
+            "Condition" = "8:"
+            "Transitive" = "11:FALSE"
+            "Vital" = "11:TRUE"
+            "ReadOnly" = "11:FALSE"
+            "Hidden" = "11:FALSE"
+            "System" = "11:FALSE"
+            "Permanent" = "11:FALSE"
+            "SharedLegacy" = "11:FALSE"
+            "PackageAs" = "3:1"
+            "Register" = "3:1"
+            "Exclude" = "11:FALSE"
+            "IsDependency" = "11:FALSE"
+            "IsolateTo" = "8:"
+            }
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_7505E080394FC8373D39502CB716D0AF"
+            {
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\x64\\Release\\PdfiumViewer.dll"
+            "TargetName" = "8:PdfiumViewer.dll"
+            "Tag" = "8:REDINK_AUTOPAYLOAD"
+            "Folder" = "8:_C62F62C9734E47BDBF9B8574F80ADDBB"
+            "Condition" = "8:"
+            "Transitive" = "11:FALSE"
+            "Vital" = "11:TRUE"
+            "ReadOnly" = "11:FALSE"
+            "Hidden" = "11:FALSE"
+            "System" = "11:FALSE"
+            "Permanent" = "11:FALSE"
+            "SharedLegacy" = "11:FALSE"
+            "PackageAs" = "3:1"
+            "Register" = "3:1"
+            "Exclude" = "11:FALSE"
+            "IsDependency" = "11:FALSE"
+            "IsolateTo" = "8:"
+            }
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_A63011F111257DD0D41A1925143D049A"
+            {
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\x64\\Release\\PdfiumViewer.xml"
+            "TargetName" = "8:PdfiumViewer.xml"
             "Tag" = "8:REDINK_AUTOPAYLOAD"
             "Folder" = "8:_C62F62C9734E47BDBF9B8574F80ADDBB"
             "Condition" = "8:"
@@ -9803,6 +9893,46 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_198D46E186BCC145DE893312760ABEAD"
+            {
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\x64\\Release\\x64\\pdfium.dll"
+            "TargetName" = "8:pdfium.dll"
+            "Tag" = "8:REDINK_AUTOPAYLOAD"
+            "Folder" = "8:_7708E56EEDB87179FAF8F5DE66C80E5C"
+            "Condition" = "8:"
+            "Transitive" = "11:FALSE"
+            "Vital" = "11:TRUE"
+            "ReadOnly" = "11:FALSE"
+            "Hidden" = "11:FALSE"
+            "System" = "11:FALSE"
+            "Permanent" = "11:FALSE"
+            "SharedLegacy" = "11:FALSE"
+            "PackageAs" = "3:1"
+            "Register" = "3:1"
+            "Exclude" = "11:FALSE"
+            "IsDependency" = "11:FALSE"
+            "IsolateTo" = "8:"
+            }
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_6A9084E7A7923E81D0B70D856750BA34"
+            {
+            "SourcePath" = "8:..\\..\\..\\..\\Red Ink for Excel\\bin\\x64\\Release\\x86\\pdfium.dll"
+            "TargetName" = "8:pdfium.dll"
+            "Tag" = "8:REDINK_AUTOPAYLOAD"
+            "Folder" = "8:_054D5F2B510EE613520D10EA1D996012"
+            "Condition" = "8:"
+            "Transitive" = "11:FALSE"
+            "Vital" = "11:TRUE"
+            "ReadOnly" = "11:FALSE"
+            "Hidden" = "11:FALSE"
+            "System" = "11:FALSE"
+            "Permanent" = "11:FALSE"
+            "SharedLegacy" = "11:FALSE"
+            "PackageAs" = "3:1"
+            "Register" = "3:1"
+            "Exclude" = "11:FALSE"
+            "IsDependency" = "11:FALSE"
+            "IsolateTo" = "8:"
+            }
         }
         "FileType"
         {
@@ -10215,6 +10345,17 @@
                                 }
                             }
                         }
+                        "{9EF0B969-E518-4E46-987F-47570745A589}:_8BAE306E0D153248E8990C599341F9C2"
+                        {
+                        "Name" = "8:nl"
+                        "AlwaysCreate" = "11:FALSE"
+                        "Condition" = "8:"
+                        "Transitive" = "11:FALSE"
+                        "Property" = "8:_842FB92D55EC781573A4905D26F56677"
+                            "Folders"
+                            {
+                            }
+                        }
                         "{9EF0B969-E518-4E46-987F-47570745A589}:_2CA40F7192236C9A508B1CC1469B6B13"
                         {
                         "Name" = "8:runtimes"
@@ -10347,6 +10488,28 @@
                                 }
                             }
                         }
+                        "{9EF0B969-E518-4E46-987F-47570745A589}:_7708E56EEDB87179FAF8F5DE66C80E5C"
+                        {
+                        "Name" = "8:x64"
+                        "AlwaysCreate" = "11:FALSE"
+                        "Condition" = "8:"
+                        "Transitive" = "11:FALSE"
+                        "Property" = "8:_8FBE33D78D176FA822D73220EF0E4D5E"
+                            "Folders"
+                            {
+                            }
+                        }
+                        "{9EF0B969-E518-4E46-987F-47570745A589}:_054D5F2B510EE613520D10EA1D996012"
+                        {
+                        "Name" = "8:x86"
+                        "AlwaysCreate" = "11:FALSE"
+                        "Condition" = "8:"
+                        "Transitive" = "11:FALSE"
+                        "Property" = "8:_D9202A259DF611F15CE9AD6A95553B26"
+                            "Folders"
+                            {
+                            }
+                        }
                 }
             }
             "{1525181F-901A-416C-8A58-119130FE478E}:_EFB490390E484CBE90C233946CA2167F"
@@ -10425,15 +10588,15 @@
         {
         "Name" = "8:Microsoft Visual Studio"
         "ProductName" = "8:Red Ink for Excel"
-        "ProductCode" = "8:{50FEBD0A-D76C-42A4-B38B-7AE0D3E49AF2}"
-        "PackageCode" = "8:{909BA3FA-19DC-42D7-AB0B-AED338A29213}"
+        "ProductCode" = "8:{45D89A06-D1D1-41CD-8BDB-71E4CE8CD75A}"
+        "PackageCode" = "8:{2D86C863-EDCD-40A7-B965-EAC2AFA6D1E4}"
         "UpgradeCode" = "8:{E26AB603-D49B-4AAB-90F7-606F83767BF1}"
         "AspNetVersion" = "8:4.0.30319.0"
         "RestartWWWService" = "11:FALSE"
         "RemovePreviousVersions" = "11:TRUE"
         "DetectNewerInstalledVersion" = "11:TRUE"
         "InstallAllUsers" = "11:TRUE"
-        "ProductVersion" = "8:1.8.0"
+        "ProductVersion" = "8:1.8.5"
         "Manufacturer" = "8:LawDigital Ltd."
         "ARPHELPTELEPHONE" = "8:"
         "ARPHELPLINK" = "8:"

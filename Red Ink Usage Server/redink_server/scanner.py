@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import bisect
 import logging
 import threading
 from collections import Counter
@@ -114,14 +115,25 @@ class Scanner:
             total = {"kind": kind, "path": str(root), "files": 0, "records": 0, "errors": 0, "skipped": 0, "detail": ""}
             messages = []
             try:
-                for path in safe_iter_files(root, recursive=self.settings.recursive if recursive is None else recursive):
-                    if kind == "log" and log_host_from_name(path) is None:
-                        continue  # Not a usage source: no cursor, file budget, parsing or pending warning.
-                    total["files"] += 1
-                    if total["files"] > self.settings.maximum_files_per_scan:
-                        total["errors"] += 1
-                        messages.append("File-count limit reached; split the source or increase maximum_files_per_scan.")
+                recursive = self.settings.recursive if recursive is None else recursive
+                paths = sorted({str(p): p for p in safe_iter_files(root, recursive=recursive)
+                                if kind != "log" or log_host_from_name(p) is not None}.items())
+                cursor_key = "scan_rotation_" + hashlib.sha256(
+                    (kind + "|" + str(root.resolve()) + "|" + str(recursive)).encode()).hexdigest()
+                last = "" if force else self.store.metadata(cursor_key)
+                start = bisect.bisect_right([name for name, _ in paths], last)
+                ordered = paths[start:] + paths[:start]
+                budget = self.settings.maximum_files_per_scan
+                selected = ordered[:budget]
+                if len(ordered) > budget:
+                    total["errors"] += 1
+                    messages.append("File-count limit reached; remaining sources continue on subsequent scans.")
+                last_processed = ""
+                for name, path in selected:
+                    if self._stop.is_set():
                         break
+                    total["files"] += 1
+                    last_processed = name
                     try:
                         stat = path.stat()
                     except OSError:
@@ -196,6 +208,8 @@ class Scanner:
                     total["skipped"] += skipped
                     if detail and len(messages) < 5:
                         messages.append(path.name + ": " + detail)
+                if last_processed:
+                    self.store.save_metadata(cursor_key, last_processed)
             except OSError:
                 total["errors"] += 1
                 messages.append("Source is unavailable. Check the path and the server account's permissions; stored history was retained.")
@@ -210,6 +224,9 @@ class Scanner:
                 if self._stop.is_set():
                     return results
                 results.append(self.scan_path(root, kind, allow_recent=True))
+        # Archive while imported row evidence is available, then prune statistics.
+        from .archive_logs import maintain_log_storage
+        maintain_log_storage(self.store)
         self.store.maintenance()
         return results
 

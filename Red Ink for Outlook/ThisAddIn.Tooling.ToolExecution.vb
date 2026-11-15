@@ -230,7 +230,9 @@ Partial Public Class ThisAddIn
                     toolConfig.OAuth2Endpoint,
                     toolConfig.OAuth2ATExpiry,
                     True,
-                    False).ConfigureAwait(False)
+                    False,
+                    cancellationToken:=cancellationToken,
+                    mcpEndpoint:=toolConfig.Endpoint).ConfigureAwait(False)
 
                 If String.IsNullOrWhiteSpace(toolConfig.DecodedAPI) Then
                     response.Success = False
@@ -314,7 +316,7 @@ Partial Public Class ThisAddIn
                         "SSE tool call returned Unauthorized. Forcing MCP OAuth refresh and retrying once.",
                         details:=$"ToolName='{toolCall.ToolName}'; SseBase='{sseBase}'")
 
-                    Dim sseRefreshOk As Boolean = Await ForceRefreshToolOAuthToken(toolConfig, toolCall.ToolName).ConfigureAwait(False)
+                    Dim sseRefreshOk As Boolean = Await ForceRefreshToolOAuthToken(toolConfig, toolCall.ToolName, cancellationToken).ConfigureAwait(False)
                     If Not sseRefreshOk Then Exit Do
                 Loop
 
@@ -406,7 +408,7 @@ Partial Public Class ThisAddIn
                         "MCP Streamable HTTP tool call returned Unauthorized. Forcing MCP OAuth refresh and retrying once.",
                         details:=$"ToolName='{toolCall.ToolName}'; Endpoint='{mcpUrl}'")
 
-                    Dim streamRefreshOk As Boolean = Await ForceRefreshToolOAuthToken(toolConfig, toolCall.ToolName).ConfigureAwait(False)
+                    Dim streamRefreshOk As Boolean = Await ForceRefreshToolOAuthToken(toolConfig, toolCall.ToolName, cancellationToken).ConfigureAwait(False)
                     If Not streamRefreshOk Then Exit Do
                 Loop
 

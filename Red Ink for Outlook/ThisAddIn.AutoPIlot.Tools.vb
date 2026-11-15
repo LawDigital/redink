@@ -979,14 +979,16 @@ Partial Public Class ThisAddIn
                 "annotations should appear as highlight + popup comment pairs within the PDF itself. " &
                 "Supports an optional author parameter: if the user asks for comments under a specific name " &
                 "(e.g. the sender's name), pass it as author. If not specified, comments are authored as 'Inky'. " &
-                "Comments that cannot be matched to specific text in the PDF are placed as sticky notes " &
-                "at the top-right corner of the first page.",
+                "Only complete, unambiguous quotations are highlighted. Unmatched or ambiguous references are retained as labelled sticky notes " &
+                "on the first page. The result reports anchored and unanchored counts, anchoring_complete and unconfirmed_review_batches. " &
+                "If anchoring_complete is false, explain that those notes need review; do not claim every comment is precisely anchored. " &
+                "If unconfirmed_review_batches is positive, explain that complete review coverage could not be confirmed.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_CommentPdf & """," &
                 """description"":""Adds review comments as highlight annotations with popup bubbles directly inside a PDF file. " &
                 "Use ONLY when the user wants to ADD or INSERT comments/annotations/review feedback INTO the PDF. " &
                 "Do NOT use when the user wants to READ or EXTRACT existing content or comments from a PDF. " &
-                "Matched text is highlighted in yellow with a popup comment; unmatched comments become sticky notes.""," &
+                "Unambiguous complete quotations are highlighted in yellow; unresolved references become labelled sticky notes and are reported separately.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """instruction"":{""type"":""string"",""description"":""The review instruction (e.g., 'Review for legal risks', 'Check for inconsistencies', 'Suggest improvements')""}," &
                 """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of the PDF attachments to annotate. If empty or omitted, annotates all PDF attachments.""}," &

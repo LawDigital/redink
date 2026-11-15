@@ -1,4 +1,4 @@
-' Part of "Red Ink" (SharedLibrary)
+﻿' Part of "Red Ink" (SharedLibrary)
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
 ' =============================================================================
@@ -23,10 +23,16 @@ Namespace Agents
 
     Public NotInheritable Class PromptCoachingAdvice
 
-        Public Const CurrentSchema As System.Int32 = 2
+        Public Const CurrentSchema As System.Int32 = 3
         Public Const MinimumConfidence As System.Int32 = 95
         Private Shared ReadOnly AllowedTopics As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal) From {
-            "goal", "sources", "output", "scope", "sequence", "constraints", "verification", "ambiguity"
+            "goal", "sources", "output", "scope", "sequence", "constraints", "verification", "ambiguity", "recovery"
+        }
+        Private Shared ReadOnly AllowedKinds As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal) From {
+            "request_clarification", "operational_next_step"
+        }
+        Private Shared ReadOnly AllowedActions As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal) From {
+            "none", "request_access_review", "process_locally", "retry_later", "new_request", "retrieve_results", "resume_checkpoint", "review_with_operator"
         }
         Private Shared ReadOnly AllowedEffects As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal) From {
             "none", "clarification", "rework", "tool_failure", "extra_steps"
@@ -46,6 +52,23 @@ Namespace Agents
             Return value IsNot Nothing AndAlso AllowedTopics.Contains(value)
         End Function
 
+        ''' <summary>Canonical host actions for evidence-bound direct-reply deduplication.</summary>
+        Public Shared Function IsCanonicalAction(value As System.String) As System.Boolean
+            Return value IsNot Nothing AndAlso AllowedActions.Contains(value)
+        End Function
+
+        ''' <summary>Canonical equivalents that should not cause a second recovery email.</summary>
+        Private Shared Function IsAlreadyCoveredAction(action As System.String,
+                covered As System.Collections.Generic.ISet(Of System.String)) As System.Boolean
+            If covered Is Nothing Then Return False
+            If covered.Contains(action) Then Return True
+            ' Sending the request again and retrying later are the same basic
+            ' recovery action, even when a model gives them distinct labels.
+            If action = "retry_later" Then Return covered.Contains("new_request")
+            If action = "new_request" Then Return covered.Contains("retry_later")
+            Return False
+        End Function
+
         Private Shared Function ControlCommands() As System.String()
             Return New System.String() {"OFF", "ON", "DAILY", "IMMEDIATE", "SYSTEM", "STATUS", "DEFAULT"}
         End Function
@@ -55,6 +78,8 @@ Namespace Agents
 
         Public NotInheritable Class Recommendation
             Public ReadOnly Property Topic As System.String
+            Public ReadOnly Property Kind As System.String
+            Public ReadOnly Property ActionCode As System.String
             Public ReadOnly Property ObservedEffect As System.String
             Public ReadOnly Property OutputFormat As System.String
             Public ReadOnly Property Confidence As System.Int32
@@ -67,16 +92,23 @@ Namespace Agents
             Public ReadOnly Property EffectExplanation As System.String
             Public ReadOnly Property Reviewed As System.Boolean
 
-            Private Sub New(topic As System.String, effect As System.String, outputFormat As System.String,
+            Private Sub New(topic As System.String, kind As System.String, actionCode As System.String,
+                            effect As System.String, outputFormat As System.String,
                             confidence As System.Int32, impact As System.String, title As System.String,
                             excerpt As System.String, explanation As System.String, why As System.String,
                             improved As System.String, effectExplanation As System.String, reviewed As System.Boolean)
-                If Not AllowedTopics.Contains(topic) OrElse Not AllowedEffects.Contains(effect) OrElse
+                If Not AllowedTopics.Contains(topic) OrElse Not AllowedKinds.Contains(kind) OrElse
+                   Not AllowedActions.Contains(actionCode) OrElse
+                   (kind = "request_clarification" AndAlso (actionCode <> "none" OrElse topic = "recovery")) OrElse
+                   (kind = "operational_next_step" AndAlso (topic <> "recovery" OrElse actionCode = "none" OrElse effect <> "tool_failure")) OrElse
+                   Not AllowedEffects.Contains(effect) OrElse
                    Not AllowedFormats.Contains(outputFormat) OrElse Not AllowedImpacts.Contains(impact) OrElse
                    impact = "minor_style" OrElse confidence < MinimumConfidence OrElse confidence > 100 Then
                     Throw New System.IO.InvalidDataException("Invalid coaching classification.")
                 End If
                 Me.Topic = topic
+                Me.Kind = kind
+                Me.ActionCode = actionCode
                 Me.ObservedEffect = effect
                 Me.OutputFormat = outputFormat
                 Me.Confidence = confidence
@@ -95,8 +127,11 @@ Namespace Agents
             End Sub
 
             Friend Shared Function Create(candidate As Newtonsoft.Json.Linq.JObject, effect As System.String,
-                                          reviewed As System.Boolean, Optional stored As System.Boolean = False) As Recommendation
-                Return New Recommendation(ReadEnum(candidate, "topic", AllowedTopics), effect,
+                                          reviewed As System.Boolean, Optional stored As System.Boolean = False,
+                                          Optional legacy As System.Boolean = False) As Recommendation
+                Dim kind As System.String = If(legacy, "request_clarification", ReadEnum(candidate, "kind", AllowedKinds))
+                Dim actionCode As System.String = If(legacy, "none", ReadEnum(candidate, "action_code", AllowedActions))
+                Return New Recommendation(ReadEnum(candidate, "topic", AllowedTopics), kind, actionCode, effect,
                     ReadEnum(candidate, "output_format", AllowedFormats), ReadInteger(candidate, "confidence", MinimumConfidence, 100),
                     ReadEnum(candidate, "impact", AllowedImpacts), ReadString(candidate, "title", False),
                     ReadString(candidate, If(stored, "request_excerpt", "request_evidence"), False),
@@ -105,24 +140,24 @@ Namespace Agents
             End Function
 
             Friend Function WithReview() As Recommendation
-                Return New Recommendation(Topic, ObservedEffect, OutputFormat, Confidence, Impact, Title, RequestExcerpt,
+                Return New Recommendation(Topic, Kind, ActionCode, ObservedEffect, OutputFormat, Confidence, Impact, Title, RequestExcerpt,
                     Explanation, WhyItHelps, ImprovedRequest, EffectExplanation, True)
             End Function
 
             Public Function ToJson() As Newtonsoft.Json.Linq.JObject
                 Return New Newtonsoft.Json.Linq.JObject From {
-                    {"topic", Topic}, {"observed_effect", ObservedEffect}, {"output_format", OutputFormat},
+                    {"topic", Topic}, {"kind", Kind}, {"action_code", ActionCode}, {"observed_effect", ObservedEffect}, {"output_format", OutputFormat},
                     {"confidence", Confidence}, {"impact", Impact}, {"title", Title}, {"request_excerpt", RequestExcerpt},
                     {"explanation", Explanation}, {"why_it_helps", WhyItHelps}, {"improved_request", ImprovedRequest},
                     {"effect_explanation", EffectExplanation}, {"reviewed", Reviewed}
                 }
             End Function
 
-            Public Shared Function FromJson(value As Newtonsoft.Json.Linq.JObject) As Recommendation
+            Public Shared Function FromJson(value As Newtonsoft.Json.Linq.JObject, Optional legacy As System.Boolean = False) As Recommendation
                 If value Is Nothing OrElse Not ReadBoolean(value, "reviewed") Then
                     Throw New System.IO.InvalidDataException("Stored coaching advice has not passed its second review.")
                 End If
-                Return Create(value, ReadEnum(value, "observed_effect", AllowedEffects), True, stored:=True)
+                Return Create(value, ReadEnum(value, "observed_effect", AllowedEffects), True, stored:=True, legacy:=legacy)
             End Function
         End Class
 
@@ -156,11 +191,11 @@ Namespace Agents
                     ' personalised prose or mail their now-obsolete generic templates.
                     Return New Result(language, New Recommendation() {}, New System.String() {"suppressed_legacy_generic_advice"})
                 End If
-                ValidateResultEnvelope(value)
+                ValidateResultEnvelope(value, version)
                 Dim result As New System.Collections.Generic.List(Of Recommendation)()
                 Dim seen As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
                 For Each token As Newtonsoft.Json.Linq.JToken In DirectCast(value("recommendations"), Newtonsoft.Json.Linq.JArray)
-                    Dim item As Recommendation = Recommendation.FromJson(TryCast(token, Newtonsoft.Json.Linq.JObject))
+                    Dim item As Recommendation = Recommendation.FromJson(TryCast(token, Newtonsoft.Json.Linq.JObject), legacy:=(version = 2))
                     If Not seen.Add(item.Topic) Then Throw New System.IO.InvalidDataException("Duplicate stored coaching topic.")
                     result.Add(item)
                 Next
@@ -169,7 +204,9 @@ Namespace Agents
         End Class
 
         Public Shared Function Parse(raw As System.String, originalRequest As System.String,
-                                     logText As System.String, allowObservedEffects As System.Boolean) As Result
+                                     logText As System.String, allowObservedEffects As System.Boolean,
+                                     Optional allowOperationalAdvice As System.Boolean = False,
+                                     Optional alreadyCoveredActions As System.Collections.Generic.ISet(Of System.String) = Nothing) As Result
             Dim payload As Newtonsoft.Json.Linq.JObject = ParseJsonObject(raw)
             ValidateResultEnvelope(payload)
             Dim language As System.String = NormalizeLanguage(ReadString(payload, "language", False))
@@ -182,6 +219,20 @@ Namespace Agents
                 Dim candidate As Newtonsoft.Json.Linq.JObject = TryCast(token, Newtonsoft.Json.Linq.JObject)
                 If candidate Is Nothing Then Throw New System.IO.InvalidDataException("Coaching advice must be an object.")
                 Dim topic As System.String = ReadEnum(candidate, "topic", AllowedTopics)
+                Dim kind As System.String = ReadEnum(candidate, "kind", AllowedKinds)
+                Dim actionCode As System.String = ReadEnum(candidate, "action_code", AllowedActions)
+                If kind = "operational_next_step" Then
+                    ' A user-visible workaround is allowed only for an explicitly incomplete,
+                    ' host-confirmed delivery, with an action not already explained in its reply.
+                    If Not allowOperationalAdvice OrElse topic <> "recovery" OrElse actionCode = "none" OrElse
+                       IsAlreadyCoveredAction(actionCode, alreadyCoveredActions) Then
+                        notes.Add("suppressed_unavailable_or_duplicate_operational_action:" & topic)
+                        Continue For
+                    End If
+                ElseIf actionCode <> "none" OrElse topic = "recovery" Then
+                    notes.Add("suppressed_mismatched_coaching_kind:" & topic)
+                    Continue For
+                End If
                 Dim severity As System.String = ReadEnum(candidate, "severity", AllowedSeverities)
                 Dim impact As System.String = ReadEnum(candidate, "impact", AllowedImpacts)
                 Dim confidence As System.Int32 = ReadInteger(candidate, "confidence", 0, 100)
@@ -205,6 +256,10 @@ Namespace Agents
                         effect = "none"
                         notes.Add("effect_omitted_without_sufficient_runtime_evidence:" & topic)
                     End If
+                End If
+                If kind = "operational_next_step" AndAlso effect <> "tool_failure" Then
+                    notes.Add("suppressed_unproven_operational_issue:" & topic)
+                    Continue For
                 End If
                 Try
                     Dim item As Recommendation = Recommendation.Create(candidate, effect, False)
@@ -281,8 +336,9 @@ Namespace Agents
             End Try
         End Function
 
-        Private Shared Sub ValidateResultEnvelope(value As Newtonsoft.Json.Linq.JObject)
-            If value Is Nothing OrElse ReadInteger(value, "schema", CurrentSchema, CurrentSchema) <> CurrentSchema Then
+        Private Shared Sub ValidateResultEnvelope(value As Newtonsoft.Json.Linq.JObject,
+                                                  Optional expectedSchema As System.Int32 = CurrentSchema)
+            If value Is Nothing OrElse ReadInteger(value, "schema", expectedSchema, expectedSchema) <> expectedSchema Then
                 Throw New System.IO.InvalidDataException("Unsupported coaching result schema.")
             End If
             Dim items As Newtonsoft.Json.Linq.JArray = TryCast(value("recommendations"), Newtonsoft.Json.Linq.JArray)
@@ -401,6 +457,19 @@ Namespace Agents
             End Select
         End Function
 
+        Private Shared Function OperationalLabels(language As System.String) As System.String()
+            Select Case NormalizeLanguage(language)
+                Case "de"
+                    Return {"Ein zusätzlicher Hinweis nach einem unvollständigen Inky-Lauf", "Ihr ursprünglicher Auftrag", "Was den Lauf beeinträchtigt hat", "Weshalb dies helfen könnte", "Eine mögliche nächste Handlung", "Der Hinweis beschreibt eine Möglichkeit und keinen Fehler in Ihrer Anfrage."}
+                Case "fr"
+                    Return {"Une piste supplémentaire après une exécution Inky incomplète", "Votre demande", "Ce qui a affecté l'exécution", "Pourquoi cela pourrait aider", "Une prochaine étape possible", "Cette piste ne signifie pas que votre demande était incorrecte."}
+                Case "it"
+                    Return {"Un suggerimento aggiuntivo dopo un'esecuzione Inky incompleta", "La richiesta originale", "Cosa ha ostacolato l'esecuzione", "Perché potrebbe essere utile", "Un possibile passo successivo", "Il suggerimento non implica un errore nella richiesta."}
+                Case Else
+                    Return {"An additional suggestion after an incomplete Inky run", "Your original request", "What affected the run", "Why this might help", "A possible next step", "This suggestion does not imply that your request was incorrect."}
+            End Select
+        End Function
+
         Private Shared Function H(value As System.String) As System.String
             Dim encoded As System.String = System.Net.WebUtility.HtmlEncode(If(value, System.String.Empty))
             Return encoded.Replace(Microsoft.VisualBasic.vbCrLf, Microsoft.VisualBasic.vbLf).Replace(Microsoft.VisualBasic.vbCr, Microsoft.VisualBasic.vbLf).Replace(Microsoft.VisualBasic.vbLf, "<br/>")
@@ -416,20 +485,26 @@ Namespace Agents
             Dim text As System.String() = Labels(language)
             Dim body As New System.Text.StringBuilder()
             body.Append("<div style='font-family:Arial,sans-serif;font-size:11pt;line-height:1.45;color:#222222;'>")
-            body.Append("<h1 style='font-size:17pt;margin:0 0 12px 0;'>").Append(H(If(isDaily, text(1), text(0)))).Append("</h1>")
+            Dim containsOperational As System.Boolean = items.Exists(Function(item) item.Kind = "operational_next_step")
+            body.Append("<h1 style='font-size:17pt;margin:0 0 12px 0;'>").Append(H(If(containsOperational AndAlso Not isDaily, OperationalLabels(language)(0), If(isDaily, text(1), text(0))))).Append("</h1>")
             If isDaily AndAlso Not System.String.IsNullOrWhiteSpace(dateLabel) Then body.Append("<p style='color:#666666;'>").Append(H(CheckedText(dateLabel, 1, 60))).Append("</p>")
-            body.Append("<p>").Append(H(text(2))).Append("</p>")
+            Dim operational As System.Boolean = items.Exists(Function(item) item.Kind = "operational_next_step")
+            Dim operatingText As System.String() = OperationalLabels(language)
+            body.Append("<p>").Append(H(If(operational, operatingText(5), text(2)))).Append("</p>")
             For Each item As Recommendation In items
                 body.Append("<table role='presentation' cellpadding='0' cellspacing='0' width='100%' style='margin:18px 0;border:1px solid #dddddd;'><tr><td style='padding:16px;'>")
                 body.Append("<h2 style='font-size:13pt;margin:0 0 12px 0;'>").Append(H(item.Title)).Append("</h2>")
-                AppendHtmlSection(body, text(3), item.RequestExcerpt, True)
-                AppendHtmlSection(body, text(4), item.Explanation, False)
-                AppendHtmlSection(body, text(5), item.WhyItHelps, False)
-                AppendHtmlSection(body, text(6), item.ImprovedRequest, True)
-                If item.ObservedEffect <> "none" Then AppendHtmlSection(body, text(7), item.EffectExplanation & System.Environment.NewLine & text(8), False)
+                Dim labelsForItem As System.String() = If(item.Kind = "operational_next_step", operatingText, Nothing)
+                AppendHtmlSection(body, If(labelsForItem Is Nothing, text(3), labelsForItem(1)), item.RequestExcerpt, True)
+                AppendHtmlSection(body, If(labelsForItem Is Nothing, text(4), labelsForItem(2)), item.Explanation, False)
+                AppendHtmlSection(body, If(labelsForItem Is Nothing, text(5), labelsForItem(3)), item.WhyItHelps, False)
+                AppendHtmlSection(body, If(labelsForItem Is Nothing, text(6), labelsForItem(4)), item.ImprovedRequest, True)
+                If item.ObservedEffect <> "none" AndAlso item.Kind <> "operational_next_step" Then
+                    AppendHtmlSection(body, text(7), item.EffectExplanation & System.Environment.NewLine & text(8), False)
+                End If
                 body.Append("</td></tr></table>")
             Next
-            body.Append("<p>").Append(H(text(19))).Append("</p>")
+            If Not operational Then body.Append("<p>").Append(H(text(19))).Append("</p>")
             body.Append("<div style='border-top:1px solid #dddddd;margin-top:24px;padding-top:12px;font-size:9pt;line-height:1.4;color:#666666;'>")
             body.Append("<p style='font-size:9pt;'>").Append(H(text(9))).Append("</p>")
             Dim commands As System.String() = ControlCommands()
@@ -462,18 +537,24 @@ Namespace Agents
             If items.Count = 0 Then Return System.String.Empty
             Dim text As System.String() = Labels(language)
             Dim body As New System.Text.StringBuilder()
-            body.AppendLine(If(isDaily, text(1), text(0)))
+            Dim operational As System.Boolean = items.Exists(Function(item) item.Kind = "operational_next_step")
+            Dim operationalText As System.String() = OperationalLabels(language)
+            body.AppendLine(If(operational AndAlso Not isDaily, operationalText(0), If(isDaily, text(1), text(0))))
             If isDaily AndAlso Not System.String.IsNullOrWhiteSpace(dateLabel) Then body.AppendLine(CheckedText(dateLabel, 1, 60))
-            body.AppendLine(text(2))
+            body.AppendLine(If(operational, operationalText(5), text(2)))
             For Each item As Recommendation In items
+                Dim itemLabels As System.String() = If(item.Kind = "operational_next_step", operationalText, Nothing)
                 body.AppendLine().AppendLine(item.Title)
-                body.AppendLine(text(3) & ": " & item.RequestExcerpt)
-                body.AppendLine(text(4) & ": " & item.Explanation)
-                body.AppendLine(text(5) & ": " & item.WhyItHelps)
-                body.AppendLine(text(6) & ": " & item.ImprovedRequest)
-                If item.ObservedEffect <> "none" Then body.AppendLine(text(7) & ": " & item.EffectExplanation & " " & text(8))
+                body.AppendLine(If(itemLabels Is Nothing, text(3), itemLabels(1)) & ": " & item.RequestExcerpt)
+                body.AppendLine(If(itemLabels Is Nothing, text(4), itemLabels(2)) & ": " & item.Explanation)
+                body.AppendLine(If(itemLabels Is Nothing, text(5), itemLabels(3)) & ": " & item.WhyItHelps)
+                body.AppendLine(If(itemLabels Is Nothing, text(6), itemLabels(4)) & ": " & item.ImprovedRequest)
+                If item.ObservedEffect <> "none" AndAlso item.Kind <> "operational_next_step" Then
+                    body.AppendLine(text(7) & ": " & item.EffectExplanation & " " & text(8))
+                End If
             Next
-            body.AppendLine().AppendLine(text(19)).AppendLine().AppendLine(text(9))
+            If Not operational Then body.AppendLine().AppendLine(text(19))
+            body.AppendLine().AppendLine(text(9))
             Dim commands As System.String() = ControlCommands()
             For index As System.Int32 = 0 To commands.Length - 1
                 body.AppendLine(text(10 + index) & ": INKY_TIPS " & commands(index))

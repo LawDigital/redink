@@ -291,6 +291,7 @@ Partial Public Class ThisAddIn
                    userText, otherPrompt, fullPromptOverride, workflowId, resumeWorkflowFromCheckpoint))
         Dim toolingLogScope As System.IDisposable =
             ToolingFileLogger.BeginSessionScope(originalRequestForLog)
+        Dim pythonRun As New SharedLibrary.Agents.PythonAgentRunScope()
         ' Cover setup before the central loop Try as well as every return/exception.
         ' Existing explicit completion paths are idempotent within this lease.
         Try
@@ -451,6 +452,8 @@ Partial Public Class ThisAddIn
                 context.SequencingState.RegisteredDeliverableArtifacts =
                     parentToolingContext.SequencingState.RegisteredDeliverableArtifacts
             End If
+
+            context.SequencingState.HostOutputPublications = parentToolingContext.SequencingState.HostOutputPublications
 
             ' ExpectedDeliverableSlots is intentionally NOT shared with nested runs.
             ' Expected output completeness is scoped to the current tooling run,
@@ -900,6 +903,8 @@ Partial Public Class ThisAddIn
             Dim bootstrapDecision As SharedLibrary.Agents.ToolingBootstrapPreflight.Decision = Nothing
 
             If Not subAgentMode Then
+                context.SequencingState.InitializeOutputContractInputs(
+                    Global.SharedLibrary.Agents.ToolingOutputContract.CaptureInputNames(Global.SharedLibrary.Agents.PathPolicy.SessionStagingRoot))
                 Dim bootstrapAttempt As Integer = 0
                 Do
                     bootstrapAttempt += 1
@@ -1891,6 +1896,22 @@ Partial Public Class ThisAddIn
                             End If
                         End If
 
+                        Dim repairBindingError As System.String = System.String.Empty
+                        If context.SequencingState IsNot Nothing AndAlso
+                           Not context.SequencingState.TryBindRepairAttempt(tc.ToolName, tc.Arguments, tc.CallId, recoveryScopeKey, repairBindingError,
+                               SharedLibrary.Agents.ExplicitOperationToolContract.SupportsRepairReference(toolConfig)) Then
+                            AddToolResponseToHistory(context, New ToolResponse With {
+                                .CallId = tc.CallId, .ToolName = tc.ToolName, .Success = False,
+                                .ErrorCode = repairBindingError, .ErrorMessage = "The repair reference does not identify an eligible failed step. No tool ran.",
+                                .Response = Newtonsoft.Json.JsonConvert.SerializeObject(New With {.error = repairBindingError}), .ResultKind = "error"})
+                            context.PendingContinuationGuardPrompt = "Correct repair_of_failure from the host's current failure reference. Keep the original tool, step and output target. Never use a repair link for unrelated work."
+                            context.PendingGuardTitle = "HOST REPAIR REFERENCE"
+                            context.PendingRejectedAssistantTurn = If(currentResponse, System.String.Empty)
+                            stopCurrentBatchAfterTool = True
+                            Exit For
+                        End If
+                        auditRecoveryScopeKey = recoveryScopeKey
+
                         Dim toolArgumentValidationError As String = ""
 
                         If Not TryValidateToolCallArguments(tc, toolConfig, toolArgumentValidationError) Then
@@ -1907,7 +1928,9 @@ Partial Public Class ThisAddIn
                                     recoveryScopeKey:=recoveryScopeKey,
                                     allowRetryScopeRebinding:=True,
                                     retryCorrelationArguments:=tc.Arguments,
-                                    retryCorrelationAllowedArgumentNames:=GetToolParameterSchemas(toolConfig).Keys)
+                                    retryCorrelationAllowedArgumentNames:=GetToolParameterSchemas(toolConfig).Keys,
+                                    retryCorrelationRequiredArgumentNames:=GetToolRequiredParameters(toolConfig),
+                                    retryCorrelationDisallowsAdditionalArguments:=ToolSchemaDisallowsAdditionalProperties(toolConfig))
                             End If
 
                             context.PendingContinuationGuardPrompt =
@@ -2445,7 +2468,8 @@ Partial Public Class ThisAddIn
                                     legacyCompatibilityRoots)
 
                             Dim executionToolCall As ToolCall = tc
-                            If SharedLibrary.Agents.ExplicitOperationToolContract.HasCapability(toolConfig) Then
+                            If SharedLibrary.Agents.ExplicitOperationToolContract.HasCapability(toolConfig) OrElse
+                               (tc.Arguments IsNot Nothing AndAlso tc.Arguments.ContainsKey("repair_of_failure")) Then
                                 executionToolCall = New ToolCall() With {
                                     .CallId = tc.CallId,
                                     .ToolName = tc.ToolName,
@@ -2539,6 +2563,8 @@ Partial Public Class ThisAddIn
                                         System.StringComparison.OrdinalIgnoreCase) OrElse
                                     tc.ToolName.StartsWith("skill_", System.StringComparison.OrdinalIgnoreCase)) Then
 
+                                    If Not subAgentMode Then context.SequencingState.RequireWorkflowOutputReview()
+
                                     context.SequencingState.ApplyRequiredEffectsToExpectedDeliverables(
                                         SharedLibrary.Agents.SkillInvokeTool.GetDeclaredDeliverableRequiredEffectsFromResponse(
                                             toolResponse.Response))
@@ -2570,18 +2596,21 @@ Partial Public Class ThisAddIn
                                 ' declared outputs into the Word host's preferred writable root before the
                                 ' bounded delta is evaluated. The path remains legacy telemetry only; no
                                 ' opaque identity or Final state is inferred from it.
-                                legacyNormalizedExcludedPaths =
-                                    WordNormalizeDeclaredLegacyOutputsToPreferredRoot(
-                                        tc.ToolName,
-                                        toolResponse.Response,
-                                        context.SequencingState)
+                                If toolResponse.HostPublishedOutputPaths Is Nothing Then
+                                    legacyNormalizedExcludedPaths =
+                                        WordNormalizeDeclaredLegacyOutputsToPreferredRoot(
+                                            tc.ToolName,
+                                            toolResponse.Response,
+                                            context.SequencingState)
+                                End If
 
                                 SharedLibrary.Agents.ArtifactDelivery.RegisterLegacyCompatibilityFileDelta(
                                     context.SequencingState,
                                     tc.ToolName,
                                     legacyCompatibilityRoots,
                                     legacyCompatibilitySnapshot,
-                                    excludedPaths:=legacyNormalizedExcludedPaths)
+                                    excludedPaths:=legacyNormalizedExcludedPaths,
+                                    hostPublishedOutputPaths:=toolResponse.HostPublishedOutputPaths)
                             End If
                         End If
                         If toolResponse IsNot Nothing AndAlso
@@ -2643,6 +2672,12 @@ Partial Public Class ThisAddIn
                                                     retryCorrelationArguments:=tc.Arguments,
                                                     rejectedBeforeExecution:=toolResponse.RejectedBeforeExecution,
                                                     serviceErrorDetails:=toolResponse.ServiceErrorDetails)
+
+                                    Dim repairHint As System.String = context.SequencingState.BuildRepairReferenceHint(tc.ToolName, recoveryScopeKey)
+                                    If repairHint.Length > 0 Then
+                                        toolResponse.ErrorMessage &= repairHint
+                                        context.Log(repairHint, "diag")
+                                    End If
 
                                     If toolResponse.AllowCrossScopeAlternativeRecovery AndAlso
                                        Not recoverableSubAgentTaskFailure AndAlso
@@ -2882,7 +2917,7 @@ Partial Public Class ThisAddIn
                                 context.SequencingState.NoteToolFailure(
                                     tc.ToolName,
                                     "repeated_identical_tool_execution",
-                                    "The same successful tool execution repeated without progress and the host circuit breaker terminated the run.",
+                                    "The same tool call returned the same outcome repeatedly without progress and the host circuit breaker terminated the run.",
                                     terminal:=True,
                                     recoveryScopeKey:=recoveryScopeKey)
                                 context.SequencingState.FinalResponseOrigin = "host_generated"
@@ -3501,6 +3536,12 @@ Partial Public Class ThisAddIn
                                 context.SequencingState.FinalResponseOrigin = "model_provided"
                             End If
 
+                            ' Preserve optional control metadata before user-facing egress removes the footer.
+                            ' Delivery is decided only by an opting-in host after the final run verdict.
+                            If context.SequencingState IsNot Nothing Then
+                                context.SequencingState.FinalDeliveryDirective =
+                                    Global.SharedLibrary.Agents.ToolingDeliveryContract.ParseFinalDirective(currentResponse)
+                            End If
                             currentResponse = StripTaskStatus(currentResponse)
                             acceptedFinalStatus = "complete"
                             context.Log("Final complete response accepted.")
@@ -3669,7 +3710,8 @@ Partial Public Class ThisAddIn
                                         SharedLibrary.Agents.ToolCallSequencing.BuildRequiredMemoryGroundingRepairPrompt(context.SequencingState),
                                         SharedLibrary.Agents.ToolCallSequencing.BuildActiveToolingRepairPrompt(
                                             context.SequencingState,
-                                            turnValidation.InvalidReason))
+                                            turnValidation.InvalidReason,
+                                            turnValidation))
                                 If SharedLibrary.Agents.ToolCallSequencing.TryBeginFooterOnlyRepair(
                                     context.SequencingState, currentResponse, turnValidation.InvalidReason) Then
                                     context.PendingContinuationGuardPrompt = SharedLibrary.Agents.ToolCallSequencing.BuildFooterOnlyRepairPrompt()
@@ -3688,7 +3730,7 @@ Partial Public Class ThisAddIn
                                         "Your previous turn was rejected because it violated the active-tooling response contract.")
 
                                 context.LogWarn(
-                                    $"Invalid active-tooling turn rejected; {SharedLibrary.Agents.ToolCallSequencing.BuildFinalizationDiagnostic(context.SequencingState, If(turnValidation.InvalidReason, "invalid_turn"))}; repairAttempt={context.PrematureTextRetryCount}/{ToolExecutionContext.MaxContinuationRetries}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}; lastSuccessfulTool={If(context.SequencingState?.LastSuccessfulToolCall, "")}; unresolvedToolFailure={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure, "true", "false")}; host={context.HostKind}")
+                                    $"Invalid active-tooling turn rejected; {SharedLibrary.Agents.ToolCallSequencing.BuildFinalizationDiagnostic(context.SequencingState, If(turnValidation.InvalidReason, "invalid_turn"), turnValidation)}; repairAttempt={context.PrematureTextRetryCount}/{ToolExecutionContext.MaxContinuationRetries}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}; lastSuccessfulTool={If(context.SequencingState?.LastSuccessfulToolCall, "")}; unresolvedToolFailure={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure, "true", "false")}; host={context.HostKind}")
 
                                 Continue While
                             End If
@@ -3713,7 +3755,7 @@ Partial Public Class ThisAddIn
                             End If
 
                             context.LogWarn(
-                                $"Active-tooling repair exhausted; returning host-generated blocked message. {SharedLibrary.Agents.ToolCallSequencing.BuildFinalizationDiagnostic(context.SequencingState, If(turnValidation.InvalidReason, "invalid_turn"))}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}; unresolvedToolFailure={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure, "true", "false")}; host={context.HostKind}")
+                                $"Active-tooling repair exhausted; returning host-generated blocked message. {SharedLibrary.Agents.ToolCallSequencing.BuildFinalizationDiagnostic(context.SequencingState, If(turnValidation.InvalidReason, "invalid_turn"), turnValidation, verifyLegacySlots:=True)}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}; unresolvedToolFailure={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure, "true", "false")}; host={context.HostKind}")
 
                             Exit While
                     End Select
@@ -3806,6 +3848,10 @@ Partial Public Class ThisAddIn
 
                         Select Case forcedValidation.TurnKind
                             Case SharedLibrary.Agents.ToolCallSequencing.ActiveToolingTurnKind.FinalCompleteTurn
+                                If context.SequencingState IsNot Nothing Then
+                                    context.SequencingState.FinalDeliveryDirective =
+                                        Global.SharedLibrary.Agents.ToolingDeliveryContract.ParseFinalDirective(currentResponse)
+                                End If
                                 acceptedFinalStatus = "complete"
 
                                 If context.SequencingState IsNot Nothing Then
@@ -4331,6 +4377,16 @@ Partial Public Class ThisAddIn
                 End Try
             End If
 
+            ' Optional delivery metadata is valid only for this run's final accepted complete verdict.
+            ' A late failure, cancellation, raw response or blocked fallback must discard it.
+            If Not subAgentMode AndAlso context IsNot Nothing AndAlso context.SequencingState IsNot Nothing Then
+                If context.IsCancelled OrElse cancellationToken.IsCancellationRequested OrElse
+                   context.FinalizationBlocked OrElse context.EmptyMainModelResponse OrElse
+                   Not System.String.Equals(acceptedFinalStatus, "complete", System.StringComparison.OrdinalIgnoreCase) Then
+                    context.SequencingState.FinalDeliveryDirective = Nothing
+                End If
+            End If
+
             If workflowScope IsNot Nothing Then
                 workflowScope.Dispose()
                 workflowScope = Nothing
@@ -4420,6 +4476,7 @@ Partial Public Class ThisAddIn
             ToolingFileLogger.EndSession(False, "Tooling invocation failed.", ex:=toolingScopeError)
             Throw
         Finally
+            pythonRun.Dispose()
             toolingLogScope.Dispose()
         End Try
     End Function
@@ -7330,6 +7387,7 @@ Partial Public Class ThisAddIn
             Dim normalized As New JObject()
 
             For Each key In arguments.Keys.OrderBy(Function(k) k, StringComparer.OrdinalIgnoreCase)
+                If System.String.Equals(key, "repair_of_failure", System.StringComparison.OrdinalIgnoreCase) Then Continue For
                 Dim value = arguments(key)
 
                 If TypeOf value Is JToken Then

@@ -116,6 +116,10 @@ Partial Public Class ThisAddIn
         ''' </summary>
         Public Property VerifiedArtifactEffects As System.Collections.Generic.List(Of System.String)
 
+        ' Optional host publication receipt. Nothing permits legacy delta discovery;
+        ' an empty receipt is authoritative evidence that no output was published.
+        Friend Property HostPublishedOutputPaths As System.Collections.Generic.IReadOnlyCollection(Of System.String)
+
         ''' <summary>
         ''' Initializes a new tool response instance with default success state.
         ''' </summary>

@@ -587,7 +587,8 @@ Public Class Ribbon1
         ByVal simpleMode As Boolean
     )
 
-        Dim names As String() = SplitRibbonControlNames(controlNames)
+        Dim names As String() = SplitRibbonControlNames(
+            controlNames & ";" & SharedLibrary.SharedLibrary.SharedMethods.SIMPLEMENU_HELPER_CONTROLS)
         Dim blockedNames As String() = SplitRibbonControlNames(blockedControlNames)
 
         If names.Length = 0 AndAlso blockedNames.Length = 0 Then

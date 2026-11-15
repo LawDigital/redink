@@ -91,7 +91,13 @@ Partial Public Class ThisAddIn
                                             Optional Silent As Boolean = False,
                                             Optional DoOCR As Boolean = False,
                                             Optional AskUser As Boolean = True,
-                                            Optional AskWorksheetSelection As Boolean = False) As Task(Of FileReadResult)
+                                            Optional AskWorksheetSelection As Boolean = False,
+                                            Optional OcrAdditionalInstruction As System.String = Nothing,
+                                            Optional ShowOCRProgress As System.Boolean = False,
+                                            Optional ReturnMarkdown As System.Boolean = False,
+                                            Optional OcrCleanupMode As OcrMarkdownCleanupMode = OcrMarkdownCleanupMode.None,
+                                            Optional OcrBatchPages As System.Int32 = -1,
+                                            Optional MarkdownPreparation As PdfMarkdownPreparationOptions = Nothing) As System.Threading.Tasks.Task(Of FileReadResult)
         Dim result As New FileReadResult()
         Dim filePath As String = ""
 
@@ -136,7 +142,7 @@ Partial Public Class ThisAddIn
                             FromFile = "Error: File type not supported (disabled for security)."
                         End If
                     Case ".docx"
-                        FromFile = ReadDocxSandboxed(filePath)
+                        FromFile = ReadDocxSandboxed(filePath, ReturnMarkdown)
                     Case ".xlsx"
                         FromFile = ReadXlsxSandboxed(filePath, Silent, AskWorksheetSelection)
                         If String.Equals(FromFile, XlsxSelectionCancelledMarker, StringComparison.Ordinal) Then
@@ -147,7 +153,14 @@ Partial Public Class ThisAddIn
                     Case ".pptx"
                         FromFile = ReadPptxSandboxed(filePath)
                     Case ".pdf"
-                        Dim pdfResult = Await ReadPdfAsTextEx(filePath, True, DoOCR, AskUser, _context)
+                        Dim pdfResult = Await ReadPdfAsTextEx(filePath, True, DoOCR, AskUser, _context,
+                            OcrAdditionalInstruction, ShowOCRProgress, ReturnMarkdown,
+                            OcrBatchPages:=OcrBatchPages, OcrCleanupMode:=OcrCleanupMode,
+                            MarkdownPreparation:=MarkdownPreparation)
+                        result.OcrCleanupRawContent = pdfResult.OcrCleanupRawContent
+                        result.OcrCleanupReport = pdfResult.OcrCleanupReport
+                        result.MarkdownPreparationSkipped = pdfResult.MarkdownPreparationSkipped
+                        result.ExtractionWarnings = Global.SharedLibrary.Agents.TextExtractionDiagnostics.CopyWarnings(pdfResult.ExtractionWarnings)
                         FromFile = pdfResult.Content
                         result.PdfMayBeIncomplete = pdfResult.OcrWasSkippedDueToHeuristics
                     Case ".eml"
@@ -184,6 +197,8 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
+        Catch ex As System.OperationCanceledException When ShowOCRProgress OrElse ReturnMarkdown OrElse MarkdownPreparation IsNot Nothing
+            Throw
         Catch ex As System.Exception
             If Not Silent Then ShowCustomMessageBox($"An error occurred reading the file '{filePath}': {ex.Message}")
             result.Content = ""

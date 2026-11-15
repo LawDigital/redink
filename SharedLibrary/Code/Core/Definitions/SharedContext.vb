@@ -126,6 +126,7 @@ Namespace SharedLibrary
             Property INI_RestrictedModelAccessCode As String
             Property INI_DoMarkupOutlook As Boolean
             Property INI_DoMarkupWord As Boolean
+            Property INI_WordCommentSelectionTracking As System.Boolean
             Property INI_ChunkOCR As Integer
             Property INI_RoastMe As Boolean
             Property INI_SimpleMenuOverride As Boolean
@@ -153,6 +154,8 @@ Namespace SharedLibrary
             Property INI_DiscussInkyPathLocal As String
             Property INI_ExtractorPath As String
             Property INI_ExtractorPathLocal As String
+            Property INI_TabularReviewPath As System.String
+            Property INI_TabularReviewPathLocal As System.String
             Property INI_RenameLibPath As String
             Property INI_RenameLibPathLocal As String
 
@@ -554,6 +557,7 @@ Namespace SharedLibrary
         Public Property INI_RestrictedModelAccessCode As String Implements ISharedContext.INI_RestrictedModelAccessCode
         Public Property INI_DoMarkupOutlook As Boolean Implements ISharedContext.INI_DoMarkupOutlook
         Public Property INI_DoMarkupWord As Boolean Implements ISharedContext.INI_DoMarkupWord
+        Public Property INI_WordCommentSelectionTracking As System.Boolean Implements ISharedContext.INI_WordCommentSelectionTracking
         Public Property INI_ChunkOCR As Integer Implements ISharedContext.INI_ChunkOCR
         Public Property INI_RoastMe As Boolean Implements ISharedContext.INI_RoastMe
         Public Property INI_SimpleMenuOverride As Boolean Implements ISharedContext.INI_SimpleMenuOverride
@@ -581,6 +585,8 @@ Namespace SharedLibrary
         Public Property INI_DiscussInkyPathLocal As String Implements ISharedContext.INI_DiscussInkyPathLocal
         Public Property INI_ExtractorPath As String Implements ISharedContext.INI_ExtractorPath
         Public Property INI_ExtractorPathLocal As String Implements ISharedContext.INI_ExtractorPathLocal
+        Public Property INI_TabularReviewPath As System.String Implements ISharedContext.INI_TabularReviewPath
+        Public Property INI_TabularReviewPathLocal As System.String Implements ISharedContext.INI_TabularReviewPathLocal
         Public Property INI_RenameLibPath As String Implements ISharedContext.INI_RenameLibPath
         Public Property INI_RenameLibPathLocal As String Implements ISharedContext.INI_RenameLibPathLocal
         Public Property INI_DataCollectorPath As String Implements ISharedContext.INI_DataCollectorPath

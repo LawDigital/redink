@@ -521,6 +521,7 @@ Partial Class Ribbon2
         Me.RI_SemanticArchives = Me.Factory.CreateRibbonButton
         Me.RI_KnowledgeStores = Me.Factory.CreateRibbonButton
         Me.RI_ScanInbox = Me.Factory.CreateRibbonButton
+        Me.RI_BatchAgentJob = Me.Factory.CreateRibbonButton
         Me.RI_SchedulerDashboard = Me.Factory.CreateRibbonButton
         Me.RI_PSTExport = Me.Factory.CreateRibbonButton
         Me.RI_AutoPilot = Me.Factory.CreateRibbonButton
@@ -782,6 +783,7 @@ Partial Class Ribbon2
         Me.SearchTools.Items.Add(Me.RI_KnowledgeStores)
         Me.SearchTools.Items.Add(Me.RI_SchedulerDashboard)
         Me.SearchTools.Items.Add(Me.RI_ScanInbox)
+        Me.SearchTools.Items.Add(Me.RI_BatchAgentJob)
         Me.SearchTools.Items.Add(Me.RI_PSTExport)
         Me.SearchTools.Label = "Expert Tools"
         Me.SearchTools.Name = "SearchTools"
@@ -809,6 +811,14 @@ Partial Class Ribbon2
         Me.RI_ScanInbox.OfficeImageId = "FileOpen"
         Me.RI_ScanInbox.ScreenTip = "Manage the AutoPilot scan register, routing and delivery status."
         Me.RI_ScanInbox.ShowImage = True
+        '
+        'RI_BatchAgentJob
+        '
+        Me.RI_BatchAgentJob.Label = "Batch Agent Job"
+        Me.RI_BatchAgentJob.Name = "RI_BatchAgentJob"
+        Me.RI_BatchAgentJob.OfficeImageId = "FileOpen"
+        Me.RI_BatchAgentJob.ScreenTip = "Run one agent instruction over a folder, with verified continuation and retry checkpoints."
+        Me.RI_BatchAgentJob.ShowImage = True
         'RI_SchedulerDashboard
         '
         Me.RI_SchedulerDashboard.Label = "Scheduler Dashboard"
@@ -1000,6 +1010,7 @@ Partial Class Ribbon2
     Friend WithEvents RI_SemanticArchives As Microsoft.Office.Tools.Ribbon.RibbonButton
     Friend WithEvents RI_KnowledgeStores As RibbonButton
     Friend WithEvents RI_ScanInbox As Microsoft.Office.Tools.Ribbon.RibbonButton
+    Friend WithEvents RI_BatchAgentJob As Microsoft.Office.Tools.Ribbon.RibbonButton
     Friend WithEvents RI_SchedulerDashboard As RibbonButton
     Friend WithEvents RI_PSTExport As RibbonButton
     Friend WithEvents RI_AutoPilot As RibbonButton

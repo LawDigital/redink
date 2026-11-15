@@ -13,7 +13,7 @@
 '   agent, UI, transcription, and command behavior to the other ThisAddIn.* files.
 ' =============================================================================
 '
-' 2.11.2026
+' 15.11.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -72,7 +72,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.021126" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.151126" & SharedMethods.VersionQualifier
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
     Public Const AN5 As String = "RI" ' for bubble comments 
@@ -379,10 +379,6 @@ Partial Public Class ThisAddIn
     Public Shared SelectedToolNames As New List(Of String)()   ' Persisted list of selected tool names for tooling sessions.
 
 
-    Private Const Add_OcrMarkdownInstruction As String =
-            "Provide the output as Markdown. " &
-            "Use Markdown formatting where it helps preserve the original structure, including headings, lists, tables and other tabular content. " &
-            "Return only the Markdown content and no surrounding code fences."
 
 
 
@@ -464,7 +460,8 @@ Partial Public Class ThisAddIn
     Private mainThreadControl As New System.Windows.Forms.Control()
     Public StartupInitialized As Boolean = False
     Private _webView2StartupCleanupScheduled As Integer = 0
-    Private WithEvents wordApp As Word.Application
+    ' Selection events are explicitly bound only after the configuration decision.
+    Private wordApp As Microsoft.Office.Interop.Word.Application
 
     ' UI threading context and scheduler (captured at Startup)
     Private Shared _uiContext As SynchronizationContext
@@ -614,13 +611,34 @@ Partial Public Class ThisAddIn
         wordApp = Application
         Try
             If wordApp IsNot Nothing Then
-                AddHandler wordApp.WindowActivate, AddressOf WordApp_WindowActivate
-                AddHandler wordApp.DocumentOpen, AddressOf WordApp_DocumentOpen
-                AddHandler wordApp.NewDocument, AddressOf WordApp_NewDocument
-                AddHandler wordApp.ProtectedViewWindowOpen, AddressOf WordApp_ProtectedViewWindowOpen
-                AddHandler wordApp.ProtectedViewWindowBeforeEdit, AddressOf WordApp_ProtectedViewWindowBeforeEdit
-                AddHandler wordApp.ProtectedViewWindowActivate, AddressOf WordApp_ProtectedViewWindowActivate
-                AddHandler wordApp.DocumentChange, AddressOf WordApp_DocumentChange
+                RegisterWordStartupHandler("Startup.WindowActivate",
+                    Sub()
+                        AddHandler wordApp.WindowActivate, AddressOf WordApp_WindowActivate
+                    End Sub)
+                RegisterWordStartupHandler("Startup.DocumentOpen",
+                    Sub()
+                        AddHandler wordApp.DocumentOpen, AddressOf WordApp_DocumentOpen
+                    End Sub)
+                RegisterWordStartupHandler("Startup.NewDocument",
+                    Sub()
+                        AddHandler wordApp.NewDocument, AddressOf WordApp_NewDocument
+                    End Sub)
+                RegisterWordStartupHandler("Startup.ProtectedViewWindowOpen",
+                    Sub()
+                        AddHandler wordApp.ProtectedViewWindowOpen, AddressOf WordApp_ProtectedViewWindowOpen
+                    End Sub)
+                RegisterWordStartupHandler("Startup.ProtectedViewWindowBeforeEdit",
+                    Sub()
+                        AddHandler wordApp.ProtectedViewWindowBeforeEdit, AddressOf WordApp_ProtectedViewWindowBeforeEdit
+                    End Sub)
+                RegisterWordStartupHandler("Startup.ProtectedViewWindowActivate",
+                    Sub()
+                        AddHandler wordApp.ProtectedViewWindowActivate, AddressOf WordApp_ProtectedViewWindowActivate
+                    End Sub)
+                RegisterWordStartupHandler("Startup.DocumentChange",
+                    Sub()
+                        AddHandler wordApp.DocumentChange, AddressOf WordApp_DocumentChange
+                    End Sub)
             Else
                 mainThreadControl.BeginInvoke(CType(AddressOf DelayedStartupTasks, MethodInvoker))
                 StartupInitialized = True
@@ -629,6 +647,7 @@ Partial Public Class ThisAddIn
                 'Run everything on the Office UI thread
                 mainThreadControl.BeginInvoke(
                                             Sub()
+                                                If StartupInitialized Then Return
                                                 'Detach the one-shot startup hooks
                                                 RemoveStartupHandlers()          'sets StartupInitialized = True
                                                 DelayedStartupTasks()
@@ -639,18 +658,46 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
+    Private Sub RegisterWordStartupHandler(eventName As System.String, subscribe As System.Action)
+        If StartupInitialized OrElse _wordSelectionShutdown Then Return
+        SetWordEventSubscription(eventName, True, subscribe)
+        ' A startup callback can finish initialization during the COM AddHandler.
+        ' Complete cleanup now and skip the remaining one-shot registrations.
+        If StartupInitialized OrElse _wordSelectionShutdown Then RemoveStartupHandlers()
+    End Sub
+
     Private Sub RemoveStartupHandlers()
+        ' Mark startup first: COM unsubscription can deliver reentrant Word events.
         StartupInitialized = True
-        Try
-            RemoveHandler wordApp.WindowActivate, AddressOf WordApp_WindowActivate
-            RemoveHandler wordApp.DocumentOpen, AddressOf WordApp_DocumentOpen
-            RemoveHandler wordApp.NewDocument, AddressOf WordApp_NewDocument
-            RemoveHandler wordApp.ProtectedViewWindowOpen, AddressOf WordApp_ProtectedViewWindowOpen
-            RemoveHandler wordApp.ProtectedViewWindowBeforeEdit, AddressOf WordApp_ProtectedViewWindowBeforeEdit
-            RemoveHandler wordApp.ProtectedViewWindowActivate, AddressOf WordApp_ProtectedViewWindowActivate
-        Catch ex As System.Exception
-            ' Handle exceptions gracefully.
-        End Try
+        SetWordEventSubscription("Startup.WindowActivate", False,
+            Sub()
+                RemoveHandler wordApp.WindowActivate, AddressOf WordApp_WindowActivate
+            End Sub)
+        SetWordEventSubscription("Startup.DocumentOpen", False,
+            Sub()
+                RemoveHandler wordApp.DocumentOpen, AddressOf WordApp_DocumentOpen
+            End Sub)
+        SetWordEventSubscription("Startup.NewDocument", False,
+            Sub()
+                RemoveHandler wordApp.NewDocument, AddressOf WordApp_NewDocument
+            End Sub)
+        SetWordEventSubscription("Startup.ProtectedViewWindowOpen", False,
+            Sub()
+                RemoveHandler wordApp.ProtectedViewWindowOpen, AddressOf WordApp_ProtectedViewWindowOpen
+            End Sub)
+        SetWordEventSubscription("Startup.ProtectedViewWindowBeforeEdit", False,
+            Sub()
+                RemoveHandler wordApp.ProtectedViewWindowBeforeEdit, AddressOf WordApp_ProtectedViewWindowBeforeEdit
+            End Sub)
+        SetWordEventSubscription("Startup.ProtectedViewWindowActivate", False,
+            Sub()
+                RemoveHandler wordApp.ProtectedViewWindowActivate, AddressOf WordApp_ProtectedViewWindowActivate
+            End Sub)
+        SetWordEventSubscription("Startup.DocumentChange", False,
+            Sub()
+                RemoveHandler wordApp.DocumentChange, AddressOf WordApp_DocumentChange
+            End Sub)
+        LogWordSelectionTrackingStatus("StartupHandlersRemoved")
     End Sub
 
     Private Shared Function EnsureUIThread() As Global.SharedLibrary.SharedLibrary.OfficeUiThreadAwaitable
@@ -661,16 +708,19 @@ Partial Public Class ThisAddIn
 
 
     Private Sub WordApp_WindowActivate(ByVal Doc As Word.Document, ByVal Wn As Word.Window)
+        If StartupInitialized Then Return
         RemoveStartupHandlers()
         DelayedStartupTasks()
     End Sub
 
     Private Sub WordApp_DocumentOpen(doc As Word.Document)
+        If StartupInitialized Then Return
         RemoveStartupHandlers()
         DelayedStartupTasks()
     End Sub
 
     Private Sub WordApp_NewDocument(doc As Word.Document)
+        If StartupInitialized Then Return
         RemoveStartupHandlers()
         DelayedStartupTasks()
     End Sub
@@ -679,6 +729,7 @@ Partial Public Class ThisAddIn
     ' Fires when a file opens in Protected View.
     Private Sub WordApp_ProtectedViewWindowOpen(
             pvWin As Microsoft.Office.Interop.Word.ProtectedViewWindow)
+        If StartupInitialized Then Return
         RemoveStartupHandlers()
         DelayedStartupTasks()
     End Sub
@@ -687,6 +738,7 @@ Partial Public Class ThisAddIn
     Private Sub WordApp_ProtectedViewWindowBeforeEdit(
             pvWin As Microsoft.Office.Interop.Word.ProtectedViewWindow,
             ByRef Cancel As Boolean)
+        If StartupInitialized Then Return
         RemoveStartupHandlers()
         DelayedStartupTasks()
     End Sub
@@ -694,6 +746,7 @@ Partial Public Class ThisAddIn
     ' Fires when the Protected View window is activated.
     Private Sub WordApp_ProtectedViewWindowActivate(
             pvWin As Microsoft.Office.Interop.Word.ProtectedViewWindow)
+        If StartupInitialized Then Return
         RemoveStartupHandlers()
         DelayedStartupTasks()
     End Sub
@@ -859,6 +912,7 @@ Partial Public Class ThisAddIn
 
     Public Sub InitializeAddInFeatures(Optional startupTimings As System.Collections.Generic.List(Of String) = Nothing)
         MeasureWordStartupStep("InitializeConfig", Sub() InitializeConfig(True, True), startupTimings)
+        MeasureWordStartupStep("WordSelectionTracking.start", AddressOf StartWordSelectionTracking, startupTimings)
         MeasureWordStartupStep("ModelAndAgentWarmup.schedule", Sub() QueueModelAndAgentResourceWarmup(), startupTimings)
 
         ' Reconcile the persisted CrashLog switch with the INI parameter. Any change
@@ -967,6 +1021,7 @@ Partial Public Class ThisAddIn
         _context.InitialConfigFailed = False
         _context.RDV = "Word (" & Version & ")"
         SharedMethods.InitializeConfig(_context, FirstTime, Reload)
+        If _wordSelectionModeInitialized Then LogWordSelectionTrackingStatus("ConfigurationReload")
     End Sub
     Private Function INIValuesMissing() As Boolean
         Return SharedMethods.INIValuesMissing(_context)

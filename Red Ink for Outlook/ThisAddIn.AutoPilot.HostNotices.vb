@@ -1,4 +1,4 @@
-﻿' Part of "Red Ink for Outlook"
+' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
@@ -117,6 +117,41 @@ Partial Public Class ThisAddIn
             attachments)
         Dim snapshot As New System.Collections.Generic.List(Of AutoPilotHostNotice) From {notice}
         Return snapshot.AsReadOnly()
+    End Function
+
+    ''' <summary>Only explicit source-file references justify stopping before an agent run.</summary>
+    Private Shared Function AutoPilotRequestClearlyReferencesMissingAttachment(
+            subject As System.String, body As System.String) As System.Boolean
+        ' This is intentionally conservative: mentioning a file type or asking to create
+        ' an attachment does not mean that the user forgot to attach source material.
+        Dim requestText As System.String = (If(subject, System.String.Empty) & System.Environment.NewLine &
+                                            If(body, System.String.Empty))
+        If requestText.Length > 16000 Then requestText = requestText.Substring(0, 16000)
+        Return System.Text.RegularExpressions.Regex.IsMatch(
+            requestText,
+            "(?i)(?:\b(?:im|siehe|gemäss|gemäß)\s+(?:beigefügten\s+)?anhang\b|\b(?:beiliegende[nrs]?|angehängte[nrs]?|beigefügte[nrs]?)\s+(?:datei|dokument|pdf|tabelle)\b|\b(?:see|in|from|review|analyse|analyze|process|summarize)\s+(?:the\s+)?(?:attached|enclosed)\s+(?:file|document|spreadsheet|pdf)\b|\b(?:attached|enclosed)\s+(?:file|document|spreadsheet|pdf)\b|\bpi[eè]ce\s+jointe\b|\ballegat[oa]\b)",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant,
+            System.TimeSpan.FromSeconds(1))
+    End Function
+
+    ''' <summary>Direct host notice: no tools, no analysis mail, no judgement on the request.</summary>
+    Private Async Function BuildAutoPilotMissingAttachmentReplyAsync(
+            subject As System.String, body As System.String,
+            ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of System.String)
+        Const english As System.String = "Your message refers to an attached source file, but I did not receive one that I can process. Please attach the file and resend your request. If you meant a file already stored in your Inky workspace, identify that source instead. No processing of the referenced file has started."
+        Try
+            Dim language As System.String = Await ResolveToolingUserLanguageAsync(
+                If(body, System.String.Empty), If(subject, System.String.Empty),
+                System.String.Empty, _apUseSecondApi, True, ct)
+            If System.String.IsNullOrWhiteSpace(language) Then Throw New System.IO.InvalidDataException("Missing input notice language was not resolved.")
+            Return Await LocalizeHostMessageIfNeededAsync(
+                english, language, _apUseSecondApi, True, ct, strictTranslation:=True)
+        Catch ex As System.OperationCanceledException
+            Throw
+        Catch ex As System.Exception
+            ApDashboardLog("Missing source attachment notice could not be localized; English host fallback: " & ex.GetType().Name, "warn")
+            Return "This automatic notice could not be translated; it is shown in English." & System.Environment.NewLine & System.Environment.NewLine & english
+        End Try
     End Function
 
     ' Verify model-translated templates without trying to infer/guess the language.

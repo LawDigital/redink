@@ -136,8 +136,9 @@ Namespace Agents
         End Property
 
         ''' <summary>
-        ''' When enabled, path resolution is limited strictly to the active workspace root.
-        ''' Desktop fallback and skill roots are ignored.
+        ''' When enabled, writes are limited to the active workspace/staging roots and
+        ''' explicitly registered extra roots. Reads may additionally use host-authorized
+        ''' read-only roots and discovered skill directories; Desktop fallback is disabled.
         ''' </summary>
         Public Shared Property RestrictToWorkspaceRootOnly As Boolean
             Get
@@ -149,6 +150,9 @@ Namespace Agents
         End Property
 
         Private Shared _strictExtraRoots As String() = Nothing
+        ' Host-owned read permissions are kept separate from the strict read/write roots.
+        ' Only an isolated scope may grant them, and its lifetime must hold AgentGate.
+        Private Shared _strictReadOnlyRoots As System.String() = Nothing
 
         ''' <summary>
         ''' Registers additional roots that are also permitted (read and write) while
@@ -199,6 +203,70 @@ Namespace Agents
                 Return _sessionStagingRoot
             End Get
         End Property
+
+        ' Caller must hold AgentGate for the complete lifetime. Preserve every permission,
+        ' shared workspace state and extra root across isolated host jobs. The optional
+        ' roots are read-only input resources; they never become workspace write roots.
+        Public Shared Function BeginIsolatedWorkspaceScope(root As System.String,
+                                                            Optional readOnlyRoots As System.Collections.Generic.IEnumerable(Of System.String) = Nothing) As System.IDisposable
+            If System.String.IsNullOrWhiteSpace(root) OrElse Not System.IO.Directory.Exists(root) Then
+                Throw New System.IO.DirectoryNotFoundException("The isolated workspace must exist.")
+            End If
+            Dim fullRoot As System.String = System.IO.Path.GetFullPath(root)
+            Dim validatedReadOnlyRoots As New System.Collections.Generic.List(Of System.String)()
+            Dim seenReadOnlyRoots As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            If readOnlyRoots IsNot Nothing Then
+                For Each readOnlyRoot As System.String In readOnlyRoots
+                    If System.String.IsNullOrWhiteSpace(readOnlyRoot) Then Continue For
+                    Dim fullReadOnlyRoot As System.String = System.IO.Path.GetFullPath(readOnlyRoot)
+                    If Not System.IO.Directory.Exists(fullReadOnlyRoot) Then
+                        Throw New System.IO.DirectoryNotFoundException("An authorized read-only directory is unavailable: " & fullReadOnlyRoot)
+                    End If
+                    If seenReadOnlyRoots.Add(fullReadOnlyRoot) Then validatedReadOnlyRoots.Add(fullReadOnlyRoot)
+                Next
+            End If
+            ' Complete validation before mutating either shared workspace representation.
+            Return New IsolatedWorkspaceScope(fullRoot, validatedReadOnlyRoots.ToArray())
+        End Function
+
+        Private NotInheritable Class IsolatedWorkspaceScope
+            Implements System.IDisposable
+            Private ReadOnly _workspace As Global.SharedLibrary.Agents.WorkspaceState = Global.SharedLibrary.Agents.WorkspaceTools.Active
+            Private ReadOnly _root As System.String = _workspaceRoot
+            Private ReadOnly _staging As System.String = _sessionStagingRoot
+            Private ReadOnly _extra As System.String() = If(_strictExtraRoots Is Nothing, Nothing, DirectCast(_strictExtraRoots.Clone(), System.String()))
+            Private ReadOnly _readOnlyRoots As System.String() = If(_strictReadOnlyRoots Is Nothing, Nothing, DirectCast(_strictReadOnlyRoots.Clone(), System.String()))
+            Private ReadOnly _read As System.Boolean = _workspaceAllowRead
+            Private ReadOnly _write As System.Boolean = _workspaceAllowWrite
+            Private ReadOnly _move As System.Boolean = _workspaceAllowMoveCopyRename
+            Private ReadOnly _delete As System.Boolean = _workspaceAllowDelete
+            Private ReadOnly _strict As System.Boolean = RestrictToWorkspaceRootOnly
+            Private _disposed As System.Boolean
+
+            Public Sub New(root As System.String, readOnlyRoots As System.String())
+                Global.SharedLibrary.Agents.WorkspaceTools.SetActive(New Global.SharedLibrary.Agents.WorkspaceState With {
+                    .RootPath = root, .PersistUntilRevoked = False, .AllowRead = True, .AllowWrite = True,
+                    .AllowMoveCopyRename = True, .AllowDelete = True})
+                SetSessionStagingRoot(root)
+                SetStrictExtraRoots(Nothing)
+                _strictReadOnlyRoots = readOnlyRoots
+                RestrictToWorkspaceRootOnly = True
+            End Sub
+
+            Public Sub Dispose() Implements System.IDisposable.Dispose
+                If _disposed Then Return
+                _disposed = True
+                ' SetActive mirrors its own root/permissions into PathPolicy. Restore it
+                ' first, then restore the exact policy snapshot, which may differ.
+                Global.SharedLibrary.Agents.WorkspaceTools.SetActive(_workspace)
+                _workspaceRoot = _root
+                _sessionStagingRoot = _staging
+                _strictExtraRoots = _extra
+                _strictReadOnlyRoots = _readOnlyRoots
+                SetWorkspacePermissions(_read, _write, _move, _delete)
+                RestrictToWorkspaceRootOnly = _strict
+            End Sub
+        End Class
 
         ' --------------------------------------------------------------- chat-author scope
 
@@ -292,8 +360,10 @@ Namespace Agents
                 Else
                     full = Path.GetFullPath(Path.Combine(GetDefaultWritableRoot(), requestedPath))
                 End If
-            Catch ex As Exception
-                Throw New UnauthorizedAccessException("Invalid path: " & ex.Message)
+            Catch ex As System.IO.PathTooLongException
+                Throw New System.IO.PathTooLongException(FilePathBudget.PathTooLongMessage, ex)
+            Catch ex As System.Exception
+                Throw New System.UnauthorizedAccessException("Invalid path: " & ex.Message)
             End Try
 
             ' Block raw devices and UNC by default.
@@ -361,6 +431,12 @@ Namespace Agents
                 ' This lets a skill load its bundled reference files even while the
                 ' workspace is otherwise locked to the temp/scheduled directory.
                 If access = PathAccess.Read Then
+                    Dim readOnlyRoots As System.String() = _strictReadOnlyRoots
+                    If readOnlyRoots IsNot Nothing Then
+                        For Each readOnlyRoot As System.String In readOnlyRoots
+                            If System.IO.Directory.Exists(readOnlyRoot) AndAlso IsUnder(full, readOnlyRoot) Then Return full
+                        Next
+                    End If
                     Dim skillReadResult As String = TryResolveUnderSkillDirectories(full, requestedPath, wasRelative)
                     If skillReadResult IsNot Nothing Then Return skillReadResult
                 End If

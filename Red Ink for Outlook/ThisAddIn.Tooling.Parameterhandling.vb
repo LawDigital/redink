@@ -617,6 +617,7 @@ Partial Public Class ThisAddIn
 
         If toolCall.Arguments IsNot Nothing Then
             For Each kvp In toolCall.Arguments.OrderBy(Function(x) x.Key, StringComparer.OrdinalIgnoreCase)
+                If System.String.Equals(kvp.Key, "repair_of_failure", System.StringComparison.OrdinalIgnoreCase) Then Continue For
                 parts.Add(kvp.Key.ToLowerInvariant() & "=" & NormalizeToolArgumentValue(kvp.Value))
             Next
         End If
@@ -654,6 +655,7 @@ Partial Public Class ThisAddIn
             Dim normalized As New JObject()
 
             For Each key In arguments.Keys.OrderBy(Function(k) k, StringComparer.OrdinalIgnoreCase)
+                If System.String.Equals(key, "repair_of_failure", System.StringComparison.OrdinalIgnoreCase) Then Continue For
                 Dim value = arguments(key)
 
                 If TypeOf value Is JToken Then

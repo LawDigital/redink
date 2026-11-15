@@ -757,6 +757,37 @@ Namespace Agents
         Private Sub New()
         End Sub
 
+        Public Shared Function ApplyRepairReferenceToModelConfig(tool As SharedLibrary.ModelConfig) As SharedLibrary.ModelConfig
+            If tool Is Nothing OrElse Not HasCapabilityTag(tool.CapabilityTags, "artifact_generation") OrElse
+               System.String.IsNullOrWhiteSpace(tool.ToolDefinition) Then Return tool
+            Try
+                Dim root As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(tool.ToolDefinition)
+                Dim properties As Newtonsoft.Json.Linq.JObject = TryCast(root.SelectToken("parameters.properties"), Newtonsoft.Json.Linq.JObject)
+                If properties Is Nothing Then Return tool
+                If properties("repair_of_failure") Is Nothing Then
+                    properties("repair_of_failure") = New Newtonsoft.Json.Linq.JObject(
+                        New Newtonsoft.Json.Linq.JProperty("type", "integer"),
+                        New Newtonsoft.Json.Linq.JProperty("minimum", 1),
+                        New Newtonsoft.Json.Linq.JProperty("description", "For a corrected retry of the same work, copy failure_sequence from the host error into repair_of_failure. Keep the same tool, explicit step and output target. Omit for independent work."))
+                    tool.ToolDefinition = root.ToString(Newtonsoft.Json.Formatting.None)
+                End If
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine("Repair schema augmentation failed: " & ex.Message)
+            End Try
+            Return tool
+        End Function
+
+        Public Shared Function SupportsRepairReference(tool As SharedLibrary.ModelConfig) As System.Boolean
+            If tool Is Nothing OrElse Not HasCapabilityTag(tool.CapabilityTags, "artifact_generation") OrElse
+               System.String.IsNullOrWhiteSpace(tool.ToolDefinition) Then Return False
+            Try
+                Dim root As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(tool.ToolDefinition)
+                Return System.String.Equals(System.Convert.ToString(root.SelectToken("parameters.properties.repair_of_failure.type")), "integer", System.StringComparison.Ordinal)
+            Catch ex As System.Exception
+                Return False
+            End Try
+        End Function
+
         Public Shared Function HasCapability(tool As SharedLibrary.ModelConfig) As Boolean
             If tool Is Nothing Then Return False
             Return HasCapabilityTag(tool.CapabilityTags, CapabilityTag)
@@ -876,6 +907,8 @@ Namespace Agents
                 Next
             End If
 
+            ' The host consumes the repair link; physical tools must never interpret it.
+            result.Remove("repair_of_failure")
             If HasCapability(tool) Then
                 result.Remove("operation_id")
                 result.Remove("step_id")

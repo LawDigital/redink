@@ -177,6 +177,8 @@ Namespace Agents
             End If
 
             sys.AppendLine("Output contract: your FINAL message MUST be one usable final answer in the requested format. If you cannot complete the task, return a structured error object.")
+            sys.AppendLine(Global.SharedLibrary.Agents.ToolingOrchestrator.SourceEvidenceInstruction)
+            sys.AppendLine(Global.SharedLibrary.Agents.ToolingOrchestrator.ExistingArtifactTransformationInstruction)
 
             If HasCanonicalSourceResultRefs(canonicalSourceResultRefs) Then
                 sys.AppendLine()

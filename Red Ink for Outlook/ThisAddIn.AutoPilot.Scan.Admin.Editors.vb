@@ -472,7 +472,7 @@ Namespace ScanInbox
             AdminUi.Field(fields, "Column separator", _separator)
             AdminUi.Field(fields, "Headings", _header)
             AdminUi.Field(fields, "Updates", _updateExisting)
-            AdminUi.Help(_updateExisting, "Match existing recipients by email address and update only imported columns. IDs and set assignments are preserved. Leave off to add new recipients only. Review the preview before importing.")
+            AdminUi.Help(_updateExisting, "Update by email; when several profiles share it, Name must select one uniquely. IDs and set assignments are preserved. Leave off to add new profiles, including profiles with an already registered email. Review the preview before importing.")
             _set.Items.Add(New AdminChoice With {.Id = "", .Label = "Register only — assign to a set later"})
             For Each rule In session.Configuration.RuleSets.OrderBy(Function(r) r.Name)
                 _set.Items.Add(New AdminChoice With {.Id = rule.Id, .Label = rule.Name})

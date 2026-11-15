@@ -60,11 +60,15 @@ Namespace Agents
 
     Public NotInheritable Class RedInkPythonAgentExecutionException
         Inherits RedInkPythonAgentException
+        Friend ReadOnly Property ErrorCode As System.String
+
         Public Sub New(message As System.String)
             MyBase.New(message)
+            ErrorCode = message
         End Sub
         Public Sub New(message As System.String, innerException As System.Exception)
             MyBase.New(message, innerException)
+            ErrorCode = message
         End Sub
     End Class
 
@@ -224,6 +228,10 @@ Namespace Agents
         Public Property Observed As System.Nullable(Of System.Int64)
         ' Optional additive diagnostics emitted by newer compatible PythonAgent builds.
         ' They are bounded/sanitized by the client before entering host/model-facing payloads.
+        Public Property Detail As System.String
+        Public Property Hint As System.String
+        Public Property Reason As System.String
+        Public Property FailedFile As System.String
         Public Property ExceptionType As System.String
         Public Property ObjectType As System.String
         Public Property MissingAttribute As System.String
@@ -268,6 +276,161 @@ Namespace Agents
         End Function
     End Class
 
+    ''' <summary>Owns one lazy Python service for one host tooling loop.</summary>
+    Public NotInheritable Class PythonAgentRunScope
+        Implements System.IDisposable
+
+        Private Shared ReadOnly Ambient As New System.Threading.AsyncLocal(Of PythonAgentRunScope)()
+        Private ReadOnly Parent As PythonAgentRunScope
+        Friend ReadOnly CallGate As New System.Threading.SemaphoreSlim(1, 1)
+        Friend ReadOnly SessionKey As System.String = System.Guid.NewGuid().ToString("N")
+        Private HeldExecutable As System.IO.FileStream
+        Private Broker As System.Diagnostics.Process
+        Private ServiceRoot As System.String
+        Private LastHeartbeat As System.DateTimeOffset
+        Private StartupFailed As System.Boolean
+        Private Closed As System.Boolean
+
+        Public Sub New()
+            Parent = Ambient.Value
+            Ambient.Value = Me
+        End Sub
+
+        Friend Shared ReadOnly Property Current As PythonAgentRunScope
+            Get
+                Return Ambient.Value
+            End Get
+        End Property
+
+        Friend ReadOnly Property Stopping As System.Boolean
+            Get
+                Return StartupFailed
+            End Get
+        End Property
+
+        Friend ReadOnly Property Process As System.Diagnostics.Process
+            Get
+                Return Broker
+            End Get
+        End Property
+
+        ' Called only while holding CallGate. Failure before publication may use the
+        ' ordinary one-shot path. Once published, a call must never be replayed.
+        Friend Function PrepareCall(configuration As RedInkPythonAgentConfiguration, executable As System.String,
+                                    candidateRoot As System.String, token As System.Threading.CancellationToken,
+                                    log As System.Action(Of System.String)) As System.String
+            If Closed Then Throw New System.ObjectDisposedException(NameOf(PythonAgentRunScope))
+            If StartupFailed Then Return Nothing
+            Try
+                If Broker Is Nothing Then
+                    HeldExecutable = New System.IO.FileStream(executable, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read)
+                    RedInkPythonAgentClient.ValidateExecutableConfiguration(configuration)
+                    Dim callsParent As System.IO.DirectoryInfo = System.IO.Directory.GetParent(candidateRoot)
+                    ServiceRoot = System.IO.Path.Combine(callsParent.Parent.FullName, "s", System.Guid.NewGuid().ToString("N").Substring(0, 16))
+                    System.IO.Directory.CreateDirectory(ServiceRoot)
+                    Using host As System.Diagnostics.Process = System.Diagnostics.Process.GetCurrentProcess()
+                        Dim start As New System.Diagnostics.ProcessStartInfo With {
+                            .FileName = executable, .WorkingDirectory = ServiceRoot,
+                            .Arguments = "--serve --root """ & ServiceRoot & """ --pool 0 --max-sessions 1 --idle-exit 1800 --parent-pid " &
+                                         host.Id.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                            .UseShellExecute = False, .CreateNoWindow = True
+                        }
+                        Broker = System.Diagnostics.Process.Start(start)
+                    End Using
+                    If Broker Is Nothing Then Throw New System.InvalidOperationException("Python service did not start.")
+                    Dim timer As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
+                    Do Until HasFreshHeartbeat()
+                        token.ThrowIfCancellationRequested()
+                        If Broker.HasExited OrElse timer.Elapsed.TotalSeconds >= 120 Then Throw New System.TimeoutException("Python service did not become ready.")
+                        token.WaitHandle.WaitOne(100)
+                    Loop
+                    If log IsNot Nothing Then log("Python service ready for this run. PID " & Broker.Id.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                ElseIf Not System.String.Equals(executable, HeldExecutable.Name, System.StringComparison.OrdinalIgnoreCase) Then
+                    If log IsNot Nothing Then log("Python executable changed during run. Using one-shot execution.")
+                    Return Nothing
+                ElseIf Broker.HasExited OrElse Not HasFreshHeartbeat() Then
+                    Throw New System.IO.IOException("Python service is no longer available.")
+                End If
+                Return System.IO.Path.Combine(ServiceRoot, "calls", System.Guid.NewGuid().ToString("N").Substring(0, 12))
+            Catch ex As System.OperationCanceledException
+                Throw
+            Catch ex As System.Exception
+                StartupFailed = True
+                StopService()
+                If log IsNot Nothing Then log("Python service unavailable before request publication. Using one-shot execution: " & ex.Message)
+                Return Nothing
+            End Try
+        End Function
+
+        Private Function HasFreshHeartbeat() As System.Boolean
+            Dim marker As System.String = System.IO.Path.Combine(ServiceRoot, "service.json")
+            Try
+                Using stream As New System.IO.FileStream(marker, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite Or System.IO.FileShare.Delete)
+                    Using reader As New System.IO.StreamReader(stream)
+                        Dim state As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(reader.ReadToEnd())
+                        Dim written As System.DateTimeOffset = CType(state("heartbeatUtc"), System.DateTimeOffset)
+                        ' The packaged one-file launcher can have a different PID from the serving process.
+                        If CInt(state("pid")) <= 0 OrElse System.Math.Abs((System.DateTimeOffset.UtcNow - written).TotalSeconds) > 20 Then Return False
+                        LastHeartbeat = written
+                        Return True
+                    End Using
+                End Using
+            Catch ex As System.IO.IOException
+                Return System.Math.Abs((System.DateTimeOffset.UtcNow - LastHeartbeat).TotalSeconds) <= 20
+            End Try
+        End Function
+
+        Friend Sub RequestShutdown()
+            StartupFailed = True
+            System.IO.File.WriteAllText(System.IO.Path.Combine(ServiceRoot, "shutdown.json"), "{}")
+        End Sub
+
+        Private Sub StopService()
+            Dim ownedProcess As System.Diagnostics.Process = Broker
+            Dim ownedHandle As System.IO.FileStream = HeldExecutable
+            Dim ownedRoot As System.String = ServiceRoot
+            Broker = Nothing
+            HeldExecutable = Nothing
+            ServiceRoot = Nothing
+            If ownedProcess Is Nothing AndAlso ownedHandle Is Nothing Then Return
+            Try
+                If ownedProcess IsNot Nothing AndAlso Not ownedProcess.HasExited Then
+                    System.IO.File.WriteAllText(System.IO.Path.Combine(ownedRoot, "shutdown.json"), "{}")
+                End If
+            Catch ex As System.Exception
+                System.Diagnostics.Trace.WriteLine(ex.ToString())
+            Finally
+                ' Keep the executable pinned and the shutdown marker in place until the
+                ' packaged launcher and its serving child finish. Do not block the Office UI.
+                Dim cleanup As System.Threading.Tasks.Task = System.Threading.Tasks.Task.Run(
+                    Sub()
+                        Try
+                            If ownedProcess IsNot Nothing Then ownedProcess.WaitForExit()
+                            If ownedRoot IsNot Nothing Then System.IO.Directory.Delete(ownedRoot, True)
+                        Catch ex As System.Exception
+                            System.Diagnostics.Trace.WriteLine(ex.ToString())
+                        Finally
+                            If ownedProcess IsNot Nothing Then ownedProcess.Dispose()
+                            If ownedHandle IsNot Nothing Then ownedHandle.Dispose()
+                        End Try
+                    End Sub)
+            End Try
+        End Sub
+
+        Public Sub Dispose() Implements System.IDisposable.Dispose
+            If Closed Then Return
+            Ambient.Value = Parent
+            CallGate.Wait()
+            Try
+                If Closed Then Return
+                Closed = True
+                StopService()
+            Finally
+                CallGate.Release()
+            End Try
+        End Sub
+    End Class
+
     Public NotInheritable Class RedInkPythonAgentClient
         Private Const ProtocolVersion As System.Int32 = 2
         Private ReadOnly Options As RedInkPythonAgentExecutionOptions
@@ -286,13 +449,17 @@ Namespace Agents
         End Function
 
         Public Function CreateExecution(configuration As RedInkPythonAgentConfiguration, rootPath As System.String, pythonCode As System.String, inputFiles As System.Collections.Generic.IEnumerable(Of RedInkPythonAgentInputFile), limits As RedInkPythonAgentLimits, hostServiceHandler As IRedInkPythonAgentHostServiceHandler, progress As System.IProgress(Of RedInkPythonAgentEvent)) As RedInkPythonAgentExecution
+            Return CreateExecution(configuration, rootPath, pythonCode, inputFiles, limits, hostServiceHandler, progress, Nothing, False)
+        End Function
+
+        Friend Function CreateExecution(configuration As RedInkPythonAgentConfiguration, rootPath As System.String, pythonCode As System.String, inputFiles As System.Collections.Generic.IEnumerable(Of RedInkPythonAgentInputFile), limits As RedInkPythonAgentLimits, hostServiceHandler As IRedInkPythonAgentHostServiceHandler, progress As System.IProgress(Of RedInkPythonAgentEvent), service As PythonAgentRunScope, detailed As System.Boolean) As RedInkPythonAgentExecution
             Dim sessionId As System.Guid = System.Guid.NewGuid()
             Dim cancellation As New System.Threading.CancellationTokenSource()
-            Dim completion As System.Threading.Tasks.Task(Of RedInkPythonAgentRunResult) = System.Threading.Tasks.Task.Run(Function() RunAsync(configuration, rootPath, pythonCode, inputFiles, limits, hostServiceHandler, progress, sessionId, cancellation.Token))
+            Dim completion As System.Threading.Tasks.Task(Of RedInkPythonAgentRunResult) = System.Threading.Tasks.Task.Run(Function() RunAsync(configuration, rootPath, pythonCode, inputFiles, limits, hostServiceHandler, progress, sessionId, cancellation.Token, service, detailed))
             Return New RedInkPythonAgentExecution(sessionId, cancellation, completion)
         End Function
 
-        Private Async Function RunAsync(configuration As RedInkPythonAgentConfiguration, rootPath As System.String, pythonCode As System.String, inputFiles As System.Collections.Generic.IEnumerable(Of RedInkPythonAgentInputFile), limits As RedInkPythonAgentLimits, hostServiceHandler As IRedInkPythonAgentHostServiceHandler, progress As System.IProgress(Of RedInkPythonAgentEvent), sessionId As System.Guid, userCancellation As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of RedInkPythonAgentRunResult)
+        Private Async Function RunAsync(configuration As RedInkPythonAgentConfiguration, rootPath As System.String, pythonCode As System.String, inputFiles As System.Collections.Generic.IEnumerable(Of RedInkPythonAgentInputFile), limits As RedInkPythonAgentLimits, hostServiceHandler As IRedInkPythonAgentHostServiceHandler, progress As System.IProgress(Of RedInkPythonAgentEvent), sessionId As System.Guid, userCancellation As System.Threading.CancellationToken, service As PythonAgentRunScope, detailed As System.Boolean) As System.Threading.Tasks.Task(Of RedInkPythonAgentRunResult)
             ValidateInputs(configuration, rootPath, pythonCode, limits)
             Dim fullRoot As System.String = System.IO.Path.GetFullPath(rootPath)
             System.IO.Directory.CreateDirectory(fullRoot)
@@ -305,35 +472,41 @@ Namespace Agents
             Dim timeoutCancellation As New System.Threading.CancellationTokenSource(Me.Options.OverallTimeout)
             Dim linked As System.Threading.CancellationTokenSource = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(userCancellation, timeoutCancellation.Token)
             Dim operationCancelled As System.Boolean = False
+            Dim timedOut As System.Boolean = False
+            Dim pending As New System.Collections.Generic.Dictionary(Of System.String, System.Threading.Tasks.Task)(System.StringComparer.OrdinalIgnoreCase)
             Try
                 linked.Token.ThrowIfCancellationRequested()
-                StageRequest(requestDirectory, requestPath, pythonCode, inputFiles, limits, sessionId, nonce, linked.Token)
                 Dim executable As System.String = ResolveExecutable(configuration.ExecutablePath)
                 Using heldExecutable As New System.IO.FileStream(executable, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read)
                     VerifyConfiguration(configuration, executable, heldExecutable)
-                    Dim startInfo As New System.Diagnostics.ProcessStartInfo() With {
-                    .FileName = executable,
-                    .Arguments = "--root """ & fullRoot & """",
-                    .UseShellExecute = False,
-                    .CreateNoWindow = True,
-                    .WorkingDirectory = fullRoot,
-                    .RedirectStandardOutput = False,
-                    .RedirectStandardError = False
-                }
-                    process = System.Diagnostics.Process.Start(startInfo)
-                    If process Is Nothing Then
-                        Throw New RedInkPythonAgentExecutionException("BROKER_START_FAILED")
+                    StageRequest(requestDirectory, requestPath, pythonCode, inputFiles, limits, sessionId, nonce, linked.Token, service, detailed)
+                    If service IsNot Nothing Then
+                        process = service.Process
+                    Else
+                        Dim startInfo As New System.Diagnostics.ProcessStartInfo() With {
+                        .FileName = executable,
+                        .Arguments = "--root """ & fullRoot & """",
+                        .UseShellExecute = False,
+                        .CreateNoWindow = True,
+                        .WorkingDirectory = fullRoot,
+                        .RedirectStandardOutput = False,
+                        .RedirectStandardError = False
+                    }
+                        Try
+                            process = System.Diagnostics.Process.Start(startInfo)
+                        Catch startError As System.ComponentModel.Win32Exception
+                            Throw New RedInkPythonAgentExecutionException("BROKER_START_FAILED", startError)
+                        End Try
+                        If process Is Nothing Then
+                            Throw New RedInkPythonAgentExecutionException("BROKER_START_FAILED")
+                        End If
                     End If
                 End Using
 
                 Dim eventOffset As System.Int64 = 0
-                Dim pending As New System.Collections.Generic.Dictionary(Of System.String, System.Threading.Tasks.Task)(System.StringComparer.OrdinalIgnoreCase)
                 Dim lastHeartbeat As System.DateTimeOffset = System.DateTimeOffset.UtcNow
                 Do
-                    If linked.IsCancellationRequested Then
-                        Await RequestCancellationAndKillAsync(process, controlDirectory, sessionId, nonce, If(timeoutCancellation.IsCancellationRequested, "SESSION_TIMEOUT", "HOST_CANCELLED"), pending).ConfigureAwait(False)
-                        Return CreateCallerResult(sessionId, If(timeoutCancellation.IsCancellationRequested, "timeout", "cancelled"), If(timeoutCancellation.IsCancellationRequested, "SESSION_TIMEOUT", "SESSION_CANCELLED"))
-                    End If
+                    linked.Token.ThrowIfCancellationRequested()
                     Dim exited As System.Boolean = False
                     Try
                         exited = process.HasExited
@@ -344,10 +517,10 @@ Namespace Agents
                     DispatchHostCalls(controlDirectory, sessionId, nonce, limits, hostServiceHandler, pending, linked.Token, Me.Options.HumanDiagnosticLog)
                     lastHeartbeat = ValidateHeartbeat(controlDirectory, sessionId, nonce, lastHeartbeat)
                     If System.DateTimeOffset.UtcNow - lastHeartbeat > Me.Options.HeartbeatTimeout Then
-                        Await RequestCancellationAndKillAsync(process, controlDirectory, sessionId, nonce, "HOST_CANCELLED", pending).ConfigureAwait(False)
+                        Await RequestCancellationAndKillAsync(process, controlDirectory, sessionId, nonce, "HOST_CANCELLED", pending, responsePath, service).ConfigureAwait(False)
                         Return CreateCallerResult(sessionId, "failed", "BROKER_HEARTBEAT_LOST")
                     End If
-                    If exited Then
+                    If exited OrElse (service IsNot Nothing AndAlso System.IO.File.Exists(responsePath)) Then
                         Exit Do
                     End If
                     Await System.Threading.Tasks.Task.Delay(Me.Options.PollInterval, linked.Token).ConfigureAwait(False)
@@ -356,13 +529,25 @@ Namespace Agents
                 If Not System.IO.File.Exists(responsePath) Then
                     Return CreateCallerResult(sessionId, "failed", "BROKER_EXITED_WITHOUT_RESPONSE")
                 End If
-                Return ParseResponse(responsePath, fullRoot, sessionId, nonce, limits)
+                Try
+                    Return ParseResponse(responsePath, fullRoot, sessionId, nonce, limits, If(service Is Nothing, 2, 3))
+                Catch ex As System.Exception When TypeOf ex Is RedInkPythonAgentExecutionException OrElse
+                                                   TypeOf ex Is RedInkPythonAgentConfigurationException OrElse
+                                                   TypeOf ex Is Newtonsoft.Json.JsonException OrElse
+                                                   TypeOf ex Is System.FormatException OrElse
+                                                   TypeOf ex Is System.InvalidCastException OrElse
+                                                   TypeOf ex Is System.OverflowException
+                    ' This validation is of the broker's reply, after execution. It is
+                    ' not evidence that the model supplied invalid Python or tool arguments.
+                    Throw New RedInkPythonAgentExecutionException("BROKER_RESPONSE_INVALID", ex)
+                End Try
             Catch ex As System.OperationCanceledException
                 operationCancelled = True
+                timedOut = timeoutCancellation.IsCancellationRequested AndAlso Not userCancellation.IsCancellationRequested
             Finally
                 linked.Dispose()
                 timeoutCancellation.Dispose()
-                If process IsNot Nothing AndAlso Not operationCancelled Then
+                If service Is Nothing AndAlso process IsNot Nothing AndAlso Not operationCancelled Then
                     process.Dispose()
                 End If
             End Try
@@ -370,20 +555,22 @@ Namespace Agents
             If operationCancelled Then
                 Try
                     If process IsNot Nothing Then
-                        Await RequestCancellationAndKillAsync(process, controlDirectory, sessionId, nonce, "HOST_CANCELLED", New System.Collections.Generic.Dictionary(Of System.String, System.Threading.Tasks.Task)()).ConfigureAwait(False)
+                        Await RequestCancellationAndKillAsync(process, controlDirectory, sessionId, nonce,
+                            If(timedOut, "SESSION_TIMEOUT", "HOST_CANCELLED"), pending, responsePath, service).ConfigureAwait(False)
                     End If
                 Finally
-                    If process IsNot Nothing Then
+                    If service Is Nothing AndAlso process IsNot Nothing Then
                         process.Dispose()
                     End If
                 End Try
+                If timedOut Then Return CreateCallerResult(sessionId, "timeout", "SESSION_TIMEOUT")
                 Return CreateCallerResult(sessionId, "cancelled", "SESSION_CANCELLED")
             End If
 
             Throw New RedInkPythonAgentExecutionException("INTERNAL_BROKER_ERROR")
         End Function
 
-        Private Shared Sub StageRequest(requestDirectory As System.String, requestPath As System.String, pythonCode As System.String, inputFiles As System.Collections.Generic.IEnumerable(Of RedInkPythonAgentInputFile), limits As RedInkPythonAgentLimits, sessionId As System.Guid, nonce As System.String, cancellationToken As System.Threading.CancellationToken)
+        Private Shared Sub StageRequest(requestDirectory As System.String, requestPath As System.String, pythonCode As System.String, inputFiles As System.Collections.Generic.IEnumerable(Of RedInkPythonAgentInputFile), limits As RedInkPythonAgentLimits, sessionId As System.Guid, nonce As System.String, cancellationToken As System.Threading.CancellationToken, service As PythonAgentRunScope, detailed As System.Boolean)
             System.IO.Directory.CreateDirectory(System.IO.Path.Combine(requestDirectory, "input"))
             cancellationToken.ThrowIfCancellationRequested()
             System.IO.File.WriteAllText(System.IO.Path.Combine(requestDirectory, "code.py"), pythonCode, New System.Text.UTF8Encoding(False, True))
@@ -434,6 +621,15 @@ Namespace Agents
                 New Newtonsoft.Json.Linq.JProperty("maximumResponseBytes", limits.MaximumResponseBytes),
                 New Newtonsoft.Json.Linq.JProperty("defaultCallTimeoutSeconds", limits.DefaultCallTimeoutSeconds),
                 New Newtonsoft.Json.Linq.JProperty("maximumCallTimeoutSeconds", limits.MaximumCallTimeoutSeconds))))
+            If service IsNot Nothing Then
+                request("protocolVersion") = 3
+                request("session") = New Newtonsoft.Json.Linq.JObject(New Newtonsoft.Json.Linq.JProperty("key", service.SessionKey),
+                    New Newtonsoft.Json.Linq.JProperty("keepOpen", True), New Newtonsoft.Json.Linq.JProperty("idleTimeoutSeconds", 300))
+                request("execution") = New Newtonsoft.Json.Linq.JObject(New Newtonsoft.Json.Linq.JProperty("namespace", "fresh"),
+                    New Newtonsoft.Json.Linq.JProperty("keepOutputs", False))
+                If detailed Then request("diagnostics") = "detailed"
+            End If
+            cancellationToken.ThrowIfCancellationRequested()
             AtomicWrite(requestPath, request)
         End Sub
 
@@ -600,10 +796,19 @@ Namespace Agents
             Return previous
         End Function
 
-        Private Async Function RequestCancellationAndKillAsync(process As System.Diagnostics.Process, controlDirectory As System.String, sessionId As System.Guid, nonce As System.String, reason As System.String, pending As System.Collections.Generic.Dictionary(Of System.String, System.Threading.Tasks.Task)) As System.Threading.Tasks.Task
+        Private Async Function RequestCancellationAndKillAsync(process As System.Diagnostics.Process, controlDirectory As System.String, sessionId As System.Guid, nonce As System.String, reason As System.String, pending As System.Collections.Generic.Dictionary(Of System.String, System.Threading.Tasks.Task), responsePath As System.String, service As PythonAgentRunScope) As System.Threading.Tasks.Task
             System.IO.Directory.CreateDirectory(controlDirectory)
             AtomicWrite(System.IO.Path.Combine(controlDirectory, "cancel.request.json"), New Newtonsoft.Json.Linq.JObject(New Newtonsoft.Json.Linq.JProperty("protocolVersion", 2), New Newtonsoft.Json.Linq.JProperty("sessionId", sessionId.ToString("D")), New Newtonsoft.Json.Linq.JProperty("nonce", nonce), New Newtonsoft.Json.Linq.JProperty("reasonCode", "HOST_CANCELLED")))
             Await DrainPendingAsync(pending, Me.Options.CancellationGracePeriod).ConfigureAwait(False)
+            If service IsNot Nothing Then
+                Dim grace As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
+                Do While grace.Elapsed < Me.Options.CancellationGracePeriod AndAlso Not process.HasExited
+                    If System.IO.File.Exists(responsePath) Then Return
+                    Await System.Threading.Tasks.Task.Delay(100).ConfigureAwait(False)
+                Loop
+                service.RequestShutdown()
+                Return
+            End If
             If Not process.HasExited Then
                 process.Kill()
                 Dim deadline As System.DateTimeOffset = System.DateTimeOffset.UtcNow + Me.Options.HardKillWait
@@ -619,7 +824,7 @@ Namespace Agents
             Await System.Threading.Tasks.Task.WhenAny(all, System.Threading.Tasks.Task.Delay(timeout)).ConfigureAwait(False)
         End Function
 
-        Private Shared Function ParseResponse(path As System.String, root As System.String, sessionId As System.Guid, nonce As System.String, limits As RedInkPythonAgentLimits) As RedInkPythonAgentRunResult
+        Private Shared Function ParseResponse(path As System.String, root As System.String, sessionId As System.Guid, nonce As System.String, limits As RedInkPythonAgentLimits, expectedProtocol As System.Int32) As RedInkPythonAgentRunResult
             Dim maximumFileBytes As System.Int64 = limits.MaxResultBytes + 4194304L
             Dim information As New System.IO.FileInfo(path)
             If information.Length < 1L OrElse information.Length > maximumFileBytes Then
@@ -637,7 +842,7 @@ Namespace Agents
             .DiagnosticId = System.Guid.Parse(CStr(obj("diagnosticId"))),
             .HumanLogAvailable = CBool(obj("humanLogAvailable"))
         }
-            If result.ProtocolVersion <> 2 OrElse result.SessionId <> sessionId OrElse Not FixedTimeEquals(CStr(obj("nonce")), nonce) Then
+            If result.ProtocolVersion <> expectedProtocol OrElse result.SessionId <> sessionId OrElse Not FixedTimeEquals(CStr(obj("nonce")), nonce) Then
                 Throw New RedInkPythonAgentExecutionException("REQUEST_INVALID")
             End If
             If Not IsSafeStatus(result.Status) Then
@@ -680,7 +885,7 @@ Namespace Agents
             End If
             Dim errorToken As Newtonsoft.Json.Linq.JToken = obj("error")
             If errorToken IsNot Nothing AndAlso errorToken.Type <> Newtonsoft.Json.Linq.JTokenType.Null Then
-                result.Error = ParseSafeError(errorToken)
+                result.Error = ParseSafeError(errorToken, expectedProtocol)
             End If
             Return result
         End Function
@@ -707,7 +912,7 @@ Namespace Agents
             Loop
         End Sub
 
-        Private Shared Function ParseSafeError(token As Newtonsoft.Json.Linq.JToken) As RedInkPythonAgentSafeError
+        Private Shared Function ParseSafeError(token As Newtonsoft.Json.Linq.JToken, expectedProtocol As System.Int32) As RedInkPythonAgentSafeError
             Dim value As Newtonsoft.Json.Linq.JObject = TryCast(token, Newtonsoft.Json.Linq.JObject)
             If value Is Nothing Then Throw New RedInkPythonAgentExecutionException("REQUEST_INVALID")
             RequireRequiredFields(value, New System.String() {"code", "phase", "retryable", "source", "hostOperation", "limit", "observed", "stack"})
@@ -726,6 +931,14 @@ Namespace Agents
             .MissingAttribute = FirstOptionalSafeDiagnostic(value("missingAttribute"), value("missing_symbol"), 128),
             .Message = ReadOptionalSafeMessage(value("message"), 1000)
         }
+            If expectedProtocol = 3 Then
+                result.Detail = ReadOptionalSafeMessage(value("detail"), 960)
+                result.Hint = ReadOptionalSafeMessage(value("hint"), 960)
+                result.Reason = ReadOptionalSafeDiagnostic(value("reason"), 256)
+                result.FailedFile = ReadOptionalSafeMessage(value("file"), 1024)
+            ElseIf code = "SESSION_LOST" OrElse code = "SESSION_CAPACITY_EXHAUSTED" Then
+                Throw New RedInkPythonAgentExecutionException("REQUEST_INVALID")
+            End If
             If result.HostOperation IsNot Nothing AndAlso result.HostOperation <> "llm.complete" AndAlso result.HostOperation <> "web.get" AndAlso result.HostOperation <> "web.search" Then
                 Throw New RedInkPythonAgentExecutionException("REQUEST_INVALID")
             End If
@@ -834,7 +1047,7 @@ Namespace Agents
 
         Private Shared Function IsSafeErrorCode(value As System.String) As System.Boolean
             Select Case value
-                Case "CONFIGURATION_INVALID", "EXECUTABLE_NOT_FOUND", "EXECUTABLE_HASH_MISMATCH", "EXECUTABLE_SIGNATURE_INVALID", "EXECUTABLE_SIGNER_MISMATCH", "ROOT_BUSY", "REQUEST_INVALID", "SECURITY_INVARIANT_FAILED", "BROKER_START_FAILED", "BROKER_EXITED_WITHOUT_RESPONSE", "BROKER_HEARTBEAT_LOST", "SESSION_TIMEOUT", "SESSION_CANCELLED", "WORKER_TIMEOUT", "WORKER_MEMORY_LIMIT", "WORKER_PROCESS_LIMIT", "WORKER_STREAM_LIMIT", "WORKER_WORKING_BYTES_LIMIT", "WORKER_WORKING_FILES_LIMIT", "PYTHON_SYNTAX_ERROR", "PYTHON_NAME_ERROR", "PYTHON_IMPORT_ERROR", "PYTHON_ATTRIBUTE_ERROR", "PYTHON_TYPE_ERROR", "PYTHON_VALUE_ERROR", "PYTHON_KEY_ERROR", "PYTHON_INDEX_ERROR", "PYTHON_FILE_NOT_FOUND", "PYTHON_PERMISSION_ERROR", "PYTHON_RUNTIME_ERROR", "PYTHON_RESULT_INVALID", "PYTHON_RESULT_TOO_LARGE", "PYTHON_RESULT_TOO_DEEP", "PYTHON_RESULT_TOO_COMPLEX", "HOST_OPERATION_NOT_ALLOWED", "HOST_CALL_LIMIT_EXCEEDED", "HOST_CALL_REQUEST_INVALID", "HOST_CALL_TIMEOUT", "HOST_CALL_CANCELLED", "HOST_CALL_FAILED", "LLM_AUTHENTICATION_FAILED", "LLM_RATE_LIMITED", "LLM_PROVIDER_UNAVAILABLE", "LLM_RESPONSE_INVALID", "WEB_ACCESS_DENIED", "WEB_REQUEST_TIMEOUT", "WEB_RESPONSE_TOO_LARGE", "OUTPUT_VALIDATION_FAILED", "OUTPUT_PUBLICATION_FAILED", "INTERNAL_BROKER_ERROR"
+                Case "SESSION_LOST", "SESSION_CAPACITY_EXHAUSTED", "CONFIGURATION_INVALID", "EXECUTABLE_NOT_FOUND", "EXECUTABLE_HASH_MISMATCH", "EXECUTABLE_SIGNATURE_INVALID", "EXECUTABLE_SIGNER_MISMATCH", "ROOT_BUSY", "REQUEST_INVALID", "SECURITY_INVARIANT_FAILED", "BROKER_START_FAILED", "BROKER_EXITED_WITHOUT_RESPONSE", "BROKER_HEARTBEAT_LOST", "SESSION_TIMEOUT", "SESSION_CANCELLED", "WORKER_TIMEOUT", "WORKER_MEMORY_LIMIT", "WORKER_PROCESS_LIMIT", "WORKER_STREAM_LIMIT", "WORKER_WORKING_BYTES_LIMIT", "WORKER_WORKING_FILES_LIMIT", "PYTHON_SYNTAX_ERROR", "PYTHON_NAME_ERROR", "PYTHON_IMPORT_ERROR", "PYTHON_ATTRIBUTE_ERROR", "PYTHON_TYPE_ERROR", "PYTHON_VALUE_ERROR", "PYTHON_KEY_ERROR", "PYTHON_INDEX_ERROR", "PYTHON_FILE_NOT_FOUND", "PYTHON_PERMISSION_ERROR", "PYTHON_RUNTIME_ERROR", "PYTHON_RESULT_INVALID", "PYTHON_RESULT_TOO_LARGE", "PYTHON_RESULT_TOO_DEEP", "PYTHON_RESULT_TOO_COMPLEX", "HOST_OPERATION_NOT_ALLOWED", "HOST_CALL_LIMIT_EXCEEDED", "HOST_CALL_REQUEST_INVALID", "HOST_CALL_TIMEOUT", "HOST_CALL_CANCELLED", "HOST_CALL_FAILED", "LLM_AUTHENTICATION_FAILED", "LLM_RATE_LIMITED", "LLM_PROVIDER_UNAVAILABLE", "LLM_RESPONSE_INVALID", "WEB_ACCESS_DENIED", "WEB_REQUEST_TIMEOUT", "WEB_RESPONSE_TOO_LARGE", "OUTPUT_VALIDATION_FAILED", "OUTPUT_PUBLICATION_FAILED", "INTERNAL_BROKER_ERROR"
                     Return True
                 Case Else
                     Return False

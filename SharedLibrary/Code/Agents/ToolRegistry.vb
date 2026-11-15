@@ -54,6 +54,7 @@ Namespace Agents
         Public Sub RegisterEager(config As SharedLibrary.ModelConfig, Optional category As String = "builtin", Optional source As String = Nothing)
             If config Is Nothing OrElse String.IsNullOrWhiteSpace(config.ToolName) Then Return
             ExplicitOperationToolContract.ApplyToModelConfig(config)
+            ExplicitOperationToolContract.ApplyRepairReferenceToModelConfig(config)
             SyncLock _sync
                 _entries(config.ToolName) = New ToolEntry With {
                     .Manifest = New ToolManifest With {
@@ -151,6 +152,7 @@ Namespace Agents
             If built Is Nothing Then Return Nothing
             If String.IsNullOrWhiteSpace(built.ToolName) Then built.ToolName = name
             ExplicitOperationToolContract.ApplyToModelConfig(built)
+            ExplicitOperationToolContract.ApplyRepairReferenceToModelConfig(built)
 
             SyncLock _sync
                 ' Re-check in case another caller materialized concurrently.

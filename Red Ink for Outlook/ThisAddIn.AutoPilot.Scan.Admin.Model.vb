@@ -240,7 +240,7 @@ Namespace ScanInbox
             If text.Length > 2000000 Then Throw New System.IO.InvalidDataException("The import is too large (maximum 2 million characters).")
             If Not New System.String() {vbTab, ";", ","}.Contains(delimiter) Then Throw New System.IO.InvalidDataException("Choose a column separator.")
             Dim rows As New System.Collections.Generic.List(Of AdminImportRow)()
-            Dim seen As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            Dim seen As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
             Using input As New System.IO.StringReader(text.TrimStart(ChrW(&HFEFF)))
                 Using parser As New Microsoft.VisualBasic.FileIO.TextFieldParser(input)
                     parser.TextFieldType = Microsoft.VisualBasic.FileIO.FieldType.Delimited
@@ -268,13 +268,28 @@ Namespace ScanInbox
                             Dim emailIndex = System.Array.FindIndex(mapped, Function(c) c.Equals("Email", System.StringComparison.OrdinalIgnoreCase))
                             If fields.Length <> mapped.Length Then Throw New System.IO.InvalidDataException("The number of values must match the column headings.")
                             Dim email = Registry.Address(fields(emailIndex))
-                            Dim existing = Configuration.Recipients.SingleOrDefault(Function(p) p.SmtpAddress.Equals(email, System.StringComparison.OrdinalIgnoreCase))
+                            Dim matches = Configuration.Recipients.Where(Function(p) p.SmtpAddress.Equals(email, System.StringComparison.OrdinalIgnoreCase)).ToList()
+                            Dim existing As RegisteredRecipient = Nothing
+                            If updateExisting Then
+                                Dim nameIndex = System.Array.FindIndex(mapped, Function(c) c.Equals("Name", System.StringComparison.OrdinalIgnoreCase))
+                                If matches.Count > 1 Then
+                                    If nameIndex >= 0 Then matches = matches.Where(Function(p) p.Name.Trim().Equals(fields(nameIndex).Trim(), System.StringComparison.OrdinalIgnoreCase)).ToList()
+                                    If matches.Count <> 1 Then Throw New System.IO.InvalidDataException("Ambiguous update: email and name must identify exactly one profile. Edit the intended recipient by ID, or use add mode for a new profile.")
+                                End If
+                                If matches.Count = 1 Then existing = matches(0)
+                            End If
                             row.Person = ImportPerson(fields, mapped, If(updateExisting, existing, Nothing))
                             row.Name = row.Person.Name
                             row.Email = row.Person.SmtpAddress
                             row.Organization = row.Person.Organization
                             If Configuration.RuleSets.Any(Function(r) r.ScannerSenders.Any(Function(a) a.Equals(row.Email, System.StringComparison.OrdinalIgnoreCase) OrElse row.Person.CopySmtpAddresses.Contains(a, System.StringComparer.OrdinalIgnoreCase))) Then Throw New System.IO.InvalidDataException("A scanner sender cannot be a recipient or copy recipient.")
-                            If Not seen.Add(row.Email) Then
+                            ' SMTP and display name are not profile identity. In add mode
+                            ' skip only an identical imported profile, not different settings
+                            ' for the same person/mailbox. Updates target one stable ID.
+                            Dim importIdentity = Newtonsoft.Json.Linq.JObject.FromObject(row.Person)
+                            importIdentity.Remove("Id")
+                            Dim importKey = If(existing IsNot Nothing, "id:" & existing.Id, "profile:" & importIdentity.ToString(Newtonsoft.Json.Formatting.None))
+                            If Not seen.Add(importKey) Then
                                 row.Status = "Duplicate in import — skipped"
                             ElseIf existing IsNot Nothing Then
                                 If updateExisting Then
@@ -324,7 +339,6 @@ Namespace ScanInbox
             person = Copy(person)
             person.Name = person.Name.Trim()
             person.SmtpAddress = Registry.Address(person.SmtpAddress)
-            If Configuration.Recipients.Any(Function(p) p.Id <> person.Id AndAlso p.SmtpAddress.Equals(person.SmtpAddress, System.StringComparison.OrdinalIgnoreCase)) Then Throw New System.IO.InvalidDataException("This email address is already registered.")
             Dim references = RecipientReferences(person.Id)
             If Not person.Active AndAlso references <> "" Then Throw New System.IO.InvalidDataException("Remove this recipient from these recipient sets before disabling: " & references)
             Dim index = Configuration.Recipients.FindIndex(Function(p) p.Id = person.Id)

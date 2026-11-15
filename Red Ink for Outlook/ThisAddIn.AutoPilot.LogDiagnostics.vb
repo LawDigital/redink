@@ -35,7 +35,7 @@ Partial Public Class ThisAddIn
     Private Const AP_LogDiagnosticsDailyReportHour As System.Int32 = 20
     Private Const AP_LogDiagnosticsPeriodicCooldownDays As System.Int32 = 7
     Private Const AP_LogDiagnosticsModelTimeoutMs As System.Int64 = 300000
-    Private Const AP_LogDiagnosticsHostFactsVersion As System.String = "2026-10-29.1"
+    Private Const AP_LogDiagnosticsHostFactsVersion As System.String = "2026-11-03.1"
     Private Const AP_LogDiagnosticsHostFactsMaxChars As System.Int32 = 8000
 
     Private Shared ReadOnly _apLogDiagnosticsFsSync As New System.Object()
@@ -262,7 +262,7 @@ Partial Public Class ThisAddIn
         SyncLock _apLogDiagnosticsFsSync
             If Not System.IO.File.Exists(path) Then Return 0
             ' Unreadable retry state is not silently reset to an unlimited retry loop.
-            Dim state As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(System.IO.File.ReadAllText(path, System.Text.Encoding.UTF8))
+            Dim state As Newtonsoft.Json.Linq.JObject = LoadAutoPilotLogDiagnosticStateObject(path)
             Dim counter As Newtonsoft.Json.Linq.JToken = state("failedAttempts")
             If counter Is Nothing OrElse counter.Type <> Newtonsoft.Json.Linq.JTokenType.Integer Then Throw New System.IO.InvalidDataException("Missing or invalid AutoPilot diagnostics attempt counter.")
             Dim failures As System.Int32 = state.Value(Of System.Int32)("failedAttempts")
@@ -603,6 +603,9 @@ Partial Public Class ThisAddIn
             "scheduled_delivery: Scheduled-task results have a host-side dispatch path after the orchestrator returns (SendScheduledTaskResult and SubmitAutoPilotMailOnce). An absent mail tool call in the tooling log alone does not prove missing delivery. Missing post-run host evidence also does not prove successful submission. Check explicit recipients and distinguish submission from confirmed mailbox delivery.",
             "recovery_contract: Operation, step, attempt and artifact revision state, correlated retries and verified alternative outcomes already exist. Resolve a claimed stale blocker using operation/step IDs, logical deliverable, output slot, required effects and verified current revision. A different successful step or an arbitrary valid file cannot clear an independent unresolved failure; do not recommend globally deleting failure state or weakening completion guards.",
             "artifact_contract: An explicit single-file artifact identity covers one physical output. Several expected output slots are supported. Rejecting extra files for one slot is not by itself a host defect. Artifact validity, requested result coverage, source coverage and required independent steps are distinct obligations. Undeclared requirements are not automatically inferred or enforced; a skill-specific return field is not a trusted executable host command.",
+            "blocking_evidence: The current build records the failure selected by the completion verdict. Historical diagnostics can show a different, later historical failure. A successful retry with a different operation or source is insufficient by itself. Unscoped retries need stable remaining argument evidence or validated effect/slot lineage.",
+            "final_output: Source format authority describes layout or structure; it does not establish a requested edit or a file obligation. File completion checks use declared output contracts and validated outputs. Inspect the request and any executed mutation before attributing an inline-only answer to the host. A locked single eligible output slot may supply omitted producer identity; ambiguous or conflicting contracts require correction.",
+            "execution_loops: A repeated identical outcome can trigger a corrective turn followed by a bounded stop. This proves the guard fired, not that it was absent. Do not cache stateful calls across turns solely because the arguments match.",
             "pdf_extraction: PDF text extraction has an optional configuration-dependent OCR fallback; visual diagram interpretation is not equivalent to OCR. PDF rejection by another binary tool alone does not establish absent OCR. The current extraction selector accepts exact attachment_names and one-file aliases, rejects invalid explicit targets before reading, and retains deliberate all-PDF batch mode. Earlier versions or exposed schemas may differ; inspect the logged arguments and execution.",
             "delegation_paths: Sub-agents have isolated model/tool contexts, but that does not imply a separate filesystem sandbox. Session staging and path policies are already part of the host. Distinguish not_found, wrong/uncreated paths and access_denied. The Python worker is separately sandboxed and sees only explicitly staged inputs. Do not recommend granting the entire temporary directory to fix an unproved path cause.",
             "paging_contract: Paging/context progress guards and isolated large-source analysis are already available. The current workspace-read schema exposes start_char and offset with equal-value validation and returns numeric next_offset. Distinguish repeated windows from real source coverage and analytical progress; correct complete reading is not itself a defect. A loop breaker is not necessarily the cause of the earlier schema/routing failure.",
@@ -1283,7 +1286,7 @@ Partial Public Class ThisAddIn
 
         Dim analyzedUtc As System.DateTime = System.DateTime.UtcNow
         Dim parsed As System.DateTime
-        If System.DateTime.TryParse(result.Value(Of System.String)("analyzedUtc"), Nothing, System.Globalization.DateTimeStyles.RoundtripKind, parsed) Then
+        If System.DateTime.TryParse(result.Value(Of System.String)("analyzedUtc"), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, parsed) Then
             analyzedUtc = parsed.ToUniversalTime()
         End If
 
@@ -1396,7 +1399,7 @@ Partial Public Class ThisAddIn
                 If item Is Nothing Then Continue For
                 Dim fp As System.String = If(item.Value(Of System.String)("fingerprint"), System.String.Empty).Trim()
                 Dim dt As System.DateTime
-                If fp.Length > 0 AndAlso System.DateTime.TryParse(item.Value(Of System.String)("reportedUtc"), Nothing, System.Globalization.DateTimeStyles.RoundtripKind, dt) Then cooldown(fp) = dt.ToUniversalTime()
+                If fp.Length > 0 AndAlso System.DateTime.TryParse(item.Value(Of System.String)("reportedUtc"), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, dt) Then cooldown(fp) = dt.ToUniversalTime()
             Next
         End If
 
@@ -1437,7 +1440,7 @@ Partial Public Class ThisAddIn
         If System.String.Equals(state.Value(Of System.String)("dailyReportConsideredLocalDate"), localDate, System.StringComparison.Ordinal) OrElse
            System.String.Equals(state.Value(Of System.String)("dailyReportAttemptLocalDate"), localDate, System.StringComparison.Ordinal) Then Return False
         Dim lastUtc As System.DateTime
-        If System.DateTime.TryParse(state.Value(Of System.String)("lastReportUtc"), Nothing, System.Globalization.DateTimeStyles.RoundtripKind, lastUtc) AndAlso
+        If System.DateTime.TryParse(state.Value(Of System.String)("lastReportUtc"), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, lastUtc) AndAlso
            lastUtc.ToLocalTime().Date >= nowLocal.Date Then Return False
         Return True
     End Function
@@ -1458,7 +1461,7 @@ Partial Public Class ThisAddIn
             allResults.Add(result)
             If HasAutoPilotLogDiagnosticPeriodicFindings(result) Then results.Add(result)
             Dim analyzedUtc As System.DateTime
-            If System.DateTime.TryParse(result.Value(Of System.String)("analyzedUtc"), Nothing, System.Globalization.DateTimeStyles.RoundtripKind, analyzedUtc) Then
+            If System.DateTime.TryParse(result.Value(Of System.String)("analyzedUtc"), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, analyzedUtc) Then
                 analyzedUtc = analyzedUtc.ToUniversalTime()
                 If analyzedUtc < oldestAnalysisUtc Then oldestAnalysisUtc = analyzedUtc
                 If analyzedUtc > newestAnalysisUtc Then newestAnalysisUtc = analyzedUtc
@@ -1534,7 +1537,7 @@ Partial Public Class ThisAddIn
             Dim receipt As Newtonsoft.Json.Linq.JObject = TryCast(history(index), Newtonsoft.Json.Linq.JObject)
             Dim receiptUtc As System.DateTime
             If receipt IsNot Nothing AndAlso
-               System.DateTime.TryParse(receipt.Value(Of System.String)("reportedUtc"), Nothing,
+               System.DateTime.TryParse(receipt.Value(Of System.String)("reportedUtc"), System.Globalization.CultureInfo.InvariantCulture,
                                         System.Globalization.DateTimeStyles.RoundtripKind, receiptUtc) AndAlso
                receiptUtc.ToUniversalTime() <= cooldownCutoffUtc Then history.RemoveAt(index)
         Next
@@ -1573,10 +1576,24 @@ Partial Public Class ThisAddIn
         End SyncLock
     End Function
 
+    ' Persisted UTC stamps are ISO strings. A Date-valued JToken converted back to String
+    ' loses its offset and can swap day and month on systems using a different culture.
+    Private Shared Function LoadAutoPilotLogDiagnosticStateObject(path As System.String) As Newtonsoft.Json.Linq.JObject
+        Using input As New System.IO.StreamReader(path, System.Text.Encoding.UTF8, True)
+            Using reader As New Newtonsoft.Json.JsonTextReader(input) With {.DateParseHandling = Newtonsoft.Json.DateParseHandling.None}
+                Dim result As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Load(reader)
+                While reader.Read()
+                    If reader.TokenType <> Newtonsoft.Json.JsonToken.Comment Then Throw New System.IO.InvalidDataException("Trailing data in diagnostics state.")
+                End While
+                Return result
+            End Using
+        End Using
+    End Function
+
     Private Shared Function ReadAutoPilotLogDiagnosticResultUnlocked(path As System.String) As Newtonsoft.Json.Linq.JObject
         Try
             If System.String.IsNullOrWhiteSpace(path) OrElse Not System.IO.File.Exists(path) Then Return Nothing
-            Return Newtonsoft.Json.Linq.JObject.Parse(System.IO.File.ReadAllText(path, System.Text.Encoding.UTF8))
+            Return LoadAutoPilotLogDiagnosticStateObject(path)
         Catch
             Return Nothing
         End Try
@@ -1627,7 +1644,7 @@ Partial Public Class ThisAddIn
             Dim path As System.String = GetAutoPilotLogDiagnosticsStatePath()
             If path.Length = 0 OrElse Not System.IO.File.Exists(path) Then Return New Newtonsoft.Json.Linq.JObject()
             SyncLock _apLogDiagnosticsFsSync
-                Dim state As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(System.IO.File.ReadAllText(path, System.Text.Encoding.UTF8))
+                Dim state As Newtonsoft.Json.Linq.JObject = LoadAutoPilotLogDiagnosticStateObject(path)
                 For Each key As System.String In New System.String() {"dailyReportAttemptLocalDate", "dailyReportConsideredLocalDate"}
                     Dim value As System.String = state.Value(Of System.String)(key)
                     Dim parsedDate As System.DateTime

@@ -128,6 +128,8 @@ Partial Public Class ThisAddIn
     Private _lastCompletedToolingRunState As SharedLibrary.Agents.ToolCallSequencing.ToolingRunState = Nothing
     Private _lastCompletedToolingWorkflowId As System.String = System.String.Empty
     Private _lastCompletedToolingWasBlocked As System.Boolean = False
+    ' Host consumers must distinguish an accepted completion from nonempty error text.
+    Private _lastCompletedToolingTaskStatus As System.String = System.String.Empty
 
 
 #Region "Tooling Data Classes"
@@ -226,6 +228,10 @@ Partial Public Class ThisAddIn
         ''' These values are never accepted from model-supplied artifact metadata.
         ''' </summary>
         Public Property VerifiedArtifactEffects As System.Collections.Generic.List(Of System.String)
+
+        ' Optional host publication receipt. Nothing permits legacy delta discovery;
+        ' an empty receipt is authoritative evidence that no output was published.
+        Friend Property HostPublishedOutputPaths As System.Collections.Generic.IReadOnlyCollection(Of System.String)
 
         ''' <summary>
         ''' Initializes a new tool response instance with default success state.
@@ -472,7 +478,8 @@ Partial Public Class ThisAddIn
         Dim systemPrompt As String = SharedLibrary.Agents.ToolingBootstrapPreflight.BuildSystemPrompt(manifests)
         Dim userPrompt As String = SharedLibrary.Agents.ToolingBootstrapPreflight.BuildUserPrompt(
             context.LatestUserRequestRaw,
-            context.HostTaskSummary)
+            context.HostTaskSummary,
+            context.SequencingState.OutputContractInputs)
 
         context.Log("Bootstrap preflight started: response language, memory grounding, source-format authority, capability routing, and first capability load.")
         ToolingFileLogger.LogStep("[PERF] Bootstrap preflight LLM request started.")
@@ -505,7 +512,13 @@ Partial Public Class ThisAddIn
             Throw
         Catch ex As System.OperationCanceledException
             sw.Stop()
-            ToolingFileLogger.LogStep($"[PERF] Bootstrap preflight cancelled: elapsedMs={sw.ElapsedMilliseconds}.")
+            Try
+                ToolingFileLogger.LogStep($"[PERF] Bootstrap preflight cancelled: elapsedMs={sw.ElapsedMilliseconds}.")
+                ToolingFileLogger.LogStep(SharedLibrary.Agents.ToolingPhaseTelemetry.BuildCancellationRecord(
+                    "bootstrap_routing", context.HostKind, sw.ElapsedMilliseconds, ex, cancellationToken, context.IsCancelled))
+            Catch telemetryException As System.Exception
+                ' Diagnostics must never replace the original cancellation or alter its propagation.
+            End Try
             Throw
         Catch ex As System.Exception
             sw.Stop()
@@ -523,6 +536,13 @@ Partial Public Class ThisAddIn
 
         Dim decision As SharedLibrary.Agents.ToolingBootstrapPreflight.Decision =
             SharedLibrary.Agents.ToolingBootstrapPreflight.ParseDecision(raw)
+
+        Dim outputContractError As System.String = System.String.Empty
+        If context.SequencingState IsNot Nothing AndAlso Not context.SequencingState.OutputContractPinned Then
+            If Not context.SequencingState.TryApplyOutputRequirements(decision.OutputRequirements, False, outputContractError) Then
+                context.Log("Output contract needs an explicit completion review: " & outputContractError, "diag")
+            End If
+        End If
 
         Dim normalizedForLog As String = If(decision.NormalizedOutput, "")
         If normalizedForLog.Length > 1200 Then normalizedForLog = normalizedForLog.Substring(0, 1200) & "..."
@@ -828,6 +848,7 @@ Partial Public Class ThisAddIn
                    userText, otherPrompt, fullPromptOverride, workflowId, resumeWorkflowFromCheckpoint))
         Dim toolingLogScope As System.IDisposable =
             ToolingFileLogger.BeginSessionScope(toolingLogArchivePath, originalRequestForLog)
+        Dim pythonRun As New SharedLibrary.Agents.PythonAgentRunScope()
         ' Cover setup before the central loop Try as well as every return/exception.
         ' Existing explicit completion paths are idempotent within this lease.
         Try
@@ -851,6 +872,7 @@ Partial Public Class ThisAddIn
             _lastCompletedToolingRunState = Nothing
             _lastCompletedToolingWorkflowId = System.String.Empty
             _lastCompletedToolingWasBlocked = False
+            _lastCompletedToolingTaskStatus = System.String.Empty
             _lastCompletedToolResponses = New List(Of ToolResponse)()
         End If
 
@@ -959,6 +981,8 @@ Partial Public Class ThisAddIn
                 context.SequencingState.RegisteredDeliverableArtifacts =
                     parentToolingContext.SequencingState.RegisteredDeliverableArtifacts
             End If
+
+            context.SequencingState.HostOutputPublications = parentToolingContext.SequencingState.HostOutputPublications
 
             ' ExpectedDeliverableSlots is intentionally NOT shared with nested runs.
             ' Expected output completeness is scoped to the current tooling run,
@@ -1419,6 +1443,12 @@ Partial Public Class ThisAddIn
             Dim bootstrapDecision As SharedLibrary.Agents.ToolingBootstrapPreflight.Decision = Nothing
 
             If Not subAgentMode Then
+                context.SequencingState.InitializeOutputContractInputs(
+                    If(_apCurrentAttachments Is Nothing,
+                       Global.SharedLibrary.Agents.ToolingOutputContract.CaptureInputNames(Global.SharedLibrary.Agents.PathPolicy.SessionStagingRoot),
+                       _apCurrentAttachments.Where(Function(item) item IsNot Nothing).Select(
+                           Function(item) If(System.String.IsNullOrWhiteSpace(item.TempFilePath),
+                                             item.OriginalFileName, System.IO.Path.GetFileName(item.TempFilePath)))))
                 Dim bootstrapAttempt As Integer = 0
                 Do
                     bootstrapAttempt += 1
@@ -2468,6 +2498,22 @@ Partial Public Class ThisAddIn
                             End If
                         End If
 
+                        Dim repairBindingError As System.String = System.String.Empty
+                        If context.SequencingState IsNot Nothing AndAlso
+                           Not context.SequencingState.TryBindRepairAttempt(tc.ToolName, tc.Arguments, tc.CallId, recoveryScopeKey, repairBindingError,
+                               SharedLibrary.Agents.ExplicitOperationToolContract.SupportsRepairReference(toolConfig)) Then
+                            AddToolResponseToHistory(context, New ToolResponse With {
+                                .CallId = tc.CallId, .ToolName = tc.ToolName, .Success = False,
+                                .ErrorCode = repairBindingError, .ErrorMessage = "The repair reference does not identify an eligible failed step. No tool ran.",
+                                .Response = Newtonsoft.Json.JsonConvert.SerializeObject(New With {.error = repairBindingError}), .ResultKind = "error"})
+                            context.PendingContinuationGuardPrompt = "Correct repair_of_failure from the host's current failure reference. Keep the original tool, step and output target. Never use a repair link for unrelated work."
+                            context.PendingGuardTitle = "HOST REPAIR REFERENCE"
+                            context.PendingRejectedAssistantTurn = If(currentResponse, System.String.Empty)
+                            stopCurrentBatchAfterTool = True
+                            Exit For
+                        End If
+                        auditRecoveryScopeKey = recoveryScopeKey
+
                         Dim toolArgumentValidationError As String = ""
 
                         If Not TryValidateToolCallArguments(tc, toolConfig, toolArgumentValidationError) Then
@@ -2484,7 +2530,9 @@ Partial Public Class ThisAddIn
                                     recoveryScopeKey:=recoveryScopeKey,
                                     allowRetryScopeRebinding:=True,
                                     retryCorrelationArguments:=tc.Arguments,
-                                    retryCorrelationAllowedArgumentNames:=GetToolParameterSchemas(toolConfig).Keys)
+                                    retryCorrelationAllowedArgumentNames:=GetToolParameterSchemas(toolConfig).Keys,
+                                    retryCorrelationRequiredArgumentNames:=GetToolRequiredParameters(toolConfig),
+                                    retryCorrelationDisallowsAdditionalArguments:=ToolSchemaDisallowsAdditionalProperties(toolConfig))
                             End If
 
                             context.PendingContinuationGuardPrompt =
@@ -3039,7 +3087,8 @@ Partial Public Class ThisAddIn
                                     legacyCompatibilityRoots)
 
                             Dim executionToolCall As ToolCall = tc
-                            If SharedLibrary.Agents.ExplicitOperationToolContract.HasCapability(toolConfig) Then
+                            If SharedLibrary.Agents.ExplicitOperationToolContract.HasCapability(toolConfig) OrElse
+                               (tc.Arguments IsNot Nothing AndAlso tc.Arguments.ContainsKey("repair_of_failure")) Then
                                 executionToolCall = New ToolCall() With {
                                     .CallId = tc.CallId,
                                     .ToolName = tc.ToolName,
@@ -3133,6 +3182,8 @@ Partial Public Class ThisAddIn
                                         System.StringComparison.OrdinalIgnoreCase) OrElse
                                     tc.ToolName.StartsWith("skill_", System.StringComparison.OrdinalIgnoreCase)) Then
 
+                                    If Not subAgentMode Then context.SequencingState.RequireWorkflowOutputReview()
+
                                     context.SequencingState.ApplyRequiredEffectsToExpectedDeliverables(
                                         SharedLibrary.Agents.SkillInvokeTool.GetDeclaredDeliverableRequiredEffectsFromResponse(
                                             toolResponse.Response))
@@ -3164,7 +3215,8 @@ Partial Public Class ThisAddIn
                                     tc.ToolName,
                                     legacyCompatibilityRoots,
                                     legacyCompatibilitySnapshot,
-                                    GetOutlookLegacyCompatibilityExcludedPaths())
+                                    GetOutlookLegacyCompatibilityExcludedPaths(),
+                                    toolResponse.HostPublishedOutputPaths)
                             End If
                         End If
                         If toolResponse IsNot Nothing AndAlso
@@ -3231,6 +3283,12 @@ Partial Public Class ThisAddIn
                                                     retryCorrelationArguments:=tc.Arguments,
                                                     rejectedBeforeExecution:=toolResponse.RejectedBeforeExecution,
                                                     serviceErrorDetails:=toolResponse.ServiceErrorDetails)
+
+                                    Dim repairHint As System.String = context.SequencingState.BuildRepairReferenceHint(tc.ToolName, recoveryScopeKey)
+                                    If repairHint.Length > 0 Then
+                                        toolResponse.ErrorMessage &= repairHint
+                                        context.Log(repairHint, "diag")
+                                    End If
 
                                     If toolResponse.AllowCrossScopeAlternativeRecovery AndAlso
                                        Not recoverableSubAgentTaskFailure AndAlso
@@ -3475,7 +3533,7 @@ Partial Public Class ThisAddIn
                                 context.SequencingState.NoteToolFailure(
                                     tc.ToolName,
                                     "repeated_identical_tool_execution",
-                                    "The same successful tool execution repeated without progress and the host circuit breaker terminated the run.",
+                                    "The same tool call returned the same outcome repeatedly without progress and the host circuit breaker terminated the run.",
                                     terminal:=True,
                                     recoveryScopeKey:=recoveryScopeKey)
                                 context.SequencingState.FinalResponseOrigin = "host_generated"
@@ -4123,6 +4181,12 @@ Partial Public Class ThisAddIn
                                 context.SequencingState.FinalResponseOrigin = "model_provided"
                             End If
 
+                            ' Preserve optional control metadata before user-facing egress removes the footer.
+                            ' Delivery is decided only by an opting-in host after the final run verdict.
+                            If context.SequencingState IsNot Nothing Then
+                                context.SequencingState.FinalDeliveryDirective =
+                                    Global.SharedLibrary.Agents.ToolingDeliveryContract.ParseFinalDirective(currentResponse)
+                            End If
                             currentResponse = StripTaskStatus(currentResponse)
                             acceptedFinalStatus = "complete"
                             context.Log("Final complete response accepted.")
@@ -4291,7 +4355,8 @@ Partial Public Class ThisAddIn
                                         SharedLibrary.Agents.ToolCallSequencing.BuildRequiredMemoryGroundingRepairPrompt(context.SequencingState),
                                         SharedLibrary.Agents.ToolCallSequencing.BuildActiveToolingRepairPrompt(
                                             context.SequencingState,
-                                            turnValidation.InvalidReason))
+                                            turnValidation.InvalidReason,
+                                            turnValidation))
                                 If SharedLibrary.Agents.ToolCallSequencing.TryBeginFooterOnlyRepair(
                                     context.SequencingState, currentResponse, turnValidation.InvalidReason) Then
                                     context.PendingContinuationGuardPrompt = SharedLibrary.Agents.ToolCallSequencing.BuildFooterOnlyRepairPrompt()
@@ -4310,7 +4375,7 @@ Partial Public Class ThisAddIn
                                         "Your previous turn was rejected because it violated the active-tooling response contract.")
 
                                 context.LogWarn(
-                                    $"Invalid active-tooling turn rejected; {SharedLibrary.Agents.ToolCallSequencing.BuildFinalizationDiagnostic(context.SequencingState, If(turnValidation.InvalidReason, "invalid_turn"))}; repairAttempt={context.PrematureTextRetryCount}/{ToolExecutionContext.MaxContinuationRetries}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}; lastSuccessfulTool={If(context.SequencingState?.LastSuccessfulToolCall, "")}; unresolvedToolFailure={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure, "true", "false")}; host={context.HostKind}")
+                                    $"Invalid active-tooling turn rejected; {SharedLibrary.Agents.ToolCallSequencing.BuildFinalizationDiagnostic(context.SequencingState, If(turnValidation.InvalidReason, "invalid_turn"), turnValidation)}; repairAttempt={context.PrematureTextRetryCount}/{ToolExecutionContext.MaxContinuationRetries}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}; lastSuccessfulTool={If(context.SequencingState?.LastSuccessfulToolCall, "")}; unresolvedToolFailure={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure, "true", "false")}; host={context.HostKind}")
 
                                 Continue While
                             End If
@@ -4335,7 +4400,7 @@ Partial Public Class ThisAddIn
                             End If
 
                             context.LogWarn(
-                                $"Active-tooling repair exhausted; returning host-generated blocked message. {SharedLibrary.Agents.ToolCallSequencing.BuildFinalizationDiagnostic(context.SequencingState, If(turnValidation.InvalidReason, "invalid_turn"))}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}; unresolvedToolFailure={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure, "true", "false")}; host={context.HostKind}")
+                                $"Active-tooling repair exhausted; returning host-generated blocked message. {SharedLibrary.Agents.ToolCallSequencing.BuildFinalizationDiagnostic(context.SequencingState, If(turnValidation.InvalidReason, "invalid_turn"), turnValidation, verifyLegacySlots:=True)}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}; unresolvedToolFailure={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure, "true", "false")}; host={context.HostKind}")
 
                             Exit While
                     End Select
@@ -4431,6 +4496,10 @@ Partial Public Class ThisAddIn
 
                         Select Case forcedValidation.TurnKind
                             Case SharedLibrary.Agents.ToolCallSequencing.ActiveToolingTurnKind.FinalCompleteTurn
+                                If context.SequencingState IsNot Nothing Then
+                                    context.SequencingState.FinalDeliveryDirective =
+                                        Global.SharedLibrary.Agents.ToolingDeliveryContract.ParseFinalDirective(currentResponse)
+                                End If
                                 acceptedFinalStatus = "complete"
 
                                 If context.SequencingState IsNot Nothing Then
@@ -5101,6 +5170,16 @@ Partial Public Class ThisAddIn
                 End Try
             End If
 
+            ' Optional delivery metadata is valid only for this run's final accepted complete verdict.
+            ' A late failure, cancellation, raw response or blocked fallback must discard it.
+            If Not subAgentMode AndAlso context IsNot Nothing AndAlso context.SequencingState IsNot Nothing Then
+                If context.IsCancelled OrElse cancellationToken.IsCancellationRequested OrElse
+                   context.FinalizationBlocked OrElse context.EmptyMainModelResponse OrElse
+                   abortDueToToolError OrElse Not System.String.Equals(acceptedFinalStatus, "complete", System.StringComparison.OrdinalIgnoreCase) Then
+                    context.SequencingState.FinalDeliveryDirective = Nothing
+                End If
+            End If
+
             If workflowScope IsNot Nothing Then
                 workflowScope.Dispose()
                 workflowScope = Nothing
@@ -5122,6 +5201,7 @@ Partial Public Class ThisAddIn
             If Not subAgentMode Then
                 _lastCompletedToolingRunState = context.SequencingState
                 _lastCompletedToolingWorkflowId = context.WorkflowId
+                _lastCompletedToolingTaskStatus = If(acceptedFinalStatus, System.String.Empty)
                 _lastCompletedToolingWasBlocked =
                     context.FinalizationBlocked OrElse
                     context.EmptyMainModelResponse OrElse
@@ -5191,6 +5271,7 @@ Partial Public Class ThisAddIn
             ToolingFileLogger.EndSession(False, "Tooling invocation failed.", ex:=toolingScopeError)
             Throw
         Finally
+            pythonRun.Dispose()
             toolingLogScope.Dispose()
         End Try
     End Function
@@ -7390,7 +7471,8 @@ Partial Public Class ThisAddIn
                 toolCall.Arguments,
                 context.SequencingState,
                 restoredRetryInvariants,
-                retryInvariantError) Then
+                retryInvariantError,
+                toolCall.CallId) Then
 
                 context.LogWarn("Retry fidelity guard rejected a tool call.", details:=retryInvariantError)
                 Return New ToolResponse() With {
@@ -7467,17 +7549,24 @@ Partial Public Class ThisAddIn
                 Return resp
             End If
 
-            Dim fullPath As String = ResolveWorkspacePath(relPath)
-            If String.IsNullOrWhiteSpace(fullPath) OrElse Not IO.File.Exists(fullPath) Then
-                resp.Success = False
-                resp.ErrorMessage = "Workspace file not found: " & If(relPath, "")
-                Return resp
-            End If
-
+            Dim fullPath As System.String = ""
             Dim extracted As String = ""
             Try
-                extracted = Await ChatAgentExtractFileText(fullPath).ConfigureAwait(False)
-            Catch ex As Exception
+                fullPath = ResolveWorkspacePath(relPath)
+                If String.IsNullOrWhiteSpace(fullPath) OrElse Not IO.File.Exists(fullPath) Then
+                    resp.Success = False
+                    resp.ErrorMessage = "Workspace file not found: " & If(relPath, "")
+                    Return resp
+                End If
+                extracted = Await ChatAgentExtractFileText(fullPath, cancellationToken).ConfigureAwait(False)
+            Catch ex As System.OperationCanceledException
+                Throw
+            Catch ex As System.IO.PathTooLongException
+                resp.Success = False
+                resp.ErrorCode = "path_too_long"
+                resp.ErrorMessage = SharedLibrary.Agents.FilePathBudget.PathTooLongMessage
+                Return resp
+            Catch ex As System.Exception
                 resp.Success = False
                 resp.ErrorMessage = "Extraction failed: " & ex.Message
                 Return resp
@@ -7561,17 +7650,20 @@ Partial Public Class ThisAddIn
             Dim etmItems As New List(Of Object)()
 
             For Each etmRelPath In etmSelected
-                Dim etmFullPath As String = ResolveWorkspacePath(etmRelPath)
-                If String.IsNullOrWhiteSpace(etmFullPath) OrElse Not IO.File.Exists(etmFullPath) Then
-                    etmItems.Add(New With {Key .path = etmRelPath, Key .error = "not_found", Key .message = "File not found."})
-                    Continue For
-                End If
-
                 Try
-                    Dim etmExtracted As String = Await ChatAgentExtractFileText(etmFullPath).ConfigureAwait(False)
+                    Dim etmFullPath As System.String = ResolveWorkspacePath(etmRelPath)
+                    If String.IsNullOrWhiteSpace(etmFullPath) OrElse Not IO.File.Exists(etmFullPath) Then
+                        etmItems.Add(New With {Key .path = etmRelPath, Key .error = "not_found", Key .message = "File not found."})
+                        Continue For
+                    End If
+                    Dim etmExtracted As String = Await ChatAgentExtractFileText(etmFullPath, cancellationToken).ConfigureAwait(False)
                     etmItems.Add(SharedLibrary.Agents.ToolResultStore.BuildSourcePreview(
                         context.WorkflowId, toolCall.ToolName, If(etmExtracted, ""), etmMaxCharsPerFile, etmFullPath))
-                Catch ex As Exception
+                Catch ex As System.OperationCanceledException
+                    Throw
+                Catch ex As System.IO.PathTooLongException
+                    etmItems.Add(New With {Key .path = etmRelPath, Key .error = "path_too_long", Key .message = SharedLibrary.Agents.FilePathBudget.PathTooLongMessage})
+                Catch ex As System.Exception
                     etmItems.Add(New With {Key .path = etmRelPath, Key .error = "extraction_failed", Key .message = ex.Message})
                 End Try
             Next
@@ -7612,7 +7704,7 @@ Partial Public Class ThisAddIn
                 SyncWorkspaceToPathPolicy(includeSessionTempFallback:=True)
             End If
 
-            wsResp.Response = SharedLibrary.Agents.WorkspaceTools.Execute(toolCall.ToolName, toolCall.Arguments)
+            wsResp.Response = SharedLibrary.Agents.WorkspaceTools.Execute(toolCall.ToolName, toolCall.Arguments, context?.SequencingState)
             wsResp.Success = True
 
             Try
@@ -7876,6 +7968,7 @@ Partial Public Class ThisAddIn
         toolCall.ToolName, toolCall.Arguments, CType(Me, SharedLibrary.Agents.ISubAgentHost), cancellationToken, _context,
         authoritativeUserRequest:=If(context Is Nothing, Nothing, context.LatestUserRequestRaw),
         semanticArchiveScope:=If(context Is Nothing, Nothing, context.SemanticArchiveScope),
+        runState:=If(context Is Nothing, Nothing, context.SequencingState),
         onSkillLoaded:=Sub(skillName As System.String) SharedLogger.LogAgentToolCall(_context, _context.RDV, OutlookUsageSurface(), SharedLibrary.Agents.ToolRegistryBuilder.BuildSkillToolName(skillName))).ConfigureAwait(False)
 
                 response.Response = If(__agentJson, "")
@@ -8637,10 +8730,11 @@ __AfterDispatch:
     End Function
 
 
-    Public Function ShowLocalChatToolSelectionDialog(selectedMainToolNames As IEnumerable(Of String),
-                                                     selectedAdvancedToolNames As IEnumerable(Of String),
-                                                     ByRef updatedAdvancedToolNames As List(Of String),
-                                                     Optional includeInteractiveM365Tools As Boolean = True) As List(Of String)
+    Public Function ShowLocalChatToolSelectionDialog(selectedMainToolNames As System.Collections.Generic.IEnumerable(Of System.String),
+                                                     selectedAdvancedToolNames As System.Collections.Generic.IEnumerable(Of System.String),
+                                                     ByRef updatedAdvancedToolNames As System.Collections.Generic.List(Of System.String),
+                                                     Optional includeInteractiveM365Tools As System.Boolean = True,
+                                                     Optional includeArchiveScopePicker As System.Boolean = True) As System.Collections.Generic.List(Of System.String)
 
         Dim availableTools = GetLocalChatMainSelectableTools(includeInteractiveM365Tools)
         Dim workingAdvanced As New List(Of String)(
@@ -8680,7 +8774,7 @@ __AfterDispatch:
                     End Using
                 End Sub)
 
-            If Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.IsConfigured(_context) Then
+            If includeArchiveScopePicker AndAlso Global.SharedLibrary.SharedLibrary.SemanticArchiveHostIntegration.IsConfigured(_context) Then
                 selector.AddExtraButton("Archive scope…", Sub(s, e) SelectSemanticArchiveSources(selector))
             End If
             selector.AddExtraButton("Memory…",

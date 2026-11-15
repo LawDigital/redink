@@ -572,6 +572,11 @@ Public Class Ribbon1
         Globals.ThisAddIn.OpenCollectionAnalyzer()
     End Sub
 
+    Private Sub RI_TabularReview_Click(sender As System.Object, e As Microsoft.Office.Tools.Ribbon.RibbonControlEventArgs) Handles RI_TabularReview.Click
+        Global.SharedLibrary.SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "TabularReview_Excel invoked")
+        Globals.ThisAddIn.OpenTabularReview()
+    End Sub
+
     Private Sub RI_Renamer_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Renamer.Click
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Renamer_Excel invoked")
         Globals.ThisAddIn.RenameDocumentsWithAi()
@@ -580,6 +585,11 @@ Public Class Ribbon1
     Private Sub RI_RIRemove_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_RIRemove.Click
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RIRemove_Excel invoked")
         Globals.ThisAddIn.RemoveRIPrefixFromComments()
+    End Sub
+
+    Private Sub RI_ConvertFiles_Click(sender As System.Object, e As Microsoft.Office.Tools.Ribbon.RibbonControlEventArgs) Handles RI_ConvertFiles.Click, RI_ConvertFilesAnalyze.Click
+        Global.SharedLibrary.SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "ConvertFiles_Excel invoked")
+        Globals.ThisAddIn.ExportFileContentToText()
     End Sub
 
     Private Sub RI_TXTAnalyze_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_TXTAnalyze.Click

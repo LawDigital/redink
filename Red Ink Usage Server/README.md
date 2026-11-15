@@ -1,4 +1,4 @@
-# Red Ink Usage Server 1.4.6
+# Red Ink Usage Server 1.4.8
 
 Red Ink Usage Server collects monthly licence-use evidence, provides daily load counts, summarizes Red Ink `LogPath` activity, serves approved Red Ink configuration files, and exports usage reports. It does **not** grant, validate or enforce Red Ink licences.
 
@@ -21,6 +21,30 @@ Download the signed **Windows distribution ZIP**, extract the entire `RedInkUsag
 Initialise **only once** for a new installation. Store the displayed administrator password and the distinct reporting and configuration tokens securely. On an update, keep the existing data directory; supported database migrations run automatically.
 
 The local dashboard is normally at <http://localhost:8765>. The web interface includes Settings, download URLs with copy controls, optional Windows-login autostart, token rotation, data cleaning and authenticated shutdown from both local and remote admin sessions. Use `serve --no-browser` for an unattended console session. Remote office clients need a reachable server hostname and appropriately configured HTTPS, not their own `localhost`.
+
+## Additional static company websites
+
+Settings can define up to 32 read-only static websites with their own bind
+address, port, URL prefix, server-side document root and optional SPA fallback.
+Sites on the same host and port can share that port under distinct paths.
+Folders automatically serve `index.html` or `index.htm`; no directory listings
+or server-side code execution are enabled. Enabled HTTPS sites reuse the
+existing server TLS certificate. Settings changes apply through the supervised
+listener switch without a manual process restart, with rollback if a new port
+cannot be bound. The additional sites never expose the Usage Server's admin,
+collector or token/configuration routes.
+
+**Security:** Static websites do not use the Usage Server admin login. Any
+browser able to reach a site's port can access its published files. On the
+**same hostname and port as the administrator**, a JavaScript app has the
+same browser origin and can access an authenticated administrator's API;
+therefore share the admin origin **only with fully trusted application code**.
+Use a separate hostname or port for other apps. Publish
+only vetted public-to-the-intranet assets, limit each port with Windows and
+network firewalls, and keep site roots outside the protected Usage Server data
+directory. The root must be an absolute path on the machine running the
+server. To serve applications needing back-end code, authentication, upload,
+or API execution, deploy a separate application service/reverse proxy.
 
 ## LicenseCounter and LogPath
 
@@ -75,3 +99,19 @@ The observed-version panel groups **Word**, **Excel** and **Outlook** separately
 showing each host's distinct observed user total and its version distribution
 for the chosen 7-, 14- or 30-day window. The one-version-per-user-and-host
 rule and the independence from monthly licence reporting are unchanged.
+
+### Websites on the Usage Server port and per-site Save
+
+An enabled static website can now use the same bind address, TCP port and HTTP/HTTPS
+mode as the Usage Server (for example, `https://server:8765/apps/`). All sites on
+that shared listener are routed by URL prefix; `/` and the administrator, login,
+collector, configuration, health and static-asset namespaces remain exclusively
+assigned to the Usage Server. To publish at `/` use a dedicated port.
+
+In **Settings → Additional static websites**, each website now has its own
+**Save website** button (and a persistent Remove action). The global Save
+configuration button manages only general server settings. A website save
+validates and applies only that website together with all previously saved
+websites, without capturing edits to other unsaved cards. Live listener changes
+are activated in the background; the card shows the application/rollback state.
+Existing separate-port websites remain unchanged.
