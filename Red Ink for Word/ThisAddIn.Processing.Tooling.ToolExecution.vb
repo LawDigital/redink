@@ -514,7 +514,7 @@ Partial Public Class ThisAddIn
                 End If
 
                 If String.Equals(toolCall.ToolName, SharedLibrary.Agents.SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) AndAlso response.Success Then
-                    LoadSkillAllowedToolsFromResponse(response.Response, context)
+                    LoadSkillAllowedToolsFromResponse(response, context)
 
                     Dim __skillName As String = Nothing
                     If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("name") Then
@@ -561,7 +561,7 @@ Partial Public Class ThisAddIn
                 ApplyStructuredAgentResult(response, context)
 
                 If response.Success Then
-                    LoadSkillAllowedToolsFromResponse(response.Response, context)
+                    LoadSkillAllowedToolsFromResponse(response, context)
                 ElseIf String.IsNullOrWhiteSpace(response.ErrorMessage) Then
                     response.ErrorMessage = "Skill invocation returned no usable result."
                 End If

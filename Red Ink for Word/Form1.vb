@@ -622,7 +622,7 @@ Public Class frmAIChat
         Me.Font = New System.Drawing.Font("Segoe UI", 9)
         Me.FormBorderStyle = FormBorderStyle.Sizable
         Global.SharedLibrary.SharedLibrary.SharedMethods.ApplyStandardDialogIcon(Me)
-        Me.TopMost = True
+        Me.TopMost = Not chkStayOnTop.Checked
         Me.MinimumSize = New Size(830, 521)
 
         ' Restore window position and size from settings
@@ -2031,8 +2031,8 @@ Public Class frmAIChat
     ''' Setting persisted to My.Settings.NotAlwaysOnTop.
     ''' </remarks>
     Private Sub chkStayontop_Click(sender As Object, e As EventArgs)
-        Me.TopMost = Not Me.TopMost
-        My.Settings.NotAlwaysOnTop = Me.TopMost
+        Me.TopMost = Not chkStayOnTop.Checked
+        My.Settings.NotAlwaysOnTop = chkStayOnTop.Checked
         My.Settings.Save()
     End Sub
 
@@ -7690,14 +7690,14 @@ Public Class frmAIChat
                                 If tailChar = vbCr OrElse tailChar = vbLf Then
                                     mEnd -= 1
                                     LogReplaceDiag($"PASS2 shrunk match to avoid cell paragraph mark; new mEnd={mEnd}")
+                                    If adjustedNewText.EndsWith(vbCrLf, StringComparison.Ordinal) Then
+                                        adjustedNewText = adjustedNewText.Substring(0, adjustedNewText.Length - 2)
+                                    ElseIf adjustedNewText.EndsWith(vbCr, StringComparison.Ordinal) OrElse
+                                           adjustedNewText.EndsWith(vbLf, StringComparison.Ordinal) Then
+                                        adjustedNewText = adjustedNewText.Substring(0, adjustedNewText.Length - 1)
+                                    End If
+                                    LogReplaceDiag($"PASS2 trimmed trailing paragraph mark from newText; len={adjustedNewText.Length}")
                                 End If
-                                If adjustedNewText.EndsWith(vbCrLf, StringComparison.Ordinal) Then
-                                    adjustedNewText = adjustedNewText.Substring(0, adjustedNewText.Length - 2)
-                                ElseIf adjustedNewText.EndsWith(vbCr, StringComparison.Ordinal) OrElse
-                                       adjustedNewText.EndsWith(vbLf, StringComparison.Ordinal) Then
-                                    adjustedNewText = adjustedNewText.Substring(0, adjustedNewText.Length - 1)
-                                End If
-                                LogReplaceDiag($"PASS2 trimmed trailing paragraph mark from newText; len={adjustedNewText.Length}")
                             End If
                         End If
                     Catch ex As Exception

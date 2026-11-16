@@ -219,6 +219,24 @@ Namespace Agents
             End Try
         End Function
 
+        Public Shared Function ResolveSkillToolAvailability(
+            expandedNames As System.Collections.Generic.IEnumerable(Of System.String),
+            tryLoad As System.Func(Of System.String, System.Boolean)) As Newtonsoft.Json.Linq.JObject
+
+            Dim exposed As New Newtonsoft.Json.Linq.JArray()
+            Dim unavailable As New Newtonsoft.Json.Linq.JArray()
+            For Each name As System.String In expandedNames
+                If tryLoad(name) Then
+                    exposed.Add(name)
+                Else
+                    unavailable.Add(name)
+                End If
+            Next
+            Return New Newtonsoft.Json.Linq.JObject(
+                New Newtonsoft.Json.Linq.JProperty("exposed", exposed),
+                New Newtonsoft.Json.Linq.JProperty("unavailable", unavailable))
+        End Function
+
         Private Shared Function BuildResourceIndex() As JObject
             Dim idx As New JObject()
 
