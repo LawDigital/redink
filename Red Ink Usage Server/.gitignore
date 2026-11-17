@@ -43,6 +43,7 @@ htmlcov/
 # and dist/README.txt as versioned build inputs/documentation).
 /build/pyinstaller-*/
 /dist/windows-*/
+/dist/python/
 *.spec.bak
 
 # Temporary generated reports, rather than documentation or test fixtures.

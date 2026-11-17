@@ -6574,13 +6574,17 @@ Partial Public Class ThisAddIn
         Return SharedLibrary.Agents.HostToolRegistration.IsSelectedOnlineSourceToolName(toolName)
     End Function
 
-    Private Sub LoadSkillAllowedToolsFromResponse(skillResponse As String, context As ToolExecutionContext)
-        If context Is Nothing OrElse String.IsNullOrWhiteSpace(skillResponse) Then
+    Private Sub LoadSkillAllowedToolsFromResponse(skillResponse As ToolResponse, context As ToolExecutionContext)
+        If context Is Nothing OrElse skillResponse Is Nothing OrElse System.String.IsNullOrWhiteSpace(skillResponse.Response) Then
             Return
         End If
 
         Try
-            Dim obj As JObject = JObject.Parse(skillResponse)
+            Dim obj As JObject
+            Using reader As New Newtonsoft.Json.JsonTextReader(New System.IO.StringReader(skillResponse.Response))
+                reader.DateParseHandling = Newtonsoft.Json.DateParseHandling.None
+                obj = Newtonsoft.Json.Linq.JObject.Load(reader)
+            End Using
             Dim allowedToolsToken As JToken = obj("allowed_tools")
 
             If allowedToolsToken Is Nothing OrElse allowedToolsToken.Type <> JTokenType.Array Then
@@ -6612,17 +6616,17 @@ Partial Public Class ThisAddIn
             context.AllowedToolNames = New HashSet(Of String)(expandedToolNames, StringComparer.OrdinalIgnoreCase)
             context.EnforceAllowedToolScope = True
 
-            For Each toolName As String In expandedToolNames
-                EnsureVisibleToolLoaded(toolName, context)
-            Next
-
-            context.Log(
-                "Skill allowed-tool scope enforced: " &
-                If(context.AllowedToolNames.Count = 0,
-                   "(none)",
-                   String.Join(", ", context.AllowedToolNames.OrderBy(Function(n) n))),
-                "diag")
-        Catch
+            Dim availability As Newtonsoft.Json.Linq.JObject =
+                SharedLibrary.Agents.SkillInvokeTool.ResolveSkillToolAvailability(
+                    expandedToolNames,
+                    Function(name) EnsureVisibleToolLoaded(name, context) IsNot Nothing)
+            obj("skill_tool_availability") = availability
+            skillResponse.Response = obj.ToString(Newtonsoft.Json.Formatting.None)
+            context.Log("Skill allowed-tool scope enforced: declared=" &
+                        allowedToolsToken.ToString(Newtonsoft.Json.Formatting.None) &
+                        "; resolved=" & availability.ToString(Newtonsoft.Json.Formatting.None), "diag")
+        Catch ex As System.Exception
+            context.LogWarn("Skill tool scope resolution failed.", details:=ex.Message, visibleToUser:=False)
         End Try
     End Sub
 
@@ -7994,7 +7998,7 @@ Partial Public Class ThisAddIn
                 End If
 
                 If String.Equals(toolCall.ToolName, SharedLibrary.Agents.SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) AndAlso response.Success Then
-                    LoadSkillAllowedToolsFromResponse(response.Response, context)
+                    LoadSkillAllowedToolsFromResponse(response, context)
 
                     Dim __skillName As String = Nothing
                     If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("name") Then
@@ -8041,7 +8045,7 @@ Partial Public Class ThisAddIn
                 ApplyStructuredAgentResult(response, context)
 
                 If response.Success Then
-                    LoadSkillAllowedToolsFromResponse(response.Response, context)
+                    LoadSkillAllowedToolsFromResponse(response, context)
                 ElseIf String.IsNullOrWhiteSpace(response.ErrorMessage) Then
                     response.ErrorMessage = "Skill invocation returned no usable result."
                 End If

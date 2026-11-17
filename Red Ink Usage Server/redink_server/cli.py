@@ -138,7 +138,10 @@ def main(argv=None):
             print("Local INI URL: http://127.0.0.1:8765/config/" + credentials["config_token"] + "/redink.ini")
             print("For other computers, use the server's network hostname. Configure [tls] for native HTTPS, or use an HTTPS reverse proxy.")
             print("Place approved INI files and their .sig files in: " + str(args.data_dir.resolve() / "config-files"))
-            print("Start: RedInkUsageServer.exe serve --data-dir \"" + str(args.data_dir.resolve()) + "\"")
+            if getattr(sys, "frozen", False):
+                print("Start: RedInkUsageServer.exe serve --data-dir \"" + str(args.data_dir.resolve()) + "\"")
+            else:
+                print("To start the server, rerun this command with serve in place of init.")
             return 0
         settings = load_settings(args.data_dir)
         if args.command == "import-pfx":

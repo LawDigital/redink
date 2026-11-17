@@ -69,11 +69,22 @@ enabled for network access. Passwordless localhost logins are never remembered.
 
 ### Source archive for support
 
-Run `scripts\create-source-zip-on-desktop.bat` from the checked-out
-source project. The resulting ZIP contains source, build scripts, assets,
-tests and documentation, **not** running instance secrets, configuration,
-user databases, keys, certificates, logs or compiled distributions.
-The desktop folder is resolved by Windows (including OneDrive redirection).
+Run `create-source-zip-on-desktop.bat` from the source project. Windows
+resolves the Desktop folder, including OneDrive redirection. The timestamped
+ZIP contains the source, build inputs, assets, tests and documentation. Local
+server state, virtual environments, caches and build output are excluded.
+
+### Python distribution
+
+Run `build-python.bat` with Python 3.11 or later to create
+`dist/python/RedInkUsageServer-<version>-python.zip`. On Linux or macOS, run
+`python3 scripts/build-python-release.py` from the project root. The build
+requires only the Python standard library. Rebuilding a version replaces that
+version's ZIP after it passes an integrity check.
+
+The ZIP contains the runnable server project, the pinned runtime dependency
+list and the [Python installation guide](INSTALL_PYTHON.md) for Windows, Linux
+and macOS. The guide is named `README.md` in the distribution.
 
 ### Observed Office add-in versions
 
