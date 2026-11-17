@@ -451,7 +451,7 @@ there can be missing records when log sources are unavailable.
 ### Create a source support archive
 
 From the unpacked source tree run
-`scripts\create-source-zip-on-desktop.bat`. The generated desktop ZIP
+`create-source-zip-on-desktop.bat`. The generated desktop ZIP
 contains application sources, build configuration, tests, included assets
 and documentation. It does **not** contain the running database, tokens,
 server.toml, certificates, signing keys or generated EXE distributions.

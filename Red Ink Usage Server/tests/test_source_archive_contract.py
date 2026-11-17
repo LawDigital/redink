@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class SupportArchiveAndBrandContractTests(unittest.TestCase):
     def test_source_archive_is_companion_batch_and_excludes_production_secrets(self):
-        wrapper = (ROOT / 'scripts/create-source-zip-on-desktop.bat').read_text(encoding='utf-8')
+        wrapper = (ROOT / 'create-source-zip-on-desktop.bat').read_text(encoding='utf-8')
         script = (ROOT / 'scripts/create-source-zip-on-desktop.ps1').read_text(encoding='utf-8')
         self.assertIn('create-source-zip-on-desktop.ps1', wrapper)
         self.assertIn('DesktopDirectory', script)
