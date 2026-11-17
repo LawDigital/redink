@@ -736,9 +736,13 @@ Partial Public Class ThisAddIn
             End If
         End If
 
-        ' Show and bring the form to the front
-        ShowHostModelessForm(chatForm)
-        chatForm.BringToFront()
+        RegisterHostModelessForm(chatForm)
+        If chatForm.WindowState = System.Windows.Forms.FormWindowState.Minimized Then
+            chatForm.WindowState = System.Windows.Forms.FormWindowState.Normal
+        End If
+        Global.SharedLibrary.SharedLibrary.SharedMethods.EnsureVisibleOnScreen(chatForm)
+        If Not chatForm.Visible Then chatForm.Show()
+        chatForm.Activate()
     End Sub
 
 
@@ -1053,7 +1057,8 @@ Partial Public Class ThisAddIn
             _win2 = New DiscussInky(_context)
         End If
         ' Track this Red Ink window across the Word host lifetime.
-        _win2.ShowRaised(RegisterHostModelessForm(_win2))
+        RegisterHostModelessForm(_win2)
+        _win2.ShowRaised()
     End Sub
 
     Public Shared Sub SelectModel(modelNumber As Integer)

@@ -1434,6 +1434,7 @@ Partial Public Class ThisAddIn
                  AP_Tool_CompareWordDocs,
                  AP_Tool_CreatePdfFromText,
                  AP_Tool_ExcelCompleteLiveWorkbook,
+                 AP_Tool_SplitPdf,
                  AP_Tool_AddPdfWatermark,
                  AP_Tool_WordToPdf,
                  AP_Tool_PdfToWord,

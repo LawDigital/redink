@@ -8009,6 +8009,17 @@ Public Class DiscussInky
     End Function
 
     Private Shared Sub WriteArchiveAtomically(path As System.String, document As System.Xml.Linq.XDocument)
+        ' Keep listing metadata ahead of the potentially large session payload.
+        Dim root = document.Root
+        If root.Element("ProjectFolder") Is Nothing Then root.Add(New System.Xml.Linq.XElement("ProjectFolder", ""))
+        If root.Element("ProjectName") Is Nothing Then root.Add(New System.Xml.Linq.XElement("ProjectName", ""))
+        Dim metadata = {"ArchiveName", "SavedAtUtc", "ProjectName", "ProjectFolder"}.
+            Select(Function(name) root.Element(name)).Where(Function(element) element IsNot Nothing).ToArray()
+        For Each element In metadata
+            element.Remove()
+        Next
+        root.AddFirst(metadata)
+
         Dim temp = path & "." & System.Guid.NewGuid().ToString("N") & ".tmp"
         Try
             document.Save(temp, System.Xml.Linq.SaveOptions.DisableFormatting)
@@ -8627,50 +8638,84 @@ Public Class DiscussInky
         End If
     End Sub
 
-    Private Function GetDialogueArchives() As List(Of DialogueArchiveInfo)
-        Dim result As New List(Of DialogueArchiveInfo)()
-        Dim archiveDir = GetDialogueArchiveDirectoryPath()
+    Private Function GetDialogueArchives(
+        Optional cancellationToken As System.Threading.CancellationToken = Nothing) As System.Collections.Generic.List(Of DialogueArchiveInfo)
 
-        If Not Directory.Exists(archiveDir) Then
-            Return result
-        End If
+        Dim result As New System.Collections.Generic.List(Of DialogueArchiveInfo)()
+        For Each filePath In System.IO.Directory.EnumerateFiles(
+            GetDialogueArchiveDirectoryPath(), "*" & DialogueArchiveFileExtension, System.IO.SearchOption.TopDirectoryOnly)
 
-        For Each filePath In Directory.GetFiles(archiveDir, "*" & DialogueArchiveFileExtension, SearchOption.TopDirectoryOnly)
-            Try
-                Dim doc = XDocument.Load(filePath)
-                Dim root = doc.Root
-
-                Dim name = GetArchiveNameFromFilePath(filePath)
-                Dim folder As System.String = ""
-                Dim savedAtLocal = File.GetLastWriteTime(filePath)
-
-                If root IsNot Nothing Then
-                    name = ProjectTitle(root, name)
-                    folder = If(CStr(root.Element("ProjectFolder")), "")
-
-                    Dim savedAtElement = root.Element("SavedAtUtc")
-                    Dim parsedUtc As DateTime
-                    If savedAtElement IsNot Nothing AndAlso DateTime.TryParse(savedAtElement.Value, parsedUtc) Then
-                        savedAtLocal = parsedUtc.ToLocalTime()
-                    End If
-                End If
-
-                result.Add(New DialogueArchiveInfo With {
-                    .Name = name,
-                    .Folder = folder,
-                    .FilePath = filePath,
-                    .SavedAtLocal = savedAtLocal
-                })
-            Catch
-                result.Add(New DialogueArchiveInfo With {
-                    .Name = GetArchiveNameFromFilePath(filePath),
-                    .FilePath = filePath,
-                    .SavedAtLocal = File.GetLastWriteTime(filePath)
-                })
-            End Try
+            cancellationToken.ThrowIfCancellationRequested()
+            If filePath.EndsWith(DialogueArchiveFileExtension, System.StringComparison.OrdinalIgnoreCase) Then
+                result.Add(ReadDialogueArchiveInfo(filePath, cancellationToken))
+            End If
         Next
+        Return result
+    End Function
 
-        Return result.OrderByDescending(Function(x) x.SavedAtLocal).ToList()
+    Private Function ReadDialogueArchiveInfo(
+        filePath As System.String,
+        Optional cancellationToken As System.Threading.CancellationToken = Nothing) As DialogueArchiveInfo
+
+        Dim archive As New DialogueArchiveInfo With {.Name = GetArchiveNameFromFilePath(filePath), .FilePath = filePath}
+        Try
+            archive.SavedAtLocal = System.IO.File.GetLastWriteTime(filePath)
+            Dim metadata As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.Ordinal) From {
+                {"ArchiveName", Nothing}, {"ProjectName", Nothing}, {"ProjectFolder", Nothing}, {"SavedAtUtc", Nothing}
+            }
+            Dim remaining = metadata.Count
+            Dim settings As New System.Xml.XmlReaderSettings With {
+                .DtdProcessing = System.Xml.DtdProcessing.Prohibit,
+                .IgnoreWhitespace = True
+            }
+
+            Using stream As New System.IO.FileStream(
+                filePath, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read Or System.IO.FileShare.Delete)
+                Using reader = System.Xml.XmlReader.Create(stream, settings)
+                    If reader.MoveToContent() <> System.Xml.XmlNodeType.Element OrElse
+                       reader.Name <> "DiscussInkyState" OrElse reader.NamespaceURI.Length <> 0 Then
+                        Throw New System.IO.InvalidDataException("Invalid dialogue archive.")
+                    End If
+
+                    If Not reader.IsEmptyElement Then
+                        reader.Read()
+                        While reader.Depth > 0 AndAlso Not reader.EOF
+                            cancellationToken.ThrowIfCancellationRequested()
+                            ' Older archives may store project metadata after the transcript. Skip
+                            ' payload subtrees without constructing their XML objects.
+                            Dim value As System.String = Nothing
+                            If reader.NodeType = System.Xml.XmlNodeType.Element AndAlso reader.Depth = 1 AndAlso
+                               reader.NamespaceURI.Length = 0 AndAlso metadata.TryGetValue(reader.LocalName, value) AndAlso
+                               value Is Nothing Then
+                                Dim field = reader.LocalName
+                                metadata(field) = DirectCast(System.Xml.Linq.XNode.ReadFrom(reader), System.Xml.Linq.XElement).Value
+                                remaining -= 1
+                                If remaining = 0 Then Exit While
+                            Else
+                                reader.Skip()
+                            End If
+                        End While
+                    End If
+                End Using
+            End Using
+
+            Dim projectName = metadata("ProjectName")
+            Dim archiveName = metadata("ArchiveName")
+            If Not System.String.IsNullOrWhiteSpace(projectName) Then
+                archive.Name = projectName.Trim()
+            ElseIf Not System.String.IsNullOrWhiteSpace(archiveName) Then
+                archive.Name = archiveName.Trim()
+            End If
+            archive.Folder = If(metadata("ProjectFolder"), "")
+            Dim parsedUtc As System.DateTime
+            If System.DateTime.TryParse(metadata("SavedAtUtc"), parsedUtc) Then archive.SavedAtLocal = parsedUtc.ToLocalTime()
+        Catch ex As System.Exception When TypeOf ex Is System.IO.IOException OrElse
+                                           TypeOf ex Is System.IO.InvalidDataException OrElse
+                                           TypeOf ex Is System.UnauthorizedAccessException OrElse
+                                           TypeOf ex Is System.Xml.XmlException
+            RiCrashLogger.LogException("DISCUSS_ARCHIVE_METADATA_FALLBACK", ex)
+        End Try
+        Return archive
     End Function
 
     Private Function HasDialogueStateToArchive() As Boolean
@@ -8872,7 +8917,8 @@ Public Class DiscussInky
     End Function
 
     Private Sub ShowDialogueArchiveManager()
-        Using frm As New Form() With {
+        Using loadCancellation As New System.Threading.CancellationTokenSource(),
+              frm As New System.Windows.Forms.Form() With {
             .Text = $"{AN} - Dialogue Archive",
             .StartPosition = FormStartPosition.CenterParent,
             .Size = New System.Drawing.Size(780, 460),
@@ -8927,7 +8973,20 @@ Public Class DiscussInky
                 .Margin = New Padding(0)
             }
 
-            Dim sortByName As New System.Windows.Forms.CheckBox() With {.Text = "Sort by name (A–Z)", .AutoSize = True, .Checked = _sortArchiveByName}
+            Dim sortOptions As New System.Windows.Forms.FlowLayoutPanel() With {
+                .AutoSize = True,
+                .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                .WrapContents = False,
+                .Margin = New System.Windows.Forms.Padding(0)
+            }
+            Dim sortByDate As New System.Windows.Forms.RadioButton() With {
+                .Text = "Sort by date (newest first)", .AutoSize = True, .Checked = Not _sortArchiveByName
+            }
+            Dim sortByName As New System.Windows.Forms.RadioButton() With {
+                .Text = "Sort by name (A–Z)", .AutoSize = True, .Checked = _sortArchiveByName
+            }
+            sortOptions.Controls.Add(sortByDate)
+            sortOptions.Controls.Add(sortByName)
             Dim btnRename As New System.Windows.Forms.Button() With {.Text = "Rename Selected", .AutoSize = True}
             Dim btnFolder As New System.Windows.Forms.Button() With {.Text = "Set Project Folder", .AutoSize = True}
             Dim folderFilter As New System.Windows.Forms.ComboBox() With {
@@ -8947,7 +9006,7 @@ Public Class DiscussInky
             buttonBar.Controls.Add(btnDelete)
             buttonBar.Controls.Add(btnRename)
             buttonBar.Controls.Add(btnFolder)
-            buttonBar.Controls.Add(sortByName)
+            buttonBar.Controls.Add(sortOptions)
             buttonBar.Controls.Add(folderFilter)
             buttonBar.Controls.Add(btnClose)
 
@@ -8957,103 +9016,153 @@ Public Class DiscussInky
 
             frm.CancelButton = btnClose
 
-            Dim updateInfoLabel As System.Action =
+            Dim archiveCatalog As New System.Collections.Generic.List(Of DialogueArchiveInfo)()
+            Dim catalogLoaded As System.Boolean = False
+            Dim linkedArchiveInCatalog As System.Boolean = False
+            lblInfo.Text = "Loading dialogue archives…"
+
+            Dim updateSelectionButtons As System.Action =
                 Sub()
-                    Dim wrapWidth = Math.Max(250, layout.ClientSize.Width - layout.Padding.Horizontal)
-                    lblInfo.MaximumSize = New System.Drawing.Size(wrapWidth, 0)
-                    lblInfo.Text = BuildDialogueArchiveManagerInfoText()
-                End Sub
-
-            Dim refreshArchives As System.Action =
-                Sub()
-                    Dim previouslySelectedPath = ""
-                    Dim currentlySelected = TryCast(lstArchives.SelectedItem, DialogueArchiveInfo)
-                    If currentlySelected IsNot Nothing Then
-                        previouslySelectedPath = currentlySelected.FilePath
-                    End If
-
-                    Dim archives = GetDialogueArchives()
-                    Dim previousFolder As System.String = If(folderFilter.SelectedIndex > 0, CStr(folderFilter.SelectedItem), Nothing)
-                    refreshing = True
-                    Try
-                        folderFilter.Items.Clear()
-                        folderFilter.Items.Add("All project folders")
-                        For Each folderName In archives.Select(Function(item) item.Folder).Where(Function(name) name <> "").
-                                Distinct(System.StringComparer.CurrentCultureIgnoreCase).OrderBy(Function(name) name, System.StringComparer.CurrentCultureIgnoreCase)
-                            folderFilter.Items.Add(folderName)
-                        Next
-                        Dim longest As System.Int32 = folderFilter.Items.Cast(Of System.String)().Max(
-                            Function(text) System.Windows.Forms.TextRenderer.MeasureText(text, folderFilter.Font).Width)
-                        Dim desiredWidth As System.Int32 = longest + System.Windows.Forms.SystemInformation.VerticalScrollBarWidth + 12
-                        folderFilter.DropDownWidth = System.Math.Min(System.Windows.Forms.Screen.FromControl(frm).WorkingArea.Width,
-                            System.Math.Max(folderFilter.Width, desiredWidth))
-                        folderFilter.Width = System.Math.Max(240, System.Math.Min(folderFilter.DropDownWidth, 420))
-                        folderFilter.SelectedIndex = If(previousFolder Is Nothing, 0, System.Math.Max(0, folderFilter.Items.IndexOf(previousFolder)))
-                    Finally
-                        refreshing = False
-                    End Try
-                    If folderFilter.SelectedIndex > 0 Then archives = archives.Where(Function(item) System.String.Equals(item.Folder, CStr(folderFilter.SelectedItem), System.StringComparison.CurrentCultureIgnoreCase)).ToList()
-                    If _sortArchiveByName Then archives = archives.OrderBy(Function(item) item.Name, System.StringComparer.CurrentCultureIgnoreCase).ThenBy(Function(item) item.FilePath, System.StringComparer.OrdinalIgnoreCase).ToList()
-
-                    lstArchives.BeginUpdate()
-                    lstArchives.Items.Clear()
-                    For Each archive In archives
-                        lstArchives.Items.Add(archive)
-                    Next
-                    lstArchives.EndUpdate()
-
-                    Dim restoredSelection As DialogueArchiveInfo = Nothing
-                    If previouslySelectedPath.Length > 0 Then
-                        For Each item As Object In lstArchives.Items
-                            Dim archive = TryCast(item, DialogueArchiveInfo)
-                            If archive IsNot Nothing AndAlso
-                               archive.FilePath.Equals(previouslySelectedPath, StringComparison.OrdinalIgnoreCase) Then
-                                restoredSelection = archive
-                                Exit For
-                            End If
-                        Next
-                    End If
-
-                    If restoredSelection IsNot Nothing Then
-                        lstArchives.SelectedItem = restoredSelection
-                    ElseIf lstArchives.Items.Count > 0 Then
-                        lstArchives.SelectedIndex = 0
-                    End If
-
-                    Dim hasSelection = (TryCast(lstArchives.SelectedItem, DialogueArchiveInfo) IsNot Nothing)
+                    Dim hasSelection = catalogLoaded AndAlso TypeOf lstArchives.SelectedItem Is DialogueArchiveInfo
+                    btnSave.Enabled = catalogLoaded
                     btnRestore.Enabled = hasSelection
                     btnDelete.Enabled = hasSelection
                     btnRename.Enabled = hasSelection
                     btnFolder.Enabled = hasSelection
                     btnUpdate.Text = If(HasTrackedDialogueArchive(), "Update Current Archive", "Update Selected Archive…")
-                    btnUpdate.Enabled = If(HasTrackedDialogueArchive(), System.IO.File.Exists(_activeDialogueArchiveFilePath), hasSelection AndAlso HasDialogueStateToArchive())
-
-                    updateInfoLabel.Invoke()
+                    btnUpdate.Enabled = catalogLoaded AndAlso
+                        If(HasTrackedDialogueArchive(), linkedArchiveInCatalog, hasSelection AndAlso HasDialogueStateToArchive())
                 End Sub
 
-            AddHandler frm.SizeChanged,
+            Dim renderArchives As System.Action =
                 Sub()
-                    updateInfoLabel.Invoke()
+                    Dim selected = TryCast(lstArchives.SelectedItem, DialogueArchiveInfo)
+                    Dim folder = If(folderFilter.SelectedIndex > 0, CStr(folderFilter.SelectedItem), Nothing)
+                    Dim visibleArchives As System.Collections.Generic.IEnumerable(Of DialogueArchiveInfo) = archiveCatalog
+                    If folder IsNot Nothing Then
+                        visibleArchives = visibleArchives.Where(
+                            Function(item) System.String.Equals(item.Folder, folder, System.StringComparison.CurrentCultureIgnoreCase))
+                    End If
+                    If _sortArchiveByName Then
+                        visibleArchives = visibleArchives.OrderBy(Function(item) item.Name, System.StringComparer.CurrentCultureIgnoreCase).
+                            ThenBy(Function(item) item.FilePath, System.StringComparer.OrdinalIgnoreCase)
+                    Else
+                        visibleArchives = visibleArchives.OrderByDescending(Function(item) item.SavedAtLocal)
+                    End If
+                    Dim items = visibleArchives.ToArray()
+
+                    refreshing = True
+                    lstArchives.BeginUpdate()
+                    Try
+                        lstArchives.Items.Clear()
+                        lstArchives.Items.AddRange(items)
+                        If items.Length > 0 Then
+                            Dim selectedIndex = If(selected Is Nothing, -1, System.Array.FindIndex(
+                                items, Function(item) System.String.Equals(
+                                    item.FilePath, selected.FilePath, System.StringComparison.OrdinalIgnoreCase)))
+                            lstArchives.SelectedIndex = System.Math.Max(0, selectedIndex)
+                        End If
+                    Finally
+                        lstArchives.EndUpdate()
+                        refreshing = False
+                    End Try
+                    updateSelectionButtons.Invoke()
                 End Sub
+
+            Dim applyCatalogChanges As System.Action =
+                Sub()
+                    linkedArchiveInCatalog = HasTrackedDialogueArchive() AndAlso archiveCatalog.Any(
+                        Function(item) System.String.Equals(item.FilePath, _activeDialogueArchiveFilePath, System.StringComparison.OrdinalIgnoreCase))
+                    Dim previousFolder = If(folderFilter.SelectedIndex > 0, CStr(folderFilter.SelectedItem), Nothing)
+                    Dim folders = archiveCatalog.Select(Function(item) item.Folder).Where(Function(name) name <> "").
+                        Distinct(System.StringComparer.CurrentCultureIgnoreCase).
+                        OrderBy(Function(name) name, System.StringComparer.CurrentCultureIgnoreCase).ToArray()
+                    refreshing = True
+                    Try
+                        folderFilter.Items.Clear()
+                        folderFilter.Items.Add("All project folders")
+                        folderFilter.Items.AddRange(folders)
+                        Dim longest = folderFilter.Items.Cast(Of System.String)().Max(
+                            Function(value) System.Windows.Forms.TextRenderer.MeasureText(value, folderFilter.Font).Width)
+                        Dim desiredWidth = longest + System.Windows.Forms.SystemInformation.VerticalScrollBarWidth + 12
+                        folderFilter.DropDownWidth = System.Math.Min(System.Windows.Forms.Screen.FromControl(frm).WorkingArea.Width,
+                            System.Math.Max(folderFilter.Width, desiredWidth))
+                        folderFilter.Width = System.Math.Max(240, System.Math.Min(folderFilter.DropDownWidth, 420))
+                        Dim folderIndex = System.Array.FindIndex(folders, Function(name) System.String.Equals(
+                            name, previousFolder, System.StringComparison.CurrentCultureIgnoreCase))
+                        folderFilter.SelectedIndex = folderIndex + 1
+                    Finally
+                        refreshing = False
+                    End Try
+                    renderArchives.Invoke()
+                    lblInfo.Text = BuildDialogueArchiveManagerInfoText()
+                End Sub
+
+            Dim updateCatalogEntry As System.Action(Of System.String) =
+                Sub(filePath)
+                    Dim updated = ReadDialogueArchiveInfo(filePath)
+                    Dim index = archiveCatalog.FindIndex(Function(item) System.String.Equals(
+                        item.FilePath, filePath, System.StringComparison.OrdinalIgnoreCase))
+                    If index < 0 Then
+                        archiveCatalog.Add(updated)
+                    Else
+                        archiveCatalog(index) = updated
+                    End If
+                    applyCatalogChanges.Invoke()
+                End Sub
+
+            Dim updateInfoWidth As System.Action =
+                Sub()
+                    lblInfo.MaximumSize = New System.Drawing.Size(
+                        System.Math.Max(250, layout.ClientSize.Width - layout.Padding.Horizontal), 0)
+                End Sub
+            AddHandler frm.SizeChanged, Sub() updateInfoWidth.Invoke()
+            updateInfoWidth.Invoke()
 
             AddHandler lstArchives.SelectedIndexChanged,
                 Sub()
-                    Dim hasSelection = (TryCast(lstArchives.SelectedItem, DialogueArchiveInfo) IsNot Nothing)
-                    btnRestore.Enabled = hasSelection
-                    btnDelete.Enabled = hasSelection
-                    btnRename.Enabled = hasSelection
-                    btnFolder.Enabled = hasSelection
+                    If Not refreshing Then updateSelectionButtons.Invoke()
                 End Sub
 
             AddHandler folderFilter.SelectedIndexChanged,
                 Sub()
-                    If Not refreshing Then refreshArchives.Invoke()
+                    If Not refreshing Then renderArchives.Invoke()
                 End Sub
 
-            AddHandler sortByName.CheckedChanged,
-                Sub()
-                    _sortArchiveByName = sortByName.Checked
-                    refreshArchives.Invoke()
+            Dim archiveSortChanged As System.EventHandler =
+                Sub(sender As System.Object, e As System.EventArgs)
+                    If Not DirectCast(sender, System.Windows.Forms.RadioButton).Checked Then Return
+                    _sortArchiveByName = (sender Is sortByName)
+                    renderArchives.Invoke()
+                End Sub
+            AddHandler sortByDate.CheckedChanged, archiveSortChanged
+            AddHandler sortByName.CheckedChanged, archiveSortChanged
+
+            folderFilter.Enabled = False
+            sortOptions.Enabled = False
+            updateSelectionButtons.Invoke()
+
+            Dim cancellationToken = loadCancellation.Token
+            AddHandler frm.Shown,
+                Async Sub()
+                    Try
+                        archiveCatalog = Await System.Threading.Tasks.Task.Run(
+                            Function() GetDialogueArchives(cancellationToken), cancellationToken)
+                        If cancellationToken.IsCancellationRequested OrElse frm.IsDisposed Then Return
+
+                        catalogLoaded = True
+                        applyCatalogChanges.Invoke()
+                        folderFilter.Enabled = True
+                        sortOptions.Enabled = True
+                    Catch ex As System.OperationCanceledException When cancellationToken.IsCancellationRequested
+                        ' The user closed the archive window during the scan.
+                    Catch ex As System.Exception
+                        RiCrashLogger.LogException("DISCUSS_ARCHIVE_LOAD_FAILED", ex)
+                        If cancellationToken.IsCancellationRequested OrElse frm.IsDisposed Then Return
+                        catalogLoaded = False
+                        updateSelectionButtons.Invoke()
+                        lblInfo.Text = "Could not load dialogue archives. Close this window and reopen Archive to try again."
+                    End Try
                 End Sub
 
             Dim editProject As System.Action(Of System.Boolean) =
@@ -9086,7 +9195,7 @@ Public Class DiscussInky
                             _activeProjectTitle = value
                             UpdateWindowTitle()
                         End If
-                        refreshArchives.Invoke()
+                        updateCatalogEntry.Invoke(selected.FilePath)
                     Catch ex As System.Exception
                         ShowCustomMessageBox(ex.Message)
                     End Try
@@ -9102,7 +9211,7 @@ Public Class DiscussInky
             AddHandler btnSave.Click,
                 Sub()
                     If PromptAndSaveCurrentDialogueArchive() Then
-                        refreshArchives.Invoke()
+                        updateCatalogEntry.Invoke(_activeDialogueArchiveFilePath)
                     End If
                 End Sub
 
@@ -9118,7 +9227,7 @@ Public Class DiscussInky
                         title = selected.Name
                     End If
                     If SaveCurrentDialogueArchive(title, overwriteWithoutPrompt:=True, targetPath:=target) Then
-                        refreshArchives.Invoke()
+                        updateCatalogEntry.Invoke(_activeDialogueArchiveFilePath)
                     End If
                 End Sub
 
@@ -9150,8 +9259,9 @@ Public Class DiscussInky
                         End If
 
                         AppendSystemMessage($"Archived dialogue deleted: {selected.Name}")
-                        refreshArchives.Invoke()
-                    Catch ex As Exception
+                        archiveCatalog.Remove(selected)
+                        applyCatalogChanges.Invoke()
+                    Catch ex As System.Exception
                         AppendSystemMessage($"Failed to delete archived dialogue: {ex.Message}")
                     End Try
                 End Sub
@@ -9178,15 +9288,25 @@ Public Class DiscussInky
                     End If
                 End Sub
 
-            refreshArchives.Invoke()
-            Using dialogOwner = SharedMethods.PushDialogOwner(frm)
-                frm.ShowDialog(Me)
-            End Using
+            Try
+                Using dialogOwner = SharedMethods.PushDialogOwner(frm)
+                    frm.ShowDialog(Me)
+                End Using
+            Finally
+                loadCancellation.Cancel()
+            End Try
         End Using
     End Sub
 
     Private Sub OnArchiveClick(sender As Object, e As EventArgs)
-        ShowDialogueArchiveManager()
+        Try
+            ShowDialogueArchiveManager()
+        Catch ex As System.Exception
+            RiCrashLogger.LogException("DISCUSS_ARCHIVE_OPEN_FAILED", ex)
+            Using dialogOwner = SharedMethods.PushDialogOwner(Me)
+                ShowCustomMessageBox("Could not open the dialogue archive. Click Archive to try again.")
+            End Using
+        End Try
     End Sub
 
 #End Region

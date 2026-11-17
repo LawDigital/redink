@@ -39,7 +39,7 @@ def stage_public_files(source: Path, release: Path) -> None:
     selected = [('packaging/README.txt', 'README.txt')]
     selected.extend((f'docs/{name}', f'docs/{name}') for name in PUBLIC_DOCS)
     selected.extend((f'scripts/{name}', f'scripts/{name}') for name in PUBLIC_SCRIPTS)
-    selected.extend((f'scripts/{name}', name) for name in PUBLIC_LAUNCHERS)
+    selected.extend((name, name) for name in PUBLIC_LAUNCHERS)
     for origin_name, destination_name in selected:
         origin = source / origin_name
         if not origin.is_file() or origin.is_symlink():
