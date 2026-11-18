@@ -13,7 +13,7 @@
 '   analysis, panes, and file workflows are implemented in the other ThisAddIn.* files.
 ' =============================================================================
 '
-' 17.11.2026
+' 18.11.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -74,7 +74,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.171126" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.181126" & SharedMethods.VersionQualifier
 
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
@@ -456,6 +456,7 @@ Partial Public Class ThisAddIn
         _context.InitialConfigFailed = False
         _context.RDV = "Excel (" & Version & ")"
         SharedMethods.InitializeConfig(_context, FirstTime, Reload)
+        SharedMethods.RegisterDictationHost(_context)
     End Sub
     Private Function INIValuesMissing() As Boolean
         Return SharedMethods.INIValuesMissing(_context)

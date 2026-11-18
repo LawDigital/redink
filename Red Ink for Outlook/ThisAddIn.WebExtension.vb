@@ -668,7 +668,7 @@ Partial Public Class ThisAddIn
                         " body read complete. bodyLen=" &
                         body.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) &
                         "; cmd=" & cmd &
-                        "; bodyExcerpt=" & ClipForInkyServerLog(body, 1200))
+                        "; bodyExcerpt=" & If(cmd = "inky_dictate", "[audio]", ClipForInkyServerLog(body, 1200)))
 
                     AppendInkyServerLog("REQ " & requestId & " ProcessRequestInAddIn begin. cmd=" & cmd)
                 End If
@@ -676,7 +676,8 @@ Partial Public Class ThisAddIn
                 Dim requestCommand As System.String = TryGetJsonCommandForInkyServerLog(body)
                 Dim bodyByteCount As System.Int64 = System.Text.Encoding.UTF8.GetByteCount(body)
                 If bodyByteCount > SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.MaxStandardRequestBytes AndAlso
-                   Not requestCommand.Equals("inky_upload", System.StringComparison.OrdinalIgnoreCase) Then
+                   Not requestCommand.Equals("inky_upload", System.StringComparison.OrdinalIgnoreCase) AndAlso
+                   Not requestCommand.Equals("inky_dictate", System.StringComparison.OrdinalIgnoreCase) Then
                     Dim tooLargeBytes() As System.Byte = System.Text.Encoding.UTF8.GetBytes("Request is too large for this command.")
                     SendBufferedHttpResponse(res, 413, "text/plain; charset=utf-8", tooLargeBytes, requestId, "inky-standard-request-too-large", addCors:=False)
                     Return
@@ -694,7 +695,7 @@ Partial Public Class ThisAddIn
                         "; responseLen=" &
                         responseText.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) &
                         "; responsePrefix=" &
-                        ClipForInkyServerLog(responseText, 160))
+                        If(cmd = "inky_dictate", "[transcript]", ClipForInkyServerLog(responseText, 160)))
                 End If
 
                 Dim contentType As System.String = "text/plain; charset=utf-8"
@@ -2062,6 +2063,9 @@ Partial Public Class ThisAddIn
         html.AppendLine(".role{font-size:.75rem;color:var(--muted);margin-bottom:.25rem} ")
         html.AppendLine(".inputbar{display:flex;gap:.5rem;padding:1rem;border-top:1px solid var(--border);background:var(--card)} ")
         html.AppendLine("textarea{flex:1;resize:vertical;min-height:52px;max-height:220px;border-radius:.8rem;padding:.75rem;line-height:1.25;} ")
+        html.AppendLine(".dictation-input{position:relative;display:flex;flex:1;min-width:0}.dictation-input textarea{min-width:0;box-sizing:border-box}.dictation-input:has(#dictateBtn:not([hidden])) textarea{padding-right:3.25rem}")
+        html.AppendLine("#dictateBtn{position:absolute;right:19px;bottom:6px;width:28px;height:28px;min-width:0;padding:0;line-height:0;background:var(--card);color:var(--muted);border:0}#dictateBtn:hover,#dictateBtn:focus-visible{color:var(--fg);background:var(--elev)}")
+        html.AppendLine("dialog.inky-dictation{width:min(380px,calc(100vw - 40px));padding:0;box-sizing:border-box}.inky-dictation .inky-modal-hd{justify-content:flex-start;gap:8px}.inky-dictation .inky-modal-ft button{flex:1}.inky-dictation .inky-modal-ft{padding:10px 14px}.inky-dictation .inky-modal-bd{padding:10px 14px}dialog.inky-dictation::backdrop{background:rgba(0,0,0,.46)}.inky-dictation label{display:grid;gap:.45rem}.inky-dictation select{width:100%;padding:.45rem}.inky-dictation .dict-status{color:var(--muted);font-size:.85rem;margin:.7rem 0 0;white-space:pre-wrap}.inky-dictation .dict-status:empty{display:none}.inky-dictation textarea{width:100%;box-sizing:border-box;margin-top:.5rem}")
         html.AppendLine(".hint{font-size:.7rem;letter-spacing:.3px;color:var(--muted);padding:.25rem 1rem 1rem} ")
         html.AppendLine("a{color:inherit;text-decoration:underline;text-decoration-color:rgba(255,255,255,.35)} ")
         html.AppendLine(":root.light a{text-decoration-color:rgba(0,0,0,.4)} ")
@@ -2204,7 +2208,12 @@ Partial Public Class ThisAddIn
         html.AppendLine("  <div id=""chat"" class=""chat""></div>")
 
         html.AppendLine("  <div class=""inputbar"">")
+        html.AppendLine("<div class=""dictation-input"">")
         html.AppendLine("    <textarea id=""msg"" placeholder=""" & System.Net.WebUtility.HtmlEncode(greet) & """ autofocus></textarea>")
+        If Global.SharedLibrary.SharedLibrary.SharedMethods.HasDictationModel(_context) Then
+            html.AppendLine("    <button hidden id=""dictateBtn"" type=""button"" title=""Dictate / choose microphone"" aria-label=""Dictate""><svg aria-hidden=""true"" viewBox=""0 0 24 24"" width=""17"" height=""17"" fill=""none"" stroke=""currentColor"" stroke-width=""1.8"" stroke-linecap=""round""><rect x=""9"" y=""3"" width=""6"" height=""12"" rx=""3""/><path d=""M6 11a6 6 0 0 0 12 0M12 17v4m-3 0h6""/></svg></button>")
+        End If
+        html.AppendLine("</div>")
         html.AppendLine("    <div class=""actions"">" &
                     "<div class=""stack"">" &
                         "<button id=""sendBtn"">Send</button>" &
@@ -2290,6 +2299,187 @@ Partial Public Class ThisAddIn
 
         html.AppendLine("const chatEl=document.getElementById('chat');")
         html.AppendLine("const msgEl=document.getElementById('msg');")
+        html.AppendLine("const maxDictationUploadBytes=" & Global.SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.MaxSingleUploadBytes.ToString(System.Globalization.CultureInfo.InvariantCulture) & ";")
+        html.AppendLine("function enableDictation() {")
+        html.AppendLine("  const mic = document.getElementById('dictateBtn');")
+        html.AppendLine("  if (!mic) return;")
+        html.AppendLine("  mic.hidden = false;")
+        html.AppendLine("  mic.onclick = async () => {")
+        html.AppendLine("")
+        html.AppendLine("    let id;")
+        html.AppendLine("    let submitted = false;")
+        html.AppendLine("    const draft = msgEl.value;")
+        html.AppendLine("    const first = msgEl.selectionStart, last = msgEl.selectionEnd;")
+        html.AppendLine("    const dialog = document.createElement('dialog');")
+        html.AppendLine("    const finish = document.createElement('button');")
+        html.AppendLine("    const cancel = document.createElement('button');")
+        html.AppendLine("    dialog.className = 'inky-modal inky-dictation';")
+        html.AppendLine("    dialog.setAttribute('aria-labelledby','dict-title');")
+        html.AppendLine("    const header = document.createElement('div'), body = document.createElement('div'), footer = document.createElement('div');")
+        html.AppendLine("    header.className = 'inky-modal-hd inky-modal-ttl'; header.id = 'dict-title'; header.textContent = 'Dictation';")
+        html.AppendLine("    const brand = document.querySelector('.topline img.logo');")
+        html.AppendLine("    if (brand) {")
+        html.AppendLine("      const logo = document.createElement('img'); logo.src = brand.src; logo.alt = '';")
+        html.AppendLine("      logo.width = 24; logo.height = 24; header.prepend(logo);")
+        html.AppendLine("    }")
+        html.AppendLine("    body.className = 'inky-modal-bd'; footer.className = 'inky-modal-ft';")
+        html.AppendLine("    const label = document.createElement('label'), devices = document.createElement('select');")
+        html.AppendLine("    label.textContent = 'Microphone'; label.append(devices);")
+        html.AppendLine("    const status = document.createElement('p'); status.className = 'dict-status'; status.setAttribute('role','status');")
+        html.AppendLine("    body.append(label,status);")
+        html.AppendLine("    finish.textContent = 'Start recording'; finish.disabled = true;")
+        html.AppendLine("    cancel.textContent = 'Cancel'; footer.append(cancel,finish); dialog.append(header,body,footer);")
+        html.AppendLine("    document.body.append(dialog);")
+        html.AppendLine("    dialog.showModal();")
+        html.AppendLine("    const frames = [];")
+        html.AppendLine("    let heardAudio = false;")
+        html.AppendLine("    let length = 0, stream, audio, node, closed = false;")
+        html.AppendLine("    function release() {")
+        html.AppendLine("      if (node) { node.onaudioprocess = null; node.disconnect(); node = null; }")
+        html.AppendLine("      if (stream) { stream.getTracks().forEach(track => track.stop()); stream = null; }")
+        html.AppendLine("      if (audio) { audio.close().catch(() => {}); audio = null; }")
+        html.AppendLine("    }")
+        html.AppendLine("    function close() {")
+        html.AppendLine("      if (closed) return;")
+        html.AppendLine("      closed = true;")
+        html.AppendLine("      if (submitted) api('inky_canceldictation', {Id:id});")
+        html.AppendLine("      release();")
+        html.AppendLine("      window.removeEventListener('pagehide', close);")
+        html.AppendLine("      dialog.close();")
+        html.AppendLine("      dialog.remove();")
+        html.AppendLine("      mic.focus();")
+        html.AppendLine("    }")
+        html.AppendLine("    function fail(error) {")
+        html.AppendLine("      if (closed) return;")
+        html.AppendLine("      release();")
+        html.AppendLine("      status.textContent = error.message || 'Dictation failed.';")
+        html.AppendLine("      cancel.textContent = 'Close'; finish.disabled = true;")
+        html.AppendLine("    }")
+        html.AppendLine("    cancel.onclick = close;")
+        html.AppendLine("    dialog.oncancel = event => { event.preventDefault(); close(); };")
+        html.AppendLine("    window.addEventListener('pagehide', close);")
+        html.AppendLine("    async function transcribe() {")
+        html.AppendLine("      if (finish.disabled || closed) return;")
+        html.AppendLine("      devices.disabled = true;")
+        html.AppendLine("      finish.disabled = true;")
+        html.AppendLine("      finish.textContent = 'Transcribing…'; status.textContent = '';")
+        html.AppendLine("      release();")
+        html.AppendLine("      try {")
+        html.AppendLine("        if (!length) throw new Error('No microphone audio was recorded.');")
+        html.AppendLine("        if (length > maxDictationUploadBytes) throw new Error('This recording exceeds the Local Chat file upload limit.');")
+        html.AppendLine("        const blob = new Blob(frames, {type:'application/octet-stream'});")
+        html.AppendLine("        frames.length = 0;")
+        html.AppendLine("        const encoded = await new Promise((resolve,reject) => {")
+        html.AppendLine("          const reader = new FileReader();")
+        html.AppendLine("          reader.onload = () => resolve(reader.result.slice(reader.result.indexOf(',') + 1));")
+        html.AppendLine("          reader.onerror = () => reject(reader.error || new Error('Could not read the recording.'));")
+        html.AppendLine("          reader.readAsDataURL(blob);")
+        html.AppendLine("        });")
+        html.AppendLine("        if (closed) return;")
+        html.AppendLine("        submitted = true;")
+        html.AppendLine("        const response = await api('inky_dictate', {Id:id, Pcm:encoded});")
+        html.AppendLine("        submitted = false;")
+        html.AppendLine("        if (closed) return;")
+        html.AppendLine("        if (!response.ok || typeof response.text !== 'string') throw new Error(response.error || 'Invalid transcription response.');")
+        html.AppendLine("        if (!response.text.trim()) { close(); return; }")
+        html.AppendLine("        if (msgEl.value !== draft) {")
+        html.AppendLine("          status.textContent = 'The draft changed. Copy the transcription to keep it.';")
+        html.AppendLine("          const copy = document.createElement('textarea'); copy.readOnly = true; copy.value = response.text;")
+        html.AppendLine("          body.append(copy); copy.focus(); copy.select(); finish.hidden = true; cancel.textContent = 'Close'; return;")
+        html.AppendLine("        }")
+        html.AppendLine("        close();")
+        html.AppendLine("        msgEl.setRangeText(response.text, first, last, 'end');")
+        html.AppendLine("        msgEl.dispatchEvent(new Event('input', {bubbles:true}));")
+        html.AppendLine("        msgEl.focus();")
+        html.AppendLine("      } catch (error) { fail(error); }")
+        html.AppendLine("    }")
+        html.AppendLine("    if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia || !window.AudioContext) {")
+        html.AppendLine("      fail(new Error('Microphone access requires a supported browser on localhost or HTTPS.')); return;")
+        html.AppendLine("    }")
+        html.AppendLine("    id = window.crypto.randomUUID ? window.crypto.randomUUID() : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, ch => {")
+        html.AppendLine("      const n = window.crypto.getRandomValues(new Uint8Array(1))[0] & 15;")
+        html.AppendLine("      return (ch === 'x' ? n : (n & 3) | 8).toString(16);")
+        html.AppendLine("    });")
+        html.AppendLine("    const storageKey = 'redink.dictation.microphone';")
+        html.AppendLine("    let saved = '';")
+        html.AppendLine("    try { saved = localStorage.getItem(storageKey) || ''; } catch {}")
+        html.AppendLine("    async function listDevices() {")
+        html.AppendLine("      const inputs = navigator.mediaDevices.enumerateDevices ? (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audioinput') : [];")
+        html.AppendLine("      if (closed) return false;")
+        html.AppendLine("      devices.replaceChildren(new Option('System default',''));")
+        html.AppendLine("      let index = 0;")
+        html.AppendLine("      for (const input of inputs) {")
+        html.AppendLine("        if (!input.deviceId || input.deviceId === 'default') continue;")
+        html.AppendLine("        devices.add(new Option(input.label || ('Microphone ' + (++index)), input.deviceId));")
+        html.AppendLine("      }")
+        html.AppendLine("      if (saved && inputs.some(d => d.deviceId === saved)) devices.value = saved;")
+        html.AppendLine("      return inputs.some(d => d.label) || !navigator.mediaDevices.enumerateDevices;")
+        html.AppendLine("    }")
+        html.AppendLine("    async function startRecording() {")
+        html.AppendLine("      finish.disabled = true; devices.disabled = true; status.textContent = 'Opening microphone…';")
+        html.AppendLine("      const selectedDevice = devices.value || '';")
+        html.AppendLine("      try {")
+        html.AppendLine("      audio = new AudioContext({sampleRate:16000});")
+        html.AppendLine("      await audio.resume();")
+        html.AppendLine("      if (closed) return;")
+        html.AppendLine("      stream = await navigator.mediaDevices.getUserMedia({audio:selectedDevice ? {channelCount:1,deviceId:{exact:selectedDevice}} : {channelCount:1}});")
+        html.AppendLine("      if (closed) { release(); return; }")
+        html.AppendLine("      if (audio.sampleRate !== 16000) throw new Error('The browser could not open a 16 kHz audio stream.');")
+        html.AppendLine("      const source = audio.createMediaStreamSource(stream);")
+        html.AppendLine("      node = audio.createScriptProcessor(2048, 1, 1);")
+        html.AppendLine("      // 320 samples = 20 ms at 16 kHz. Match the desktop RMS threshold (-48 dBFS).")
+        html.AppendLine("      let windowSamples = 0, squareSum = 0, quietWindows = 0;")
+        html.AppendLine("      node.onaudioprocess = event => {")
+        html.AppendLine("        const samples = event.inputBuffer.getChannelData(0);")
+        html.AppendLine("        const count = Math.min(samples.length, Math.floor((maxDictationUploadBytes - length) / 2));")
+        html.AppendLine("        const frame = new Uint8Array(count * 2);")
+        html.AppendLine("        const view = new DataView(frame.buffer);")
+        html.AppendLine("        let silenceStop = false;")
+        html.AppendLine("        for (let i = 0; i < count; i++) {")
+        html.AppendLine("          const value = Math.max(-1, Math.min(1, samples[i]));")
+        html.AppendLine("          squareSum += value * value;")
+        html.AppendLine("          if (++windowSamples === 320) {")
+        html.AppendLine("            if (squareSum >= 320 * (130 / 32768) ** 2) { heardAudio = true; quietWindows = 0; }")
+        html.AppendLine("            else if (++quietWindows >= 300) silenceStop = true;")
+        html.AppendLine("            windowSamples = 0; squareSum = 0;")
+        html.AppendLine("          }")
+        html.AppendLine("          view.setInt16(i * 2, Math.round(value * (value < 0 ? 32768 : 32767)), true);")
+        html.AppendLine("        }")
+        html.AppendLine("        frames.push(frame); length += frame.length;")
+        html.AppendLine("        if (silenceStop) {")
+        html.AppendLine("          if (heardAudio) void transcribe(); else close();")
+        html.AppendLine("          return;")
+        html.AppendLine("        }")
+        html.AppendLine("        if (length === maxDictationUploadBytes) {")
+        html.AppendLine("          release(); devices.disabled = true; finish.textContent = 'Transcribe recording';")
+        html.AppendLine("          status.textContent = 'Recording stopped at the Local Chat file upload limit. You can transcribe the audio captured so far.';")
+        html.AppendLine("        }")
+        html.AppendLine("      };")
+        html.AppendLine("      source.connect(node);")
+        html.AppendLine("      node.connect(audio.destination);")
+        html.AppendLine("      saved = selectedDevice;")
+        html.AppendLine("      try { localStorage.setItem(storageKey, saved); } catch {}")
+        html.AppendLine("      status.textContent = 'Recording…'; finish.onclick = transcribe;")
+        html.AppendLine("      finish.textContent = 'Stop and transcribe';")
+        html.AppendLine("      finish.disabled = false;")
+        html.AppendLine("      const currentNode = node;")
+        html.AppendLine("      try { await listDevices(); } catch {}")
+        html.AppendLine("      if (!closed && currentNode === node) devices.disabled = false;")
+        html.AppendLine("      } catch (error) {")
+        html.AppendLine("        if (closed) return;")
+        html.AppendLine("        release(); devices.disabled = false; saved = '';")
+        html.AppendLine("        try { await listDevices(); } catch {}")
+        html.AppendLine("        finish.onclick = length ? transcribe : startRecording; finish.textContent = length ? 'Transcribe recording' : 'Retry recording'; finish.disabled = false;")
+        html.AppendLine("        if (!closed) status.textContent = (error.message || 'Could not open this microphone.') + ' Choose a microphone and try again.';")
+        html.AppendLine("      }")
+        html.AppendLine("    }")
+        html.AppendLine("    devices.onchange = async () => { release(); await startRecording(); };")
+        html.AppendLine("    devices.add(new Option('System default',''));")
+        html.AppendLine("    if (saved) { devices.add(new Option('Saved microphone',saved)); devices.value = saved; }")
+        html.AppendLine("    await startRecording();")
+        html.AppendLine("  };")
+        html.AppendLine("}")
+        html.AppendLine("enableDictation();")
         html.AppendLine("const modelSel=document.getElementById('modelSel');")
         html.AppendLine("const copyBtn=document.getElementById('copyBtn');")
         html.AppendLine("const toWordBtn=document.getElementById('toWordBtn');")
@@ -2589,6 +2779,53 @@ Partial Public Class ThisAddIn
         End SyncLock
     End Sub
 
+    Private Shared ReadOnly browserDictationGate As New System.Threading.SemaphoreSlim(1, 1)
+
+    Private Shared ReadOnly browserDictationRequests As New System.Collections.Concurrent.ConcurrentDictionary(Of System.Guid, System.Threading.CancellationTokenSource)()
+
+    Private Function CancelLocalChatDictation(request As Newtonsoft.Json.Linq.JObject) As System.String
+        Dim id As System.Guid
+        Dim cancellation As System.Threading.CancellationTokenSource = Nothing
+        If System.Guid.TryParse(request("Id")?.ToString(), id) AndAlso browserDictationRequests.TryGetValue(id, cancellation) Then
+            Try
+                cancellation.Cancel()
+            Catch ex As System.ObjectDisposedException
+                ' The matching request has already completed.
+            End Try
+        End If
+        Return JsonOk(New With {.ok = True})
+    End Function
+
+    Private Async Function TranscribeLocalChatDictation(request As Newtonsoft.Json.Linq.JObject) As System.Threading.Tasks.Task(Of System.String)
+        Dim id As System.Guid
+        If Not System.Guid.TryParse(request("Id")?.ToString(), id) Then Return JsonErr("Invalid recording identifier.")
+        Dim encoded = request("Pcm")?.ToString()
+        If System.String.IsNullOrEmpty(encoded) OrElse encoded.Length > 4L * ((Global.SharedLibrary.SharedLibrary.LocalHttpBrowserSecurity.MaxSingleUploadBytes + 2L) \ 3L) Then
+            Return JsonErr("Missing or oversized recording.")
+        End If
+        If Not browserDictationGate.Wait(0) Then Return JsonErr("Another browser dictation is being transcribed.")
+        Try
+            Dim model = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveDictationModel(_context)
+            Using cancellation As New System.Threading.CancellationTokenSource()
+                If Not browserDictationRequests.TryAdd(id, cancellation) Then Return JsonErr("Duplicate recording identifier.")
+                Try
+                    Dim transcript = Await Global.SharedLibrary.SharedLibrary.SharedMethods.TranscribeDictationAsync(
+                        model, System.Convert.FromBase64String(encoded), cancellation.Token).ConfigureAwait(False)
+                    Return JsonOk(New With {.ok = True, .text = transcript})
+                Finally
+                    Dim removed As System.Threading.CancellationTokenSource = Nothing
+                    browserDictationRequests.TryRemove(id, removed)
+                End Try
+            End Using
+        Catch ex As System.OperationCanceledException
+            Return JsonErr("Dictation was canceled.")
+        Catch ex As System.Exception
+            Return JsonErr(ex.Message)
+        Finally
+            browserDictationGate.Release()
+        End Try
+    End Function
+
     Private Async Function ProcessRequestInAddIn(
         body As System.String,
         rawUrl As System.String) As System.Threading.Tasks.Task(Of System.String)
@@ -2608,6 +2845,11 @@ Partial Public Class ThisAddIn
                 ' boundary too; status and cancellation of an existing browser job stay
                 ' available. Once the batch owns the context, cancel it in its dialog.
                 Dim batchState As System.Int32 = System.Threading.Volatile.Read(_batchAgentRunning)
+                ' Dictation uses an isolated model and never opens or changes a chat workspace.
+                If cmd = "inky_canceldictation" Then Return CancelLocalChatDictation(j)
+                If System.String.Equals(cmd, "inky_dictate", System.StringComparison.OrdinalIgnoreCase) Then
+                    Return Await TranscribeLocalChatDictation(j).ConfigureAwait(False)
+                End If
                 If batchState <> 0 AndAlso If(cmd, "").StartsWith("inky", System.StringComparison.OrdinalIgnoreCase) AndAlso
                    Not System.String.Equals(cmd, "inky_jobstatus", System.StringComparison.OrdinalIgnoreCase) AndAlso
                    Not System.String.Equals(cmd, "inky_canceljob", System.StringComparison.OrdinalIgnoreCase) AndAlso

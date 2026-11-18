@@ -2032,6 +2032,8 @@ Namespace SharedLibrary
                     Return context.INI_LogPath
                 Case "MonitorLink"
                     Return context.INI_MonitorLink
+                Case "AutoPilotQueueMessage"
+                    Return context.INI_AutoPilotQueueMessage
                 Case "PythonAgentPath"
                     Return context.INI_PythonAgentPath
                 Case "ContextMenu"
@@ -2874,6 +2876,7 @@ Namespace SharedLibrary
                     {"UsageRestrictions", context.INI_UsageRestrictions},
                     {"LogPath", context.INI_LogPath},
                     {"MonitorLink", context.INI_MonitorLink},
+                    {"AutoPilotQueueMessage", context.INI_AutoPilotQueueMessage},
                     {"PythonAgentPath", context.INI_PythonAgentPath},
                     {"Language1", context.INI_Language1},
                     {"Language2", context.INI_Language2},
@@ -4579,6 +4582,7 @@ Namespace SharedLibrary
             variableValues.Add("UsageRestrictions", context.INI_UsageRestrictions)
             variableValues.Add("LogPath", context.INI_LogPath)
             variableValues.Add("MonitorLink", context.INI_MonitorLink)
+            variableValues.Add("AutoPilotQueueMessage", context.INI_AutoPilotQueueMessage)
             variableValues.Add("PythonAgentPath", context.INI_PythonAgentPath)
             variableValues.Add("Language1", context.INI_Language1)
             variableValues.Add("Language2", context.INI_Language2)
@@ -4919,6 +4923,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("UsageRestrictions") Then context.INI_UsageRestrictions = CStr(updatedValues("UsageRestrictions"))
                 If updatedValues.ContainsKey("LogPath") Then context.INI_LogPath = CStr(updatedValues("LogPath"))
                 If updatedValues.ContainsKey("MonitorLink") Then context.INI_MonitorLink = CStr(updatedValues("MonitorLink"))
+                If updatedValues.ContainsKey("AutoPilotQueueMessage") Then context.INI_AutoPilotQueueMessage = CStr(updatedValues("AutoPilotQueueMessage"))
                 If updatedValues.ContainsKey("PythonAgentPath") Then context.INI_PythonAgentPath = CStr(updatedValues("PythonAgentPath"))
                 If updatedValues.ContainsKey("Language1") Then context.INI_Language1 = CStr(updatedValues("Language1"))
                 If updatedValues.ContainsKey("Language2") Then context.INI_Language2 = CStr(updatedValues("Language2"))

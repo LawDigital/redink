@@ -782,7 +782,12 @@ Namespace SharedLibrary
         ''' <param name="ToolExecution">If <c>True</c> then LLM expects to be in the tooling execution mode when calling an LLM (necessary for building APICall).</c>.</param>
         ''' <param name="transportRetryProfile">Provider-agnostic transport retry profile. Inherit uses the current async-flow scope and otherwise falls back to Interactive.</param>
         ''' <returns>Extracted text from the JSON response. Caller cancellation is propagated; request timeout is surfaced as System.TimeoutException.</returns>
-        Public Shared Async Function LLM(context As ISharedContext, ByVal promptSystem As String, ByVal promptUser As String, Optional ByVal Model As String = "", Optional ByVal Temperature As String = "", Optional ByVal Timeout As Long = 0, Optional ByVal UseSecondAPI As Boolean = False, Optional ByVal Hidesplash As Boolean = False, Optional ByVal AddUserPrompt As String = "", Optional FileObject As String = "", Optional cancellationToken As System.Threading.CancellationToken = Nothing, Optional ToolExecution As Boolean = False, Optional binaryOutputDirectory As String = Nothing, Optional transportRetryProfile As LlmTransportRetryProfile = LlmTransportRetryProfile.Inherit) As System.Threading.Tasks.Task(Of String)
+        Public Shared Function LLM(context As ISharedContext, ByVal promptSystem As String, ByVal promptUser As String, Optional ByVal Model As String = "", Optional ByVal Temperature As String = "", Optional ByVal Timeout As Long = 0, Optional ByVal UseSecondAPI As Boolean = False, Optional ByVal Hidesplash As Boolean = False, Optional ByVal AddUserPrompt As String = "", Optional FileObject As String = "", Optional cancellationToken As System.Threading.CancellationToken = Nothing, Optional ToolExecution As Boolean = False, Optional binaryOutputDirectory As String = Nothing, Optional transportRetryProfile As LlmTransportRetryProfile = LlmTransportRetryProfile.Inherit) As System.Threading.Tasks.Task(Of String)
+            Return LlmWithFileMimeAsync(context, promptSystem, promptUser, Model, Temperature, Timeout, UseSecondAPI, Hidesplash,
+                                        AddUserPrompt, FileObject, cancellationToken, ToolExecution, binaryOutputDirectory, transportRetryProfile)
+        End Function
+
+        Private Shared Async Function LlmWithFileMimeAsync(context As ISharedContext, ByVal promptSystem As String, ByVal promptUser As String, Optional ByVal Model As String = "", Optional ByVal Temperature As String = "", Optional ByVal Timeout As Long = 0, Optional ByVal UseSecondAPI As Boolean = False, Optional ByVal Hidesplash As Boolean = False, Optional ByVal AddUserPrompt As String = "", Optional FileObject As String = "", Optional cancellationToken As System.Threading.CancellationToken = Nothing, Optional ToolExecution As Boolean = False, Optional binaryOutputDirectory As String = Nothing, Optional transportRetryProfile As LlmTransportRetryProfile = LlmTransportRetryProfile.Inherit, Optional fileObjectMimeType As System.String = Nothing) As System.Threading.Tasks.Task(Of String)
             cancellationToken.ThrowIfCancellationRequested()
 
             Dim transportRetryPolicy As LlmTransportRetryPolicy =
@@ -1221,7 +1226,7 @@ Namespace SharedLibrary
                             Else
                                 ' Standard case: file processed via MimeHelper.
                                 Dim mresult = MimeHelper.GetFileMimeTypeAndBase64(FileObject)
-                                mimeType = FixMimeType(mresult.MimeType.Trim())
+                                mimeType = FixMimeType(If(fileObjectMimeType, mresult.MimeType).Trim())
                                 If Not requiresMultipart Then
                                     encodedData = mresult.EncodedData.Trim()
                                 Else

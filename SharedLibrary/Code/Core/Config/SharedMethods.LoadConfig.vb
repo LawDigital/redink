@@ -418,6 +418,7 @@ Namespace SharedLibrary
                 ' Other parameters.
 
                 context.INI_MonitorLink = If(configDict.ContainsKey("MonitorLink"), configDict("MonitorLink"), "")
+                context.INI_AutoPilotQueueMessage = If(configDict.ContainsKey("AutoPilotQueueMessage"), configDict("AutoPilotQueueMessage"), "")
                 context.INI_NoHelperDownload = ParseBoolean(configDict, "NoHelperDownload")
                 context.INI_LicenseCounterPath = If(configDict.ContainsKey("LicenseCounterPath"), configDict("LicenseCounterPath"), "")
                 context.INI_LicenseCounterMethod = If(configDict.ContainsKey("LicenseCounterMethod"), configDict("LicenseCounterMethod"), DEFAULT_LICENSECOUNTERMETHOD)

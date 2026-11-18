@@ -15,7 +15,7 @@
 ' - Command routing: Select Case RI_Command invokes specific LLM-backed operations (Command_InsertAfter, FreeStyle_* etc.).
 ' - COM interop: Outlook (Application, Explorer, Inspector, Selection, MailItem) and Word (Document, Selection, Range) objects acquired via ComRetry for resilience.
 ' - Selection handling: inline response selection offsets captured and reapplied when promoting to Inspector window.
-' - Formatting: plain text mail rejected; HTML/RTF processed; optional HTML preservation or Markdown conversion before LLM requests.
+' - Formatting: plain text conversion offered; HTML/RTF processed; optional HTML preservation or Markdown conversion before LLM requests.
 ' - Markup: three methods (1 Word compare, 2 Diff inline, 3 Diff window) with caps and override logic; Diff size threshold triggers user choice.
 ' - Freestyle: prefix-driven behavior (markup, in-place, clipboard, new document, secondary model, MyStyle, object inclusion); last prompt persistence.
 ' - Clipboard: robust multi-attempt STA-setting with verification; fallback to editable window or temp file write.
@@ -42,6 +42,69 @@ Imports SharedLibrary.SharedLibrary.SharedMethods
 Imports SLib = SharedLibrary.SharedLibrary.SharedMethods
 
 Partial Public Class ThisAddIn
+
+    Private Function EnsureEditableMailFormat(inspector As Microsoft.Office.Interop.Outlook.Inspector,
+                                              mail As Microsoft.Office.Interop.Outlook.MailItem) As System.Boolean
+        If mail.BodyFormat <> Microsoft.Office.Interop.Outlook.OlBodyFormat.olFormatPlain Then Return True
+        If SLib.ShowCustomYesNoBox("This message is in plain text. Convert it to HTML and continue?",
+                                   "Convert to HTML", "Cancel", AN) <> 1 Then Return False
+
+        Try
+            inspector.Activate()
+            If inspector.CurrentItem IsNot mail Then Throw New System.InvalidOperationException("The active message changed.")
+            Dim before = ComRetry(Function() DirectCast(inspector.WordEditor, Microsoft.Office.Interop.Word.Document))
+            Dim selected = before.Application.Selection.Range
+            If selected.Document IsNot before Then Throw New System.InvalidOperationException("The active selection belongs to another window.")
+            Dim first As System.Int32 = selected.Start
+            Dim last As System.Int32 = selected.End
+            Dim originalText As System.String = selected.Text
+            Dim originalBody As System.String = before.Content.Text
+            Dim originalSubject As System.String = mail.Subject
+            Dim recipientCount As System.Int32 = mail.Recipients.Count
+
+            ' Run the Inspector's own Format Text > HTML command. Outlook owns both
+            ' the compose envelope and the embedded editor during this transition.
+            Dim commands As Microsoft.Office.Core.CommandBars = inspector.CommandBars
+            If Not commands.GetEnabledMso("MessageFormatHtml") Then
+                Throw New System.InvalidOperationException("HTML format is unavailable in this message window.")
+            End If
+            commands.ExecuteMso("MessageFormatHtml")
+            If inspector.CurrentItem IsNot mail OrElse mail.BodyFormat <> Microsoft.Office.Interop.Outlook.OlBodyFormat.olFormatHTML Then
+                Throw New System.InvalidOperationException("Outlook did not switch this message to HTML.")
+            End If
+            Dim after = ComRetry(Function() DirectCast(inspector.WordEditor, Microsoft.Office.Interop.Word.Document))
+            If Not System.String.Equals(mail.Subject, originalSubject, System.StringComparison.Ordinal) OrElse
+               mail.Recipients.Count <> recipientCount Then
+                Throw New System.InvalidOperationException("Outlook changed the message header during conversion. Review the draft before continuing.")
+            End If
+            Dim convertedBody As System.String = after.Content.Text
+            If Not System.String.Equals(convertedBody, originalBody, System.StringComparison.Ordinal) Then
+                ' Recover an omitted leading block only when every surviving character
+                ' is an exact suffix. Never rebuild an entire message from HTMLBody.
+                If Not System.String.IsNullOrWhiteSpace(convertedBody) AndAlso originalBody.EndsWith(convertedBody, System.StringComparison.Ordinal) Then
+                    after.Range(0, 0).InsertBefore(originalBody.Substring(0, originalBody.Length - convertedBody.Length))
+                End If
+                If Not System.String.Equals(after.Content.Text.TrimEnd(Microsoft.VisualBasic.ChrW(13)),
+                                            originalBody.TrimEnd(Microsoft.VisualBasic.ChrW(13)), System.StringComparison.Ordinal) Then
+                    Throw New System.InvalidOperationException("The message text changed during conversion. Review the draft before continuing.")
+                End If
+            End If
+            Dim current = after.Application.Selection
+            If current.Document IsNot after Then Throw New System.InvalidOperationException("The active editor changed during conversion.")
+            If current.Start <> first OrElse current.End <> last OrElse
+               Not System.String.Equals(current.Text, originalText, System.StringComparison.Ordinal) Then
+                Dim restored = after.Range(first, last)
+                If Not System.String.Equals(restored.Text, originalText, System.StringComparison.Ordinal) Then
+                    Throw New System.InvalidOperationException("The selection changed during conversion. Select the intended text and run the command again.")
+                End If
+                current.SetRange(first, last)
+            End If
+            Return True
+        Catch ex As System.Exception
+            SLib.ShowCustomMessageBox(ex.Message, AN)
+            Return False
+        End Try
+    End Function
 
     Private Class ParagraphFormattingSnapshot
         Public Property Style As Object
@@ -864,7 +927,11 @@ Partial Public Class ThisAddIn
             End If
 
             Dim mailItem As Microsoft.Office.Interop.Outlook.MailItem = CType(curr, Microsoft.Office.Interop.Outlook.MailItem)
-            Dim wordEditor As Microsoft.Office.Interop.Word.Document = ComRetry(Function() CType(inspector.WordEditor, Microsoft.Office.Interop.Word.Document))
+            ' These commands inspect the selection before entering the common edit handler.
+            Select Case RI_Command
+                Case "Summarize", "Shorten", "ApplyMyStyle"
+                    If Not EnsureEditableMailFormat(inspector, mailItem) Then Return
+            End Select
 
             Select Case RI_Command
 
@@ -1811,11 +1878,8 @@ Partial Public Class ThisAddIn
                 CType(curr, Microsoft.Office.Interop.Outlook.MailItem)
 
 
-            ' Check if the email is in plain text format
-            If mailItem.BodyFormat = OlBodyFormat.olFormatPlain Then
-                SLib.ShowCustomMessageBox("This operation is not supported for plain text emails. Switch to HTML or RTF format.")
-                Return
-            End If
+            ' Recheck the actual command target in case the active inspector changed.
+            If Not EnsureEditableMailFormat(inspector, mailItem) Then Return
 
             ' Get the Word editor for the email
             Dim wordEditor As Microsoft.Office.Interop.Word.Document = ComRetry(Function() TryCast(inspector.WordEditor, Microsoft.Office.Interop.Word.Document))
@@ -1982,11 +2046,8 @@ Partial Public Class ThisAddIn
             Dim mailItem As Microsoft.Office.Interop.Outlook.MailItem =
                 CType(curr, Microsoft.Office.Interop.Outlook.MailItem)
 
-            ' Check if the email is in plain text format
-            If mailItem.BodyFormat = Microsoft.Office.Interop.Outlook.OlBodyFormat.olFormatPlain Then
-                ShowCustomMessageBox("This operation is not supported for plain text emails. Switch to HTML or RTF format.")
-                Return
-            End If
+            ' Recheck the actual command target in case the active inspector changed.
+            If Not EnsureEditableMailFormat(inspector, mailItem) Then Return
 
             ' Get the Word editor for the email
             Dim wordEditor As Microsoft.Office.Interop.Word.Document = ComRetry(Function() TryCast(inspector.WordEditor, Microsoft.Office.Interop.Word.Document))
@@ -2359,11 +2420,8 @@ Partial Public Class ThisAddIn
             Dim mailItem As Microsoft.Office.Interop.Outlook.MailItem =
                 CType(curr, Microsoft.Office.Interop.Outlook.MailItem)
 
-            ' Check if the email is in plain text format
-            If mailItem.BodyFormat = Microsoft.Office.Interop.Outlook.OlBodyFormat.olFormatPlain Then
-                SLib.ShowCustomMessageBox("This operation is not supported for plain text emails. Switch to HTML or RTF format.")
-                Return
-            End If
+            ' Recheck the actual command target in case the active inspector changed.
+            If Not EnsureEditableMailFormat(inspector, mailItem) Then Return
 
             ' Get the Word editor for the email
             Dim wordEditor As Microsoft.Office.Interop.Word.Document = ComRetry(Function() TryCast(inspector.WordEditor, Microsoft.Office.Interop.Word.Document))

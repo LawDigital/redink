@@ -247,7 +247,7 @@ Public Class frmAIChat
         ' 6) Configure the SplitContainer panels
         ' Panel1 = chat history (top), Panel2 = user input (bottom, resizable via splitter)
         splitChat.Panel1.Controls.Add(txtChatHistory)
-        splitChat.Panel2.Controls.Add(txtUserInput)
+        splitChat.Panel2.Controls.Add(Global.SharedLibrary.SharedLibrary.SharedMethods.CreateChatDictationInput(txtUserInput, context, smallIcon:=True))
         splitChat.SplitterDistance = 300 ' Default: generous space for chat history
 
         ' 7) Add controls to table

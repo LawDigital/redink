@@ -1740,6 +1740,13 @@
                     "description": "Enable this if AutoPilot should automatically start with the last saved configuration when Outlook launches. A 30-second countdown dialog allows the user to cancel or open the full setup instead. Example: True. [AutoPilotAutoStart]"
                 },
                 {
+                    "key": "AutoPilotQueueMessage",
+                    "label": "AutoPilot queue notification",
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional template for initial and repeat waiting notices. Use {Position} for the queue number, {PositionText} for the position sentence, {WaitDescription} for expected delays, and {MonitorStatus} for the optional status sentence. If omitted, a configured monitor link is appended. Leave blank for the built-in notices. [AutoPilotQueueMessage]"
+                },
+                {
                     "key": "MonitorLink",
                     "label": "Status Monitor Link",
                     "type": "string",
