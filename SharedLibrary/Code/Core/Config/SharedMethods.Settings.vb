@@ -318,13 +318,13 @@ Namespace SharedLibrary
             Dim saveConfigToolTip As New System.Windows.Forms.ToolTip()
             saveConfigToolTip.SetToolTip(saveConfigButton, $"Will save the current configuration to a local copy of '{AN2}.ini' (overwriting any existing such file).")
 
-            Dim centralRegistrySource As String = GetFromRegistry(RegPath_Base, RegPath_IniPath, True)
+            Dim centralRegistrySource As String = GetConfigurationRegistryValue(RegPath_IniPath)
             Dim CentralConfigAvailable As Boolean = False
             If Not String.IsNullOrWhiteSpace(centralRegistrySource) Then
                 If ConfigurationResourceLoader.ClassifyConfigurationSource(centralRegistrySource) = ConfigurationSourceKind.Https Then
                     CentralConfigAvailable = True
                 Else
-                    CentralConfigAvailable = System.IO.File.Exists(System.IO.Path.Combine(ExpandEnvironmentVariables(centralRegistrySource), $"{AN2}.ini"))
+                    CentralConfigAvailable = System.IO.File.Exists(ResolveRegistryConfigurationSource(centralRegistrySource))
                 End If
             End If
             Dim delLocalConfigButton As New System.Windows.Forms.Button()
@@ -338,7 +338,8 @@ Namespace SharedLibrary
             delLocalConfigButton.Size = New System.Drawing.Size(delLocalButtonSize.Width + 20, delLocalButtonSize.Height + 10)
             delLocalConfigButton.Location = New System.Drawing.Point(saveConfigButton.Right + buttonSpacing, buttonYPos)
             settingsForm.Controls.Add(delLocalConfigButton)
-            If Not LocalConfigAvailable Then
+            Dim selectedConfiguration As PriorityConfiguration = Nothing
+            If Not LocalConfigAvailable OrElse (priorityConfigurations.TryGetValue(context, selectedConfiguration) AndAlso Not selectedConfiguration.IsCentral) Then
                 delLocalConfigButton.Enabled = False
             End If
 
@@ -2811,15 +2812,11 @@ Namespace SharedLibrary
             Try
 
                 Dim IniFilePath As String = ""
-                Dim RegFilePath As String = ""
                 Dim DefaultPath As String = ""
-                Dim DefaultPath2 As String = ""
                 Dim TempIniFilePath As String = ""
 
                 ' Resolve the write target without ever mutating a remote active source.
-                RegFilePath = GetFromRegistry(RegPath_Base, RegPath_IniPath, True)
                 DefaultPath = GetDefaultINIPath(context.RDV)
-                DefaultPath2 = GetDefaultINIPath("Word")
 
                 Dim activeSource As String = GetActiveConfigSource(context)
                 If ConfigurationResourceLoader.ClassifyConfigurationSource(activeSource) = ConfigurationSourceKind.Https Then
@@ -2847,7 +2844,12 @@ Namespace SharedLibrary
                 End If
 
                 ' Create a temporary file for the updated configuration
-                TempIniFilePath = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(IniFilePath), $"{AN2}_temp.ini")
+                Dim stageDirectory As System.String = System.IO.Path.GetDirectoryName(IniFilePath)
+                If UsesPriorityRegistryConfiguration(context) Then
+                    stageDirectory = System.IO.Path.GetDirectoryName(DefaultPath)
+                    System.IO.Directory.CreateDirectory(stageDirectory)
+                End If
+                TempIniFilePath = System.IO.Path.Combine(stageDirectory, $"{AN2}_temp.ini")
 
                 ' Define all expected keys and their default or in-memory values
                 ' Export configured INI defaults, not unrelated personal overrides or unsaved live edits.
@@ -3325,7 +3327,9 @@ Namespace SharedLibrary
                 SemanticArchiveConfiguration.SavePendingUserSettings(context)
                 context.INIloaded = False
 
-                If IniFilePath = DefaultPath Then
+                If UsesPriorityRegistryConfiguration(context) AndAlso Not System.String.Equals(activeSource, DefaultPath, System.StringComparison.OrdinalIgnoreCase) Then
+                    ShowCustomMessageBox("Your local configuration copy has been saved. The registry source keeps priority when available.")
+                ElseIf IniFilePath = DefaultPath Then
                     ShowCustomMessageBox("Your configuration file has been updated.")
                 Else
                     ShowCustomMessageBox("Your configuration has been saved To a local configuration file (which will be used going forward until deleted).")
@@ -3879,38 +3883,87 @@ Namespace SharedLibrary
         ''' <param name="context">Shared context providing the current application identifier (<c>RDV</c>).</param>
         ''' <returns>The active configuration file path with CR characters removed.</returns>
         Public Shared Function GetActiveConfigSource(context As ISharedContext) As String
-            Dim regPath As String = GetFromRegistry(RegPath_Base, RegPath_IniPath, True)
-            Dim defaultPathApp As String = GetDefaultINIPath(context.RDV)
-            Dim defaultPathWord As String = GetDefaultINIPath("Word")
-            Dim candidate As String
-
-            If Not String.IsNullOrWhiteSpace(regPath) AndAlso RegPath_IniPrio Then
-                candidate = ResolveRegistryConfigurationSource(regPath)
-            ElseIf System.IO.File.Exists(defaultPathApp) Then
-                candidate = defaultPathApp
-            ElseIf System.IO.File.Exists(defaultPathWord) Then
-                candidate = defaultPathWord
-            ElseIf Not String.IsNullOrWhiteSpace(regPath) Then
-                candidate = ResolveRegistryConfigurationSource(regPath)
-            Else
-                candidate = defaultPathApp
-            End If
-
-            Return RemoveCR(candidate)
+            Dim selected As PriorityConfiguration = Nothing
+            If priorityConfigurations.TryGetValue(context, selected) Then Return selected.Source
+            Return SelectConfigurationSource(context, False, Nothing)
         End Function
 
-        Private Shared Function ResolveRegistryConfigurationSource(ByVal registryValue As String) As String
-            Dim raw As String = RemoveCR(If(registryValue, "").Trim())
-            If String.IsNullOrWhiteSpace(raw) Then Return ""
+        ' A loaded central configuration and a loaded offline fallback both retain their
+        ' logical source until reload. Never expose the temporary HTTPS snapshot as a write target.
+        Private NotInheritable Class PriorityConfiguration
+            Public ReadOnly Source As System.String
+            Public ReadOnly IsCentral As System.Boolean
 
-            Select Case ConfigurationResourceLoader.ClassifyConfigurationSource(raw)
-                Case ConfigurationSourceKind.Https
-                    Return raw
-                Case ConfigurationSourceKind.UnsupportedUri
-                    Return raw
-                Case Else
-                    Return System.IO.Path.Combine(ExpandEnvironmentVariables(raw), $"{AN2}.ini")
-            End Select
+            Public Sub New(source As System.String, isCentral As System.Boolean)
+                Me.Source = source
+                Me.IsCentral = isCentral
+            End Sub
+        End Class
+
+        Private Shared ReadOnly priorityConfigurations As New System.Runtime.CompilerServices.ConditionalWeakTable(Of ISharedContext, PriorityConfiguration)()
+
+        Private Shared Function SelectConfigurationSource(context As ISharedContext, loading As System.Boolean,
+                                                          ByRef content As System.String) As System.String
+            Dim regPath As System.String = GetConfigurationRegistryValue(RegPath_IniPath)
+            Dim appPath As System.String = GetDefaultINIPath(context.RDV)
+            Dim wordPath As System.String = GetDefaultINIPath("Word")
+            Dim localPath As System.String = If(System.IO.File.Exists(appPath), appPath,
+                If(System.IO.File.Exists(wordPath), wordPath, Nothing))
+            If regPath.Length = 0 Then Return If(localPath, appPath)
+            If Not RegistryConfigurationHasPriority() Then Return If(localPath, ResolveRegistryConfigurationSource(regPath))
+
+            Dim selected As PriorityConfiguration
+            Try
+                Dim central As System.String = ResolveRegistryConfigurationSource(regPath)
+                ' With no fallback, keep the established missing-file/setup and error reporting paths.
+                If localPath Is Nothing Then Return central
+                ReadConfigurationCandidate(central, loading, content)
+                selected = New PriorityConfiguration(central, True)
+            Catch ex As System.Exception When IsConfigurationReadFailure(ex) AndAlso localPath IsNot Nothing
+                WritePathResolutionDiagnostic("registry_configuration_local_fallback", "host=" & context.RDV, ex)
+                Try
+                    ReadConfigurationCandidate(localPath, loading, content)
+                Catch localError As System.Exception When IsConfigurationReadFailure(localError) AndAlso
+                    Not System.String.Equals(localPath, wordPath, System.StringComparison.OrdinalIgnoreCase) AndAlso System.IO.File.Exists(wordPath)
+                    WritePathResolutionDiagnostic("host_configuration_word_fallback", "host=" & context.RDV, localError)
+                    ReadConfigurationCandidate(wordPath, loading, content)
+                    localPath = wordPath
+                End Try
+                selected = New PriorityConfiguration(localPath, False)
+            End Try
+            If loading Then priorityConfigurations.GetValue(context, Function(unused) selected)
+            Return selected.Source
+        End Function
+
+        Private Shared Sub ReadConfigurationCandidate(source As System.String, loading As System.Boolean, ByRef content As System.String)
+            Dim path As System.String = ConfigurationResourceLoader.ResolveForRead(source, "redink.ini")
+            If loading Then
+                content = System.IO.File.ReadAllText(path)
+            Else
+                Using stream As System.IO.FileStream = System.IO.File.OpenRead(path)
+                End Using
+            End If
+        End Sub
+
+        Private Shared Function IsConfigurationReadFailure(ex As System.Exception) As System.Boolean
+            Return TypeOf ex Is System.IO.IOException OrElse TypeOf ex Is System.IO.InvalidDataException OrElse
+                TypeOf ex Is System.UnauthorizedAccessException OrElse TypeOf ex Is System.Security.SecurityException OrElse
+                TypeOf ex Is System.ArgumentException OrElse TypeOf ex Is System.NotSupportedException
+        End Function
+
+        Friend Shared Function UsesPriorityRegistryConfiguration(context As ISharedContext) As System.Boolean
+            Dim selected As PriorityConfiguration = Nothing
+            If priorityConfigurations.TryGetValue(context, selected) Then Return selected.IsCentral
+            Return RegistryConfigurationHasPriority() AndAlso GetConfigurationRegistryValue(RegPath_IniPath).Length > 0
+        End Function
+
+        Friend Shared Function ResolveRegistryConfigurationSource(registryValue As System.String) As System.String
+            Dim raw As System.String = RemoveCR(registryValue)
+            If ConfigurationResourceLoader.ClassifyConfigurationSource(raw) <> ConfigurationSourceKind.FileSystem Then Return raw
+            Dim expanded As System.String = ExpandEnvironmentVariables(raw)
+            If expanded.Length = 0 Then Return ""
+            If expanded.EndsWith(".ini", System.StringComparison.OrdinalIgnoreCase) AndAlso Not System.IO.Directory.Exists(expanded) Then Return expanded
+            Return System.IO.Path.Combine(expanded, AN2 & ".ini")
         End Function
 
         Public Shared Function GetActiveConfigReadPath(context As ISharedContext) As String
@@ -4132,7 +4185,7 @@ Namespace SharedLibrary
 
                 ' Registry-controlled INI => disable
                 Try
-                    If RegPath_IniPrio Then
+                    If UsesPriorityRegistryConfiguration(context) Then
                         canImport = False
                     End If
                 Catch

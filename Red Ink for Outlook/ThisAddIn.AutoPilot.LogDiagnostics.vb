@@ -867,10 +867,10 @@ Partial Public Class ThisAddIn
             End If
         End Try
 
-        Return ParseAndNormalizeAutoPilotLogDiagnosticFindings(raw, logLines)
+        Return ParseAndNormalizeAutoPilotLogDiagnosticFindings(raw, logLines, chunkNumber)
     End Function
 
-    Private Shared Function ParseAndNormalizeAutoPilotLogDiagnosticFindings(raw As System.String, logLines As System.String()) As System.Collections.Generic.List(Of Newtonsoft.Json.Linq.JObject)
+    Private Shared Function ParseAndNormalizeAutoPilotLogDiagnosticFindings(raw As System.String, logLines As System.String(), chunkNumber As System.Int32) As System.Collections.Generic.List(Of Newtonsoft.Json.Linq.JObject)
         Dim result As New System.Collections.Generic.List(Of Newtonsoft.Json.Linq.JObject)()
         Dim jsonText As System.String = StripAutoPilotLogDiagnosticCodeFence(If(raw, System.String.Empty).Trim())
         If jsonText.Length = 0 Then Return Nothing
@@ -880,6 +880,17 @@ Partial Public Class ThisAddIn
             Dim findings As Newtonsoft.Json.Linq.JArray = TryCast(root("findings"), Newtonsoft.Json.Linq.JArray)
             If findings Is Nothing Then Return Nothing
 
+            Dim hostEvents As New Newtonsoft.Json.Linq.JArray()
+            Dim seen As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
+            For lineNumber As System.Int32 = logLines.Length To 1 Step -1
+                If Not System.Text.RegularExpressions.Regex.IsMatch(logLines(lineNumber - 1),
+                    "\A\[\d{2}:\d{2}:\d{2}\.\d{3}\] \[WARN\] (?:Invalid active-tooling turn rejected; |Active-tooling repair exhausted; returning host-generated blocked message\. |\[subagent-host\] phase=model_resolution )") Then Continue For
+                Dim fields = ReadAutoPilotDiagnosticEvidence(New Newtonsoft.Json.Linq.JArray(lineNumber), logLines)
+                If fields.Count = 0 OrElse Not seen.Add(fields(0).ToString()) Then Continue For
+                hostEvents.Insert(0, New Newtonsoft.Json.Linq.JValue($"part={chunkNumber} line={lineNumber}; " & fields(0).ToString()))
+                If hostEvents.Count >= 12 Then Exit For
+            Next
+
             For Each token As Newtonsoft.Json.Linq.JToken In findings
                 Dim finding As Newtonsoft.Json.Linq.JObject = TryCast(token, Newtonsoft.Json.Linq.JObject)
                 If finding Is Nothing Then Continue For
@@ -887,6 +898,7 @@ Partial Public Class ThisAddIn
                 Dim normalized As Newtonsoft.Json.Linq.JObject = NormalizeAutoPilotLogDiagnosticFinding(finding)
                 If normalized Is Nothing Then Continue For
                 normalized("runtime_evidence") = ReadAutoPilotDiagnosticEvidence(finding("evidence_lines"), logLines)
+                normalized("host_events") = hostEvents.DeepClone()
                 result.Add(normalized)
             Next
         Catch
@@ -905,7 +917,7 @@ Partial Public Class ThisAddIn
         Dim indices = TryCast(selection, Newtonsoft.Json.Linq.JArray)
         If indices Is Nothing Then Return result
         Dim seen As New System.Collections.Generic.HashSet(Of System.Int32)()
-        Const pattern As System.String = "(?i)(?:^|[ ;,\[])(?:(?<key>phase|host|tool|toolName|operation|status|outcome|resultKind|errorCode|reason|invalidReason|prerequisite|recoveryPolicy)=(?<val>[a-z][a-z0-9_]{0,63})|(?<key>field)=(?<val>[a-z_]{1,32}(?:\[\]|(?:/[a-z_]{1,32}){0,2}))|(?<key>elapsedMs|queueWaitMs|iteration|attempt|retryCount|repeatCount|count|length)=(?<val>[0-9]{1,10})|(?<key>terminal|success|skipped|retryable|returnedToParent)=(?<val>true|false))(?=$|[ ;,\]])"
+        Const pattern As System.String = "(?i)(?:^|[ ;,\[])(?:(?<key>phase|host|tool|toolName|failedTool|lastSuccessfulTool|outcomeReconciliation|failureCategory|operation|status|outcome|resultKind|errorCode|reason|invalidReason|prerequisite|recoveryPolicy)=(?<val>[a-z][a-z0-9_]{0,63})|(?<key>field)=(?<val>[a-z_]{1,32}(?:\[\]|(?:/[a-z_]{1,32}){0,2}))|(?<key>elapsedMs|queueWaitMs|iteration|attempt|failureSequence|attempts|lastAttempt|legacyOpen|producerMatched|expectedCount|satisfiedCount|retryCount|repeatCount|count|length)=(?<val>[0-9]{1,10})|(?<key>scopePresent|deliverableIdentityPresent|terminal|success|skipped|retryable|returnedToParent)=(?<val>true|false))(?=$|[ ;,\]])"
         For Each item As Newtonsoft.Json.Linq.JToken In indices.Take(4)
             Dim index As System.Int32
             If item.Type <> Newtonsoft.Json.Linq.JTokenType.Integer OrElse Not System.Int32.TryParse(item.ToString(), index) Then Continue For
@@ -917,7 +929,7 @@ Partial Public Class ThisAddIn
             Dim fields As New System.Collections.Generic.List(Of System.String)()
             For Each match As System.Text.RegularExpressions.Match In System.Text.RegularExpressions.Regex.Matches(line, pattern)
                 fields.Add(match.Groups("key").Value & "=" & match.Groups("val").Value)
-                If fields.Count >= 8 Then Exit For
+                If fields.Count >= 20 Then Exit For
             Next
             If fields.Count > 0 Then result.Add(System.String.Join("; ", fields))
         Next
@@ -1089,7 +1101,7 @@ Partial Public Class ThisAddIn
             "[id]")
         text = System.Text.RegularExpressions.Regex.Replace(
             text,
-            "\b[A-Za-z0-9\-]{32,}\b",
+            "\b(?!(?:CompatibleAlternativeSuccessAllowed|DifferentAlternativeSuccessOnly)\b)[A-Za-z0-9\-]{32,}\b",
             "[id]")
         text = System.Text.RegularExpressions.Regex.Replace(
             text,
@@ -1545,6 +1557,24 @@ Partial Public Class ThisAddIn
         If pendingCount > 0 Then summary.AppendLine("Pending runs remain queued. Check the AutoPilot dashboard for model, cancellation or analysis failures.")
         summary.AppendLine("Analysis runs while AutoPilot is active and idle. Outlook must be running for analysis and mail submission.")
         summary.AppendLine()
+        Try
+            Dim root = GetAutoPilotLogDiagnosticsRootDirectory()
+            Dim path = System.IO.Path.Combine(root, "last-cleanup.txt")
+            Dim snapshot As System.String() = Nothing
+            If root.Length > 0 AndAlso System.IO.File.Exists(path) Then snapshot = System.IO.File.ReadAllLines(path)
+            If snapshot IsNot Nothing AndAlso snapshot.Length = 3 AndAlso
+               System.Text.RegularExpressions.Regex.IsMatch(snapshot(0), "\AstartUtc=[0-9]{8}T[0-9]{6}Z status=(running|completed|failed|cancelled)\z") AndAlso
+               snapshot.Skip(1).All(Function(line) System.Text.RegularExpressions.Regex.IsMatch(line, "\Afolders=[0-9]+ examined=[0-9]+ protected=[0-9]+ unrecognized=[0-9]+ notDue=[0-9]+ eligible=[0-9]+ deleted=[0-9]+ errors=[0-9]+\z")) Then
+                summary.AppendLine("Last observed AutoPilot mail cleanup: " & snapshot(0))
+                summary.AppendLine("Mailbox pass: " & snapshot(1))
+                summary.AppendLine("Deleted Items pass: " & snapshot(2))
+            Else
+                summary.AppendLine("No validated mail cleanup snapshot available.")
+            End If
+        Catch ex As System.Exception
+            summary.AppendLine("Mail cleanup snapshot could not be read.")
+        End Try
+        summary.AppendLine()
         reportText = summary.ToString() & reportText
 
         Dim recipient As System.String = _apConfig.LogDiagnosticsReportEmail
@@ -1846,6 +1876,20 @@ Partial Public Class ThisAddIn
             sb.AppendLine()
         Next
 
+        For Each result In results
+            Dim id = If(result.Value(Of System.String)("runId"), "")
+            If Not contributingRunIds.Contains(id) Then Continue For
+            Dim events As New Newtonsoft.Json.Linq.JArray()
+            Dim seen As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.Ordinal)
+            For Each finding In result("findings").OfType(Of Newtonsoft.Json.Linq.JObject)()
+                Dim recorded = TryCast(finding("host_events"), Newtonsoft.Json.Linq.JArray)
+                If recorded Is Nothing Then Continue For
+                For Each entry In recorded
+                    If seen.Add(entry.ToString()) Then events.Add(entry.ToString())
+                Next
+            Next
+            AppendAutoPilotLogDiagnosticArray(sb, "Host events for run " & id, events)
+        Next
         Return sb.ToString()
     End Function
 
@@ -1926,6 +1970,11 @@ Partial Public Class ThisAddIn
             If Not mail.Recipients.ResolveAll() Then
                 Throw New System.InvalidOperationException(
                     "Could not resolve the configured AutoPilot diagnostics report recipient.")
+            End If
+            StampAutoPilotReplyHeaders(mail, AP_LoopHeaderValue)
+            Dim cutoff As System.DateTime? = GetAutoDeleteCutoffUtc()
+            If cutoff.HasValue Then
+                StampCleanupMetadata(mail, System.Guid.NewGuid().ToString("N"), True, System.DateTime.UtcNow, cutoff, saveItem:=False)
             End If
             SubmitAutoPilotMailOnce(mail)
         Finally

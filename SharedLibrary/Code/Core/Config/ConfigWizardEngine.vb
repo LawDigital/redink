@@ -180,11 +180,11 @@ Namespace SharedLibrary
             End If
 
             ' Determine the central path (registry-directed)
-            Dim regPath As String = GetFromRegistry(RegPath_Base, RegPath_IniPath, True)
+            Dim regPath As String = GetConfigurationRegistryValue(RegPath_IniPath)
             Dim centralPath As String = ""
             If Not String.IsNullOrWhiteSpace(regPath) AndAlso
                ConfigurationResourceLoader.ClassifyConfigurationSource(regPath) = ConfigurationSourceKind.FileSystem Then
-                centralPath = Path.Combine(ExpandEnvironmentVariables(regPath), $"{AN2}.ini")
+                centralPath = SharedMethods.ResolveRegistryConfigurationSource(regPath)
             End If
 
             ' Also check the Word default as a potential shared/central path
@@ -240,10 +240,10 @@ Namespace SharedLibrary
             Dim candidates As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
 
             ' 1. Central / registry-directed path
-            Dim regPath As String = GetFromRegistry(RegPath_Base, RegPath_IniPath, True)
+            Dim regPath As String = GetConfigurationRegistryValue(RegPath_IniPath)
             Dim centralPath As String = ""
             If Not String.IsNullOrWhiteSpace(regPath) Then
-                centralPath = Path.Combine(ExpandEnvironmentVariables(regPath), $"{AN2}.ini")
+                centralPath = SharedMethods.ResolveRegistryConfigurationSource(regPath)
             End If
             If Not String.IsNullOrWhiteSpace(centralPath) AndAlso File.Exists(centralPath) Then
                 candidates($"Central ({centralPath})") = centralPath
@@ -362,8 +362,7 @@ Namespace SharedLibrary
             Dim iniPath As System.String = SharedMethods.GetWritableLocalConfigPath(context)
             If System.String.IsNullOrWhiteSpace(iniPath) Then Throw New System.Configuration.ConfigurationErrorsException("No standard personal configuration path is available for this Office host.")
             Dim activeSource As System.String = SharedMethods.GetActiveConfigSource(context)
-            If SharedMethods.RegPath_IniPrio AndAlso
-               Not System.String.IsNullOrWhiteSpace(SharedMethods.GetFromRegistry(SharedMethods.RegPath_Base, SharedMethods.RegPath_IniPath, True)) Then
+            If SharedMethods.UsesPriorityRegistryConfiguration(context) Then
                 Dim sameFile As System.Boolean = ConfigurationResourceLoader.ClassifyConfigurationSource(activeSource) = ConfigurationSourceKind.FileSystem AndAlso
                     System.String.Equals(System.IO.Path.GetFullPath(activeSource), System.IO.Path.GetFullPath(iniPath), System.StringComparison.OrdinalIgnoreCase)
                 If Not sameFile Then Throw New System.InvalidOperationException("Registry configuration priority prevents a personal INI override. Ask your configuration administrator to change the active configuration.")

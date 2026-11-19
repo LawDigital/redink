@@ -1301,7 +1301,11 @@ Namespace Agents
                 End If
                 slots.Add(entry)
             Next
-            Return "legacyOutputs=" & entries.ToString(Newtonsoft.Json.Formatting.None) &
+            Dim summary = "legacyOpen=" & openPaths.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                "; producerMatched=" & entries.Where(Function(entry) entry.Value(Of System.Boolean)("producer_source_matched")).Count().ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                "; expectedCount=" & slots.Count.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            If verifySlots Then summary &= "; satisfiedCount=" & slots.Where(Function(entry) entry.Value(Of System.Boolean)("satisfied")).Count().ToString(System.Globalization.CultureInfo.InvariantCulture)
+            Return summary & "; legacyOutputs=" & entries.ToString(Newtonsoft.Json.Formatting.None) &
                 "; expectedSlots=" & slots.ToString(Newtonsoft.Json.Formatting.None)
         End Function
 
