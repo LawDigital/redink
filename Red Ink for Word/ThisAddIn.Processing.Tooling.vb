@@ -6039,7 +6039,7 @@ Partial Public Class ThisAddIn
                     "Returning safe provisional user-facing result after finalization was blocked.",
                     details:=$"host={If(context.HostKind, System.String.Empty)}; finalizationReason={If(context.FinalizationBlockedReason, System.String.Empty)}; producedUserDeliverable={If(SharedLibrary.Agents.ToolCallSequencing.HasProducedUserDeliverable(context.SequencingState), "true", "false")}")
 
-                Return provisionalMessage.Trim() & " " &
+                Return provisionalMessage.Trim() & vbCrLf &
                     SharedLibrary.Agents.ToolCallSequencing.BuildTaskStatusFooter(
                         "blocked",
                         If(errorCode, "host_generated_blocked"))
@@ -6054,7 +6054,7 @@ Partial Public Class ThisAddIn
             deterministicHostMessage,
             producedUserDeliverable:=SharedLibrary.Agents.ToolCallSequencing.HasProducedUserDeliverable(context.SequencingState)) Then
 
-            Return deterministicHostMessage.Trim() & " " &
+            Return deterministicHostMessage.Trim() & vbCrLf &
                 SharedLibrary.Agents.ToolCallSequencing.BuildTaskStatusFooter(
                     "blocked",
                     If(errorCode, "host_generated_blocked"))
@@ -6069,7 +6069,7 @@ Partial Public Class ThisAddIn
                 hideSplash)
 
         If Not String.IsNullOrWhiteSpace(partialMessage) Then
-            Return partialMessage.Trim() & " " &
+            Return partialMessage.Trim() & vbCrLf &
                 SharedLibrary.Agents.ToolCallSequencing.BuildTaskStatusFooter(
                     "blocked",
                     If(errorCode, "host_generated_blocked"))

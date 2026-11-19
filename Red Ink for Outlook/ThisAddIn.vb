@@ -14,7 +14,7 @@
 '   the other ThisAddIn.* files.
 ' =============================================================================
 '
-' 17.11.2026
+' 19.11.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -80,7 +80,7 @@ Partial Public Class ThisAddIn
     Public Const AN4 As String = "redink_"
     Public Const AN3 As String = "redink"
 
-    Public Shared Version As String = "V.171126" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.191126" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -1077,6 +1077,7 @@ Partial Public Class ThisAddIn
         _context.InitialConfigFailed = False
         _context.RDV = "Outlook (" & Version & ")"
         SharedMethods.InitializeConfig(_context, FirstTime, Reload)
+        SharedMethods.RegisterDictationHost(_context)
     End Sub
 
     ''' <summary>

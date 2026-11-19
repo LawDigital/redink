@@ -75,6 +75,7 @@ Partial Public Class ThisAddIn
 
     Private Structure AutoDeleteCleanupStats
         Public ScannedCount As Integer
+        Public Examined, ProtectedCount, Unrecognized, NotDue As System.Int32
         Public DeletedCount As Integer
         Public ErrorCount As Integer
         Public FolderCount As Integer
@@ -218,6 +219,8 @@ Partial Public Class ThisAddIn
         Dim pass2 As AutoDeleteCleanupStats
         Dim sw = Stopwatch.StartNew()
 
+        Dim outcome As System.String = "running"
+        RecordCleanupEvidence(nowUtc, outcome, pass1, pass2)
         _apAutoDeleteDiagnosticRejectLogCount = 0
         _apAutoDeleteDiagnosticErrorLogCount = 0
 
@@ -259,15 +262,44 @@ Partial Public Class ThisAddIn
             ApDashboardLog(
                 $"🗑 Auto-delete cleanup finished in {sw.Elapsed.TotalSeconds:F1}s: {totalDeleted} item(s) removed, {totalErrors} error(s), {totalScanned} candidate item(s) matched across {totalFolders} folder(s).",
                 If(totalErrors > 0, "warn", "info"))
+            outcome = "completed"
         Catch ex As OperationCanceledException
+            outcome = "cancelled"
             ApDashboardLog("🗑 Auto-delete cleanup cancelled.", "step")
         Catch ex As System.Exception
+            outcome = "failed"
             ApDashboardLog($"🗑 Auto-delete cleanup error: {ex.Message}", "warn")
         Finally
+            RecordCleanupEvidence(nowUtc, outcome, pass1, pass2)
             sw.Stop()
             Interlocked.Exchange(_apAutoDeleteCheckRunning, 0)
         End Try
     End Function
+
+    Private Shared Sub RecordCleanupEvidence(started As System.DateTime, outcome As System.String,
+                                             mailbox As AutoDeleteCleanupStats, bin As AutoDeleteCleanupStats)
+        Try
+            Dim root = GetAutoPilotLogDiagnosticsRootDirectory()
+            If root.Length = 0 Then Return
+            Dim path = System.IO.Path.Combine(root, "last-cleanup.txt")
+            Dim lines As New System.Collections.Generic.List(Of System.String) From {
+                "startUtc=" & started.ToString("yyyyMMddTHHmmssZ", System.Globalization.CultureInfo.InvariantCulture) & " status=" & outcome}
+            For Each pass In {mailbox, bin}
+                lines.Add(System.FormattableString.Invariant($"folders={pass.FolderCount} examined={pass.Examined} protected={pass.ProtectedCount} unrecognized={pass.Unrecognized} notDue={pass.NotDue} eligible={pass.ScannedCount} deleted={pass.DeletedCount} errors={pass.ErrorCount}"))
+            Next
+            SyncLock _apLogDiagnosticsFsSync
+                System.IO.Directory.CreateDirectory(root)
+                System.IO.File.WriteAllLines(path & ".tmp", lines)
+                If System.IO.File.Exists(path) Then
+                    System.IO.File.Replace(path & ".tmp", path, Nothing)
+                Else
+                    System.IO.File.Move(path & ".tmp", path)
+                End If
+            End SyncLock
+        Catch ex As System.Exception
+            System.Diagnostics.Trace.WriteLine("Cleanup diagnostics unavailable: " & ex.GetType().Name)
+        End Try
+    End Sub
 
     Private Sub ThrowIfAutoDeleteCancelled(ct As CancellationToken)
         If ct.IsCancellationRequested Then
@@ -672,11 +704,19 @@ Partial Public Class ThisAddIn
                     Try
                         specialFolder = store.GetDefaultFolder(special)
                         If specialFolder IsNot Nothing Then
-                            ' Compare by name AND by EntryID: either match is sufficient.
-                            Dim sameName As Boolean = String.Equals(specialFolder.Name, folder.Name, StringComparison.OrdinalIgnoreCase)
-                            Dim sameId As Boolean = False
-                            Try : sameId = String.Equals(specialFolder.EntryID, folder.EntryID, StringComparison.OrdinalIgnoreCase) : Catch : End Try
-                            If sameName OrElse sameId Then Return True
+                            ' Use identity when available. An ordinary subfolder can share the default folder's name.
+                            Dim candidateId As System.String = Nothing
+                            Dim specialId As System.String = Nothing
+                            Try
+                                candidateId = folder.EntryID
+                                specialId = specialFolder.EntryID
+                            Catch ex As System.Exception
+                            End Try
+                            If Not System.String.IsNullOrEmpty(candidateId) AndAlso Not System.String.IsNullOrEmpty(specialId) Then
+                                If System.String.Equals(candidateId, specialId, System.StringComparison.OrdinalIgnoreCase) Then Return True
+                            ElseIf System.String.Equals(specialFolder.Name, folder.Name, System.StringComparison.OrdinalIgnoreCase) Then
+                                Return True
+                            End If
                         End If
                     Catch
                     Finally
@@ -1091,7 +1131,8 @@ Partial Public Class ThisAddIn
                     mi = TryCast(obj, MailItem)
                     If mi Is Nothing Then Continue For
 
-                    If Not ShouldAutoDeleteMail(mi, nowUtc, folderPath) Then Continue For
+                    stats.Examined += 1
+                    If Not ShouldAutoDeleteMail(mi, nowUtc, stats) Then Continue For
 
                     stats.ScannedCount += 1
                     PumpAutoDeleteUi(stats, ct, folderPath)
@@ -1132,10 +1173,13 @@ Partial Public Class ThisAddIn
 
     Private Function ShouldAutoDeleteMail(mi As MailItem,
                                           nowUtc As DateTime,
-                                          folderPath As String) As Boolean
+                                          ByRef stats As AutoDeleteCleanupStats) As Boolean
         If mi Is Nothing OrElse _apConfig Is Nothing OrElse _apConfig.AutoDeleteAfterHours <= 0 Then Return False
         Dim groupId = GetCleanupGroupId(mi)
-        If IsAutoDeleteWorkProtected(mi, groupId) Then Return False
+        If IsAutoDeleteWorkProtected(mi, groupId) Then
+            stats.ProtectedCount += 1
+            Return False
+        End If
         Dim eligibleRaw As System.String = Nothing
         Dim deleteAfterUtc As System.DateTime
         If Not System.String.IsNullOrWhiteSpace(groupId) AndAlso
@@ -1144,12 +1188,16 @@ Partial Public Class ThisAddIn
            TryGetNamedDateUtcProperty(mi, AP_CleanupDeleteAfterUtcProperty, deleteAfterUtc) Then
             Dim ownOutgoing As System.Boolean = False
             If Not HasLocalAutoDeleteMetadata(mi) AndAlso Not IsRecognizedAutoDeleteMail(mi, ownOutgoing) Then Return False
-            Return deleteAfterUtc <= nowUtc
+            If deleteAfterUtc > nowUtc Then stats.NotDue += 1
+        Return deleteAfterUtc <= nowUtc
         End If
 
         ' Recover legacy items only from positive host ownership evidence, never subject/body/filter matches.
         Dim isOwnOutgoing As System.Boolean = False
-        If Not IsRecognizedAutoDeleteMail(mi, isOwnOutgoing) Then Return False
+        If Not IsRecognizedAutoDeleteMail(mi, isOwnOutgoing) Then
+            stats.Unrecognized += 1
+            Return False
+        End If
         Dim basis As System.DateTime
         Dim basisName As System.String = "answered metadata"
         If Not TryGetNamedDateUtcProperty(mi, AP_CleanupAnsweredUtcProperty, basis) Then
@@ -1183,6 +1231,7 @@ Partial Public Class ThisAddIn
            Not "true".Equals(savedEligible, System.StringComparison.OrdinalIgnoreCase) OrElse
            Not TryGetNamedDateUtcProperty(mi, AP_CleanupDeleteAfterUtcProperty, savedCutoff) OrElse savedCutoff <> deleteAfterUtc Then Return False
         LogAutoDeleteRejectDiagnostic("Recovered AutoPilot retention from " & basisName & "; expiry=" & deleteAfterUtc.ToString("o", System.Globalization.CultureInfo.InvariantCulture))
+        If deleteAfterUtc > nowUtc Then stats.NotDue += 1
         Return deleteAfterUtc <= nowUtc
     End Function
 
@@ -1217,7 +1266,10 @@ Partial Public Class ThisAddIn
                 Dim account As Microsoft.Office.Interop.Outlook.Account = Nothing
                 Try
                     account = accounts.Item(index)
-                    If Not System.String.IsNullOrWhiteSpace(account.SmtpAddress) Then _apAutoDeleteSendingAddresses.Add(account.SmtpAddress.Trim())
+                    Dim address As System.String = account?.SmtpAddress
+                    If Not System.String.IsNullOrWhiteSpace(address) Then _apAutoDeleteSendingAddresses.Add(address.Trim())
+                Catch ex As System.Exception
+                    LogAutoDeleteErrorDiagnostic("Cannot read sending account address: " & ex.Message)
                 Finally
                     If account IsNot Nothing AndAlso System.Runtime.InteropServices.Marshal.IsComObject(account) Then System.Runtime.InteropServices.Marshal.ReleaseComObject(account)
                 End Try

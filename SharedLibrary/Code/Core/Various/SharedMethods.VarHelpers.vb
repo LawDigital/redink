@@ -451,6 +451,42 @@ Namespace SharedLibrary
         End Sub
 
 
+        ' Machine configuration is shared across Office bitness. Prefer the native 64-bit
+        ' policy on 64-bit Windows, then a 32-bit deployment, then the legacy user value.
+        Public Shared Function GetConfigurationRegistryValue(valueName As System.String) As System.String
+            Dim views As Microsoft.Win32.RegistryView() = If(System.Environment.Is64BitOperatingSystem,
+                New Microsoft.Win32.RegistryView() {Microsoft.Win32.RegistryView.Registry64, Microsoft.Win32.RegistryView.Registry32},
+                New Microsoft.Win32.RegistryView() {Microsoft.Win32.RegistryView.Registry32})
+            For Each view As Microsoft.Win32.RegistryView In views
+                Try
+                    Using machine As Microsoft.Win32.RegistryKey = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, view)
+                        Using key As Microsoft.Win32.RegistryKey = machine.OpenSubKey("Software\" & AN3, False)
+                            Dim value As System.Object = key?.GetValue(valueName)
+                            If TypeOf value Is System.String OrElse (valueName = "NoLocalConfig" AndAlso TypeOf value Is System.Int32) Then
+                                Dim result As System.String = RemoveCR(value.ToString())
+                                If result.Length > 0 Then Return result
+                            End If
+                        End Using
+                    End Using
+                Catch ex As System.Exception When TypeOf ex Is System.Security.SecurityException OrElse
+                     TypeOf ex Is System.UnauthorizedAccessException OrElse TypeOf ex Is System.IO.IOException
+                    WritePathResolutionDiagnostic("machine_configuration_read_failed", "value=" & valueName & ";view=" & view.ToString(), ex)
+                End Try
+            Next
+            Return GetFromRegistry(RegPath_Base, valueName, True)
+        End Function
+
+        Public Shared Function RegistryConfigurationHasPriority() As System.Boolean
+            Select Case GetConfigurationRegistryValue("NoLocalConfig").ToLowerInvariant()
+                Case "1", "true", "yes", "on"
+                    Return True
+                Case "0", "false", "no", "off"
+                    Return False
+                Case Else
+                    Return RegPath_IniPrio
+            End Select
+        End Function
+
         ''' <summary>
         ''' Reads a value from the Windows registry.
         ''' </summary>

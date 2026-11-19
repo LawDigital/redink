@@ -518,7 +518,7 @@ Namespace SharedLibrary
                 inputTextBox.MinimumSize = New Size(desiredInputWidth, desiredInputHeight)
                 inputTextBox.Dock = DockStyle.Fill
             End If
-            mainLayout.Controls.Add(inputTextBox, 0, 1)
+            mainLayout.Controls.Add(If(SimpleInput, DirectCast(inputTextBox, System.Windows.Forms.Control), CreateDictationInput(inputTextBox, Context, modalCaller:=True)), 0, 1)
 
             ' OK and Cancel buttons.
             Dim okButton As New Button() With {.Text = "OK", .AutoSize = True, .Font = standardFont}
@@ -2507,6 +2507,10 @@ Namespace SharedLibrary
 
                 If Not System.String.IsNullOrWhiteSpace(param.ToolTipText) Then toolTip.SetToolTip(ctrl, param.ToolTipText)
                 param.InputControl = ctrl
+                Dim multi = TryCast(ctrl, System.Windows.Forms.TextBox)
+                If multi IsNot Nothing AndAlso multi.Multiline AndAlso multi.Enabled Then
+                    ctrl = CreateDictationInput(multi, Nothing, modalCaller:=True)
+                End If
                 If showLabel Then
                     mainLayout.Controls.Add(ctrl, 1, i + 1)
                 Else
@@ -4262,7 +4266,7 @@ Namespace SharedLibrary
                                     .Margin = New System.Windows.Forms.Padding(0)
                                 }
 
-                                root.Controls.Add(promptTextBox, 0, 1)
+                                root.Controls.Add(CreateDictationInput(promptTextBox, options.Context, modalCaller:=True), 0, 1)
 
                                 ' =========================================================
                                 ' SETTINGS HOST

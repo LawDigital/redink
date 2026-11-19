@@ -211,7 +211,7 @@ Namespace SharedLibrary
             pnlButtons.Controls.Add(_chkIncludeConfig)
 
             table.Controls.Add(_chat, 0, 0)
-            table.Controls.Add(_txtInput, 0, 1)
+            table.Controls.Add(Global.SharedLibrary.SharedLibrary.SharedMethods.CreateChatDictationInput(_txtInput, _context, smallIcon:=True), 0, 1)
             table.Controls.Add(pnlButtons, 0, 2)
             Me.Controls.Add(table)
 

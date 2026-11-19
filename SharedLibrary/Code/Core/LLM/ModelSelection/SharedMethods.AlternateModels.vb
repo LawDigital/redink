@@ -659,7 +659,7 @@ Namespace SharedLibrary
 
             If String.IsNullOrWhiteSpace(codebasis) Then
                 If IsEmptyOrBlank(Int_CodeBasis) Then
-                    codebasis = GetFromRegistry(RegPath_Base, RegPath_CodeBasis, False)
+                    codebasis = GetConfigurationRegistryValue(RegPath_CodeBasis)
                 Else
                     codebasis = Int_CodeBasis
                 End If
@@ -870,6 +870,16 @@ Namespace SharedLibrary
                                                ByVal iniFilePath As String,
                                                ByVal Task As String,
                                                Optional ByVal UseCase As Integer = 1) As Boolean
+            Dim reason As System.String = Nothing
+            Return GetSpecialTaskModelWithReason(context, iniFilePath, Task, reason, UseCase)
+        End Function
+
+        Public Shared Function GetSpecialTaskModelWithReason(ByVal context As ISharedContext,
+                                               ByVal iniFilePath As String,
+                                               ByVal Task As String,
+                                               ByRef reason As System.String,
+                                               Optional ByVal UseCase As Integer = 1) As Boolean
+            reason = "no_matching_assignment"
             If String.IsNullOrWhiteSpace(Task) Then Return False
 
             ' Nested OCR/media helpers receive private call contexts too. They must not write
@@ -909,10 +919,16 @@ Namespace SharedLibrary
                     Dim raw As String = Nothing
                     If Not section.Values.TryGetValue(normalizedTask, raw) Then Continue For
                     If Not IsTruthyIniValue(raw) Then Continue For
-                    If Not IsModelAccessibleForCurrentUser(section.Values, context) Then Continue For
+                    If Not IsModelAccessibleForCurrentUser(section.Values, context) Then
+                        reason = "assignment_inaccessible"
+                        Continue For
+                    End If
 
                     Dim model As ModelConfig = CreateModelConfigFromDict(section.Values, context, section.Description)
-                    If model Is Nothing Then Continue For
+                    If model Is Nothing Then
+                        reason = "invalid_model_configuration"
+                        Continue For
+                    End If
 
                     ApplyModelConfig(context, model)
                     Return True
@@ -920,6 +936,7 @@ Namespace SharedLibrary
 
                 Return False
             Catch ex As System.Exception
+                reason = "model_configuration_error"
                 ShowCustomMessageBox($"Error reading INI file for alternative models ({ConfigurationResourceLoader.GetSafeSourceIdentifier(iniFilePath)}): " & ex.Message)
                 Return False
             End Try
