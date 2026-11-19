@@ -3763,7 +3763,7 @@ Public NotInheritable Class WordTalkToMeSpeechAdapter
 
         If String.IsNullOrWhiteSpace(codeBasis) Then
             Try
-                codeBasis = SharedMethods.GetFromRegistry(SharedMethods.RegPath_Base, SharedMethods.RegPath_CodeBasis, True)
+                codeBasis = SharedMethods.GetConfigurationRegistryValue(SharedMethods.RegPath_CodeBasis)
             Catch
             End Try
         End If

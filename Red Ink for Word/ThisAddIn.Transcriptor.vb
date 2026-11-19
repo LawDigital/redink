@@ -2743,7 +2743,7 @@ Partial Public Class ThisAddIn
             If String.IsNullOrWhiteSpace(codeBasis) Then
                 Try
                     If IsEmptyOrBlank(Int_CodeBasis) Then
-                        codeBasis = GetFromRegistry(RegPath_Base, RegPath_CodeBasis, False)
+                        codeBasis = GetConfigurationRegistryValue(RegPath_CodeBasis)
                     Else
                         codeBasis = Int_CodeBasis
                     End If

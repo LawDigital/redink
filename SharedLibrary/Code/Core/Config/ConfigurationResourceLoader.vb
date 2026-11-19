@@ -35,7 +35,7 @@ Namespace SharedLibrary
     Public NotInheritable Class ConfigurationResourceLoader
 
         Private Shared ReadOnly _sync As New Object()
-        Private Shared ReadOnly _sessionSnapshots As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+        Private Shared ReadOnly _sessionSnapshots As New Dictionary(Of String, String)(System.StringComparer.Ordinal)
 
         Private Sub New()
         End Sub

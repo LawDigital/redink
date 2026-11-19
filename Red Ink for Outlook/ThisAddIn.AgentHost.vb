@@ -141,13 +141,14 @@ Partial Public Class ThisAddIn
                     $"Sub-agent model '{modelKey}' could not be resolved because INI_AlternateModelPath is empty.")
             End If
 
+            Dim resolutionReason As System.String = Nothing
             Try
-                swapped = GetSpecialTaskModel(_context, INI_AlternateModelPath, modelKey)
+                swapped = GetSpecialTaskModelWithReason(_context, INI_AlternateModelPath, modelKey, resolutionReason)
 
                 If Not swapped AndAlso Not modelKey.Equals("agentdefaultmodel", StringComparison.OrdinalIgnoreCase) Then
                     ToolingFileLogger.LogWarn(
                         $"[subagent-host] Model '{modelKey}' was not found. Falling back to 'agentdefaultmodel'.")
-                    swapped = GetSpecialTaskModel(_context, INI_AlternateModelPath, "agentdefaultmodel")
+                    swapped = GetSpecialTaskModelWithReason(_context, INI_AlternateModelPath, "agentdefaultmodel", resolutionReason)
                 End If
             Catch ex As System.Exception
                 Throw New InvalidOperationException(
@@ -155,6 +156,7 @@ Partial Public Class ThisAddIn
             End Try
 
             If Not swapped Then
+                ToolingFileLogger.LogWarn("[subagent-host] phase=model_resolution status=failed reason=" & resolutionReason)
                 Throw New InvalidOperationException(
                     $"Sub-agent model '{modelKey}' could not be resolved via GetSpecialTaskModel.")
             End If

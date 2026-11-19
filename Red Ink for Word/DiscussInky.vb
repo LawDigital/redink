@@ -477,7 +477,7 @@ Public Class DiscussInky
 
         ' Place chat and input into the SplitContainer
         _splitChat.Panel1.Controls.Add(_chat)
-        _splitChat.Panel2.Controls.Add(_txtInput)
+        _splitChat.Panel2.Controls.Add(Global.SharedLibrary.SharedLibrary.SharedMethods.CreateChatDictationInput(_txtInput, _context))
         _splitChat.SplitterDistance = 300 ' Default: generous space for chat transcript
 
         Dim pnlButtons As New FlowLayoutPanel() With {

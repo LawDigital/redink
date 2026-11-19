@@ -6146,6 +6146,10 @@ Namespace Agents
             If runState.HasUnresolvedToolFailure AndAlso runState.UnresolvedToolFailures IsNot Nothing Then
                 Dim latest As ToolFailureRecord = GetDiagnosticFailure(runState, validation)
                 If latest IsNot Nothing Then
+                    parts.Add("failureSequence=" & latest.Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                    parts.Add("lastSuccessfulTool=" & If(runState.LastSuccessfulToolCall, System.String.Empty))
+                    parts.Add("scopePresent=" & (Not System.String.IsNullOrWhiteSpace(latest.RecoveryScopeKey)).ToString().ToLowerInvariant())
+                    parts.Add("deliverableIdentityPresent=" & (Not System.String.IsNullOrWhiteSpace(latest.DeliverableTargetCorrelationSignature)).ToString().ToLowerInvariant())
                     parts.Add("failureCategory=" & latest.Category.ToString())
                     parts.Add("failedTool=" & If(latest.ToolName, System.String.Empty))
                     parts.Add("errorCode=" & If(latest.ErrorCode, System.String.Empty))
@@ -7360,7 +7364,7 @@ Namespace Agents
                 deterministicMessage,
                 producedUserDeliverable:=HasProducedUserDeliverable(runState)) Then
                 If appendTaskStatusFooter Then
-                    deterministicMessage &= " " & BuildTaskStatusFooter("blocked", If(errorCode, "host_generated_blocked"))
+                    deterministicMessage &= vbCrLf & BuildTaskStatusFooter("blocked", If(errorCode, "host_generated_blocked"))
                 End If
                 Return deterministicMessage.Trim()
             End If
@@ -7395,7 +7399,7 @@ Namespace Agents
             End If
 
             If appendTaskStatusFooter Then
-                finalText &= " " & BuildTaskStatusFooter("blocked", If(errorCode, "host_generated_blocked"))
+                finalText &= vbCrLf & BuildTaskStatusFooter("blocked", If(errorCode, "host_generated_blocked"))
             End If
 
             Return finalText.Trim()

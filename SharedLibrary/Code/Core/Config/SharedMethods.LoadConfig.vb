@@ -60,8 +60,6 @@ Namespace SharedLibrary
                                                    Optional requireModelConfiguration As System.Boolean = True)
             If context Is Nothing Then Throw New System.ArgumentNullException(NameOf(context))
             Dim resolvedSource As System.String = If(configurationSource, "").Trim()
-            If System.String.IsNullOrWhiteSpace(resolvedSource) Then resolvedSource = GetActiveConfigSource(context)
-            If System.String.IsNullOrWhiteSpace(resolvedSource) Then Throw New System.InvalidOperationException("configuration_missing: Red Ink could not resolve its standard redink.ini source.")
             Using headless As HeadlessExecutionScope = BeginHeadlessExecution()
                 InitializeConfigCore(context, False, True, resolvedSource, requireModelConfiguration)
                 headless.ThrowIfInteractionRequested()
@@ -74,6 +72,8 @@ Namespace SharedLibrary
 
             If context.INIloaded AndAlso Not Reload Then Return
 
+            priorityConfigurations.Remove(context)
+
             ' Preserve the original loaded state for diagnostics if source resolution fails.
             Dim wasConfigLoaded As System.Boolean = context.INIloaded
 
@@ -81,7 +81,6 @@ Namespace SharedLibrary
 
             context.INIloaded = False
 
-            Dim IniFilePath As String = ""
             Dim RegFilePath As String = ""
             Dim DefaultPath As String = ""
             Dim DefaultPath2 As String = ""
@@ -89,13 +88,14 @@ Namespace SharedLibrary
             Try
 
                 ' An explicit unattended source never changes registry configuration.
-                ' Interactive calls retain the historic source priority rules.
+                ' Automatic loads use the effective registry and host preferences.
+                Dim iniContent As System.String = Nothing
                 Dim configSource As System.String = explicitSource
                 If System.String.IsNullOrWhiteSpace(configSource) Then
-                    RegFilePath = GetFromRegistry(RegPath_Base, RegPath_IniPath, True)
+                    RegFilePath = GetConfigurationRegistryValue(RegPath_IniPath)
                     DefaultPath = GetDefaultINIPath(context.RDV)
                     DefaultPath2 = GetDefaultINIPath("Word")
-                    configSource = GetActiveConfigSource(context)
+                    configSource = SelectConfigurationSource(context, True, iniContent)
                 End If
                 If System.String.IsNullOrWhiteSpace(configSource) Then
                     WritePathResolutionDiagnostic("config_source_empty",
@@ -115,7 +115,7 @@ Namespace SharedLibrary
                     Return
                 End If
 
-                If sourceKind = ConfigurationSourceKind.FileSystem AndAlso Not System.IO.File.Exists(ConfigurationResourceLoader.ResolveForRead(configSource, "redink.ini")) Then
+                If iniContent Is Nothing AndAlso sourceKind = ConfigurationSourceKind.FileSystem AndAlso Not System.IO.File.Exists(ConfigurationResourceLoader.ResolveForRead(configSource, "redink.ini")) Then
                     If FirstTime AndAlso Not IsHeadlessExecution Then
                         Using frm As New InitialConfig(context)
                             Dim __safeDialogOwner92 As System.Windows.Forms.IWin32Window = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
@@ -141,7 +141,10 @@ Namespace SharedLibrary
                 End If
 
                 Try
-                    IniFilePath = ConfigurationResourceLoader.ResolveForRead(configSource, "redink.ini")
+                    If iniContent Is Nothing Then
+                        Dim readPath As System.String = ConfigurationResourceLoader.ResolveForRead(configSource, "redink.ini")
+                        iniContent = System.IO.File.ReadAllText(readPath)
+                    End If
                 Catch ex As System.Exception
                     WritePathResolutionDiagnostic("config_source_resolve_failed",
                                                   "sourceKind=" & sourceKind.ToString() &
@@ -153,13 +156,11 @@ Namespace SharedLibrary
                     Return
                 End Try
 
-                Dim iniContent As String = ""
                 Dim configDict As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
 
-                Debug.WriteLine("Config = " & IniFilePath)
+                Debug.WriteLine("Config = " & ConfigurationResourceLoader.GetSafeSourceIdentifier(configSource))
 
                 ' Read and parse the .ini file.
-                iniContent = System.IO.File.ReadAllText(IniFilePath)
                 Dim iniLines As String() = iniContent.Split({vbCrLf, vbCr, vbLf}, StringSplitOptions.RemoveEmptyEntries)
                 For Each line As String In iniLines
                     Dim trimmedLine = line.Trim()
@@ -418,6 +419,7 @@ Namespace SharedLibrary
                 ' Other parameters.
 
                 context.INI_MonitorLink = If(configDict.ContainsKey("MonitorLink"), configDict("MonitorLink"), "")
+                context.INI_AutoPilotQueueMessage = If(configDict.ContainsKey("AutoPilotQueueMessage"), configDict("AutoPilotQueueMessage"), "")
                 context.INI_NoHelperDownload = ParseBoolean(configDict, "NoHelperDownload")
                 context.INI_LicenseCounterPath = If(configDict.ContainsKey("LicenseCounterPath"), configDict("LicenseCounterPath"), "")
                 context.INI_LicenseCounterMethod = If(configDict.ContainsKey("LicenseCounterMethod"), configDict("LicenseCounterMethod"), DEFAULT_LICENSECOUNTERMETHOD)
@@ -610,7 +612,7 @@ Namespace SharedLibrary
                 ' Resolve Codebasis (used to decode encrypted API keys) if required.
                 If requireModelConfiguration AndAlso (context.INI_APIEncrypted OrElse context.INI_APIEncrypted_2) Then
                     If IsEmptyOrBlank(Int_CodeBasis) Then
-                        context.Codebasis = GetFromRegistry(RegPath_Base, RegPath_CodeBasis, False)
+                        context.Codebasis = GetConfigurationRegistryValue(RegPath_CodeBasis)
                     Else
                         context.Codebasis = Int_CodeBasis
                     End If
@@ -1108,7 +1110,7 @@ Namespace SharedLibrary
 
                 If String.IsNullOrWhiteSpace(codeBasis) Then
                     If IsEmptyOrBlank(Int_CodeBasis) Then
-                        codeBasis = GetFromRegistry(RegPath_Base, RegPath_CodeBasis, False)
+                        codeBasis = GetConfigurationRegistryValue(RegPath_CodeBasis)
                     Else
                         codeBasis = Int_CodeBasis
                     End If

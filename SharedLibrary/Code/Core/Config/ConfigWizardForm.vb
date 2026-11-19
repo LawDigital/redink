@@ -568,7 +568,7 @@ Namespace SharedLibrary
         Private Sub BtnIniPath_Click(sender As Object, e As EventArgs) Handles _btnIniPath.Click
             Dim regPath As String = ""
             Try
-                regPath = GetFromRegistry(RegPath_Base, RegPath_IniPath, True)
+                regPath = GetConfigurationRegistryValue(RegPath_IniPath)
             Catch
             End Try
 

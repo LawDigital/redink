@@ -2616,6 +2616,7 @@ Namespace Agents
 
         Private Shared Function Err_(code As String, message As String) As String
             Return JsonConvert.SerializeObject(New With {
+                Key .resultKind = "error",
                 Key .error = code,
                 Key .message = message
             })

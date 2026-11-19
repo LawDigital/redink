@@ -2996,7 +2996,16 @@ Partial Public Class ThisAddIn
                     Dim monitorStatusText = If(String.IsNullOrEmpty(monitorStatus), "", monitorStatus & " ")
 
                     Dim holdingMessage As String
-                    If isRepeat Then
+                    Dim template As System.String = _context.INI_AutoPilotQueueMessage
+                    If Not System.String.IsNullOrWhiteSpace(template) Then
+                        holdingMessage = template.Trim().Replace("{Position}", entry.Position.ToString(System.Globalization.CultureInfo.InvariantCulture)).
+                            Replace("{PositionText}", positionText).Replace("{WaitDescription}", waitDescription.Trim())
+                        If holdingMessage.Contains("{MonitorStatus}") Then
+                            holdingMessage = holdingMessage.Replace("{MonitorStatus}", monitorStatus).Trim()
+                        ElseIf monitorStatus.Length > 0 Then
+                            holdingMessage &= " " & monitorStatus
+                        End If
+                    ElseIf isRepeat Then
                         holdingMessage =
                             $"Thank you for your continued patience. This is an automated queue status update — your request is still awaiting processing. " &
                             $"{positionText}{waitDescription}{stallWarning}{localChatHint} {monitorStatusText}" &

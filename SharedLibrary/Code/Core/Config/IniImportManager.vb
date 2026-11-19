@@ -1666,7 +1666,7 @@ Public NotInheritable Class IniImportManager
         End If
 
         Try
-            If RegPath_IniPrio Then
+            If UsesPriorityRegistryConfiguration(context) Then
                 disableReason = "Import is not available when the configuration is controlled via registry/network setup."
                 Return False
             End If
