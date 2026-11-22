@@ -449,7 +449,7 @@ Namespace Agents
             Return Nothing
         End Function
 
-        Private Shared Function ResolveInsideWorkspace(relOrFull As String, Optional allowRoot As Boolean = False) As String
+        Private Shared Function ResolveInsideWorkspace(relOrFull As String, Optional allowRoot As Boolean = False, Optional stagedRead As System.Boolean = False) As String
             If _active Is Nothing OrElse String.IsNullOrWhiteSpace(_active.RootPath) Then
                 Throw New UnauthorizedAccessException("No workspace configured.")
             End If
@@ -463,6 +463,7 @@ Namespace Agents
             If Path.IsPathRooted(rel) Then
                 full = Path.GetFullPath(rel)
             Else
+                If stagedRead Then rel = PathPolicy.ResolveStagedReadName(root, rel)
                 full = Path.GetFullPath(Path.Combine(root, rel))
             End If
             If Not full.Equals(root, StringComparison.OrdinalIgnoreCase) AndAlso
@@ -543,7 +544,7 @@ Namespace Agents
             Dim err = RequireConnected() : If err IsNot Nothing Then Return err
             If Not _active.AllowRead Then Return Err_("not_permitted", "Workspace read is disabled.")
 
-            Dim p = ResolveInsideWorkspace(GetStr(args, "path"))
+            Dim p = ResolveInsideWorkspace(GetStr(args, "path"), stagedRead:=True)
             If Not File.Exists(p) Then Return Err_("not_found", "File not found.")
             Dim fi As New FileInfo(p)
             If fi.Length > PathPolicy.MaxFileSizeBytes Then
@@ -579,7 +580,7 @@ Namespace Agents
 
             For Each relPath In selected
                 Try
-                    Dim p = ResolveInsideWorkspace(relPath)
+                    Dim p = ResolveInsideWorkspace(relPath, stagedRead:=True)
                     If Not File.Exists(p) Then
                         items.Add(New With {
                             Key .path = relPath,
@@ -795,7 +796,7 @@ Namespace Agents
         Private Shared Function ExecuteCopyOrMove(args As IDictionary(Of String, Object), isMove As Boolean) As String
             Dim err = RequireConnected() : If err IsNot Nothing Then Return err
             If Not _active.AllowMoveCopyRename Then Return Err_("not_permitted", "Move/Copy/Rename is disabled.")
-            Dim src = ResolveInsideWorkspace(GetStr(args, "source"))
+            Dim src = ResolveInsideWorkspace(GetStr(args, "source"), stagedRead:=Not isMove)
             Dim dst = ResolveInsideWorkspace(GetStr(args, "destination"))
             If Not File.Exists(src) AndAlso Not Directory.Exists(src) Then Return Err_("not_found", "Source not found.")
 

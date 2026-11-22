@@ -2564,7 +2564,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("(function(){const stop=e=>{e.preventDefault();e.stopPropagation();};['dragenter','dragover','dragleave','drop'].forEach(ev=>document.addEventListener(ev,stop,false));document.addEventListener('drop',async e=>{const files=[...(e.dataTransfer&&e.dataTransfer.files)||[]];if(!files.length)return;")
         html.AppendLine("if(__advancedToolsEnabled){")
         html.AppendLine("  const tempId=addTempAssistantBubble(`Loading ${files.length} file(s) for agent mode…`);")
-        html.AppendLine("  try{const paths=[];for(const f of files){const fr=new FileReader();const dataUrl=await new Promise((res,rej)=>{fr.onerror=()=>rej(new Error('read error'));fr.onload=()=>res(fr.result);fr.readAsDataURL(f);});const up=await api('inky_upload',{Name:f.name,DataUrl:String(dataUrl||'')});if(up.ok&&up.path)paths.push(up.path);}if(paths.length>0){const r=await api('inky_agentaddfiles',{Paths:paths});if(r.ok){replaceAssistantBubble(tempId,`Loaded ${r.addedCount} file(s) for agent mode.`);updateAgentFilesDisplay(r.files||[]);}else{replaceAssistantBubble(tempId,'Failed to add files: '+(r.error||'unknown'));}}else{replaceAssistantBubble(tempId,'No files could be uploaded.');}}catch(err){replaceAssistantBubble(tempId,'Upload failed: '+(err&&err.message?err.message:'unknown'));}return;}")
+        html.AppendLine("  try{const paths=[];for(const f of files){const fr=new FileReader();const dataUrl=await new Promise((res,rej)=>{fr.onerror=()=>rej(new Error('read error'));fr.onload=()=>res(fr.result);fr.readAsDataURL(f);});const up=await api('inky_upload',{Name:f.name,DataUrl:String(dataUrl||'')});if(up.ok&&up.path)paths.push({path:up.path,name:up.name});}if(paths.length>0){const r=await api('inky_agentaddfiles',{Paths:paths});if(r.ok){replaceAssistantBubble(tempId,`Loaded ${r.addedCount} file(s) for agent mode.`);updateAgentFilesDisplay(r.files||[]);}else{replaceAssistantBubble(tempId,'Failed to add files: '+(r.error||'unknown'));}}else{replaceAssistantBubble(tempId,'No files could be uploaded.');}}catch(err){replaceAssistantBubble(tempId,'Upload failed: '+(err&&err.message?err.message:'unknown'));}return;}")
         html.AppendLine("const f=files[0];if(!__supportsFiles){addTempAssistantBubble('File uploads are not supported for the current model.');return;}const tempId=addTempAssistantBubble(`Uploading <b>${f.name.replaceAll('&','&amp;')}</b> (${(f.size/1024).toFixed(1)} KB)…`);try{const fr=new FileReader();const dataUrl=await new Promise((res,rej)=>{fr.onerror=()=>rej(new Error('read error'));fr.onload=()=>res(fr.result);fr.readAsDataURL(f);});const r=await api('inky_upload',{Name:f.name,DataUrl:String(dataUrl||'')});if(!r.ok){replaceAssistantBubble(tempId,'Upload failed: '+(r.error||'unknown'));return;}if(r.supported===false){replaceAssistantBubble(tempId,'File uploads are not supported for this model.');return;}__pendingFilePath=r.path||'';replaceAssistantBubble(tempId,`Added file: <b>${(r.name||f.name).replaceAll('&','&amp;')}</b>`);}catch(err){replaceAssistantBubble(tempId,'Upload failed: '+(err&&err.message?err.message:'unknown'));}} ,false);})();")
 
         ' events
@@ -3123,9 +3123,10 @@ Partial Public Class ThisAddIn
 
                             Dim addedFiles As New List(Of String)()
                             For Each p In paths
-                                Dim filePath = p?.ToString()
+                                Dim upload = TryCast(p, Newtonsoft.Json.Linq.JObject)
+                                Dim filePath = If(upload Is Nothing, p?.ToString(), upload.Value(Of System.String)("path"))
                                 If String.IsNullOrWhiteSpace(filePath) Then Continue For
-                                Dim att = ChatAgentAddFile(filePath)
+                                Dim att = ChatAgentAddFile(filePath, If(upload Is Nothing, Nothing, upload.Value(Of System.String)("name")))
                                 If att IsNot Nothing Then addedFiles.Add(att.OriginalFileName)
                             Next
 
@@ -3788,7 +3789,7 @@ Partial Public Class ThisAddIn
                                 safeName = safeName.Replace(c, "_"c)
                             Next
                             Dim unique As System.String = System.Guid.NewGuid().ToString("N")
-                            Dim target As System.String = System.IO.Path.Combine(dir, unique & "_" & safeName)
+                            Dim target As System.String = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(dir, unique & "_" & safeName)
                             Dim quotaError As System.String = System.String.Empty
                             If Not TryWriteInkyUploadWithinQuota(target, bytes, quotaError) Then
                                 Return JsonErr(quotaError)

@@ -341,7 +341,7 @@ Partial Public Class ThisAddIn
                 End If
 
                 Dim zipPath As String =
-                    Path.Combine(
+                    Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(
                         zipDir,
                         Path.GetFileNameWithoutExtension(attachPath) &
                         "_delivery_" &
@@ -3445,7 +3445,7 @@ Partial Public Class ThisAddIn
             End If
 
             ' ── Extract attachments to temp ──
-            Dim tempDir As String = Path.Combine(Path.GetTempPath(), AP_TempPrefix & Guid.NewGuid().ToString("N"))
+            Dim tempDir As String = Path.Combine(Global.SharedLibrary.Agents.FilePathBudget.TemporaryWorkingRoot(AP_TempPrefix), AP_TempPrefix & Guid.NewGuid().ToString("N"))
             Directory.CreateDirectory(tempDir)
             Dim attachmentPaths As New List(Of AutoPilotAttachmentInfo)()
             Dim preparedDeliverablesPresent As Boolean = False
@@ -4160,7 +4160,7 @@ Partial Public Class ThisAddIn
                         System.Array.Empty(Of System.String)(), retainedOutcomeAvailable, currentRequestWorkflowId,
                         recoveryLanguage, System.Threading.CancellationToken.None,
                         If(primaryReplySubmitted, BuildAutoPilotPostSendFailureNotice(), BuildAutoPilotProcessingFailureNotice()))
-                    failureReportDirectory = System.IO.Path.Combine(System.IO.Path.GetTempPath(), AP_TempPrefix & System.Guid.NewGuid().ToString("N"))
+                    failureReportDirectory = System.IO.Path.Combine(Global.SharedLibrary.Agents.FilePathBudget.TemporaryWorkingRoot(AP_TempPrefix), AP_TempPrefix & System.Guid.NewGuid().ToString("N"))
                     Dim failureReport = TryWriteAutoPilotOutcomeReport(failureReportDirectory, failureNotice)
                     Dim failureAttachments As New System.Collections.Generic.List(Of System.String)()
                     If Not System.String.IsNullOrWhiteSpace(failureReport) Then failureAttachments.Add(failureReport)
@@ -4290,7 +4290,7 @@ Partial Public Class ThisAddIn
 
         Dim stagingDir As String =
             Path.Combine(
-                Path.GetTempPath(),
+                Global.SharedLibrary.Agents.FilePathBudget.TemporaryWorkingRoot(AP_TempPrefix & "approval_"),
                 AP_TempPrefix & "approval_" & Guid.NewGuid().ToString("N"))
 
         Try
@@ -4308,20 +4308,8 @@ Partial Public Class ThisAddIn
                         src)
                 End If
 
-                Dim dest As String = Path.Combine(stagingDir, Path.GetFileName(src))
-                Dim counter As Integer = 1
-
-                While File.Exists(dest)
-                    dest =
-                        Path.Combine(
-                            stagingDir,
-                            Path.GetFileNameWithoutExtension(src) &
-                            $"_{counter}" &
-                            Path.GetExtension(src))
-                    counter += 1
-                End While
-
-                File.Copy(src, dest, True)
+                Dim dest As System.String = Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(stagingDir, System.IO.Path.GetFileName(src))
+                System.IO.File.Copy(src, dest, overwrite:=False)
                 copied.Add(dest)
             Next
 
@@ -4740,7 +4728,7 @@ Partial Public Class ThisAddIn
                                                 logicalNames As System.Collections.Generic.ISet(Of System.String)) As System.String
         Dim physicalName As System.String = MakeSafeFileName(logicalFileName).TrimEnd("."c, " "c)
         physicalName = MakeSafeFileName(physicalName)
-        Return Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(tempDir, physicalName, logicalFileName, occupiedLogicalNames:=logicalNames)
+        Return Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(tempDir, physicalName, logicalFileName, Global.SharedLibrary.Agents.FilePathBudget.ToolWorkingReserve, occupiedLogicalNames:=logicalNames)
     End Function
 
     ''' <summary>Saves attachments to a per-mail temporary directory.</summary>
@@ -6178,7 +6166,8 @@ Partial Public Class ThisAddIn
 
         If sourceFull.StartsWith(
             tempFull,
-            StringComparison.OrdinalIgnoreCase) Then
+            StringComparison.OrdinalIgnoreCase) AndAlso
+           Global.SharedLibrary.Agents.FilePathBudget.FitsGeneratedPath(sourceFull) Then
 
             Return sourceFull
         End If
@@ -6187,24 +6176,7 @@ Partial Public Class ThisAddIn
             Directory.CreateDirectory(tempDir)
         End If
 
-        Dim target As String =
-            Path.Combine(
-                tempDir,
-                Path.GetFileName(sourceFull))
-
-        Dim i As Integer = 1
-
-        While File.Exists(target)
-            target =
-                Path.Combine(
-                    tempDir,
-                    Path.GetFileNameWithoutExtension(sourceFull) &
-                    "_" &
-                    i.ToString() &
-                    Path.GetExtension(sourceFull))
-
-            i += 1
-        End While
+        Dim target As System.String = Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(tempDir, System.IO.Path.GetFileName(sourceFull))
 
         File.Copy(
             sourceFull,
@@ -6500,6 +6472,12 @@ Partial Public Class ThisAddIn
     '  PROMPT BUILDING
     ' ═══════════════════════════════════════════════════════════════════════════
 
+    Private Shared Function WorkingPathHint(attachment As AutoPilotAttachmentInfo) As System.String
+        If attachment.IsOverSizeLimit OrElse System.String.IsNullOrWhiteSpace(attachment.TempFilePath) OrElse
+           System.String.Equals(System.IO.Path.GetFileName(attachment.TempFilePath), attachment.OriginalFileName, System.StringComparison.Ordinal) Then Return ""
+        Return " [working path for filesystem tools: " & attachment.TempFilePath & "]"
+    End Function
+
     ''' <summary>Builds the user prompt from the mail content and attachments.</summary>
     Private Shared Function BuildUserPromptFromMail(info As AutoPilotMailInfo, attachments As List(Of AutoPilotAttachmentInfo),
                                                    Optional authoritativeBodyOverride As System.String = Nothing,
@@ -6572,7 +6550,7 @@ Partial Public Class ThisAddIn
                         pdfStr &= $", {att.PageSize}"
                     End If
                 End If
-                sb.AppendLine($"  {i + 1}. {att.OriginalFileName}{sizeStr}{pdfStr}{dateStr}{statusStr}")
+                sb.AppendLine($"  {i + 1}. {att.OriginalFileName}{sizeStr}{pdfStr}{dateStr}{statusStr}{WorkingPathHint(att)}")
             Next
             sb.AppendLine("[/ATTACHMENTS]")
             sb.AppendLine()
@@ -7768,7 +7746,7 @@ Partial Public Class ThisAddIn
         Dim language As System.String = ""
         Dim answer As System.String = ""
         Dim paths As New System.Collections.Generic.List(Of System.String)()
-        Dim temp = System.IO.Path.Combine(System.IO.Path.GetTempPath(), AP_TempPrefix & System.Guid.NewGuid().ToString("N"))
+        Dim temp = System.IO.Path.Combine(Global.SharedLibrary.Agents.FilePathBudget.TemporaryWorkingRoot(AP_TempPrefix), AP_TempPrefix & System.Guid.NewGuid().ToString("N"))
         Try
             ct.ThrowIfCancellationRequested()
             If hasSnapshot Then
@@ -7781,7 +7759,8 @@ Partial Public Class ThisAddIn
                 Dim displayNames As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.OrdinalIgnoreCase)
                 For Each artifact In state.RegisteredDeliverableArtifacts
                     If artifact Is Nothing Then Continue For
-                    Dim name = System.IO.Path.GetFileName(If(artifact.SessionPath, ""))
+                    Dim name = If(System.String.IsNullOrEmpty(artifact.CachedOriginalFileName),
+                                  System.IO.Path.GetFileName(If(artifact.SessionPath, "")), artifact.CachedOriginalFileName)
                     If Not Global.SharedLibrary.Agents.ArtifactDelivery.IsVerifiedArtifactRevisionCurrent(artifact) AndAlso
                        Not System.String.IsNullOrWhiteSpace(artifact.PreservedRevisionPath) AndAlso
                        Not System.String.IsNullOrWhiteSpace(artifact.VerifiedContentSha256) Then
@@ -7800,7 +7779,7 @@ Partial Public Class ThisAddIn
                         If Not displayNames.TryGetValue(source, name) Then name = System.IO.Path.GetFileName(source)
                         Dim directory = System.IO.Path.Combine(temp, System.Guid.NewGuid().ToString("N"))
                         System.IO.Directory.CreateDirectory(directory)
-                        Dim target = System.IO.Path.Combine(directory, name)
+                        Dim target = Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(directory, name)
                         Dim evidence = state.RegisteredDeliverableArtifacts.FirstOrDefault(Function(artifact) artifact IsNot Nothing AndAlso
                             System.String.Equals(artifact.SessionPath, source, System.StringComparison.OrdinalIgnoreCase) AndAlso
                             artifact.LifecycleState = Global.SharedLibrary.Agents.ArtifactLifecycleState.Final AndAlso artifact.IsFinalDeliverable)
@@ -8991,7 +8970,7 @@ Partial Public Class ThisAddIn
         ApDashboardLog($"Caller mapped to: {recipientName} <{recipientEmail}>", "info")
 
         ' ── Save audio to temp ──
-        Dim tempDir As String = IO.Path.Combine(IO.Path.GetTempPath(), AP_TempPrefix & Guid.NewGuid().ToString("N"))
+        Dim tempDir As String = IO.Path.Combine(Global.SharedLibrary.Agents.FilePathBudget.TemporaryWorkingRoot(AP_TempPrefix), AP_TempPrefix & Guid.NewGuid().ToString("N"))
         IO.Directory.CreateDirectory(tempDir)
         Dim voicemailAttachmentsForRecovery As List(Of AutoPilotAttachmentInfo) = Nothing
         Dim voicemailPreparedDeliverablesPresent As Boolean = False
@@ -9004,7 +8983,7 @@ Partial Public Class ThisAddIn
                                      Dim att = mi.Attachments(i)
                                      Try
                                          If att.FileName = audioFileName Then
-                                             audioTempPath = IO.Path.Combine(tempDir, audioFileName)
+                                             audioTempPath = Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(tempDir, MakeSafeFileName(audioFileName), Global.SharedLibrary.Agents.FilePathBudget.ToolWorkingReserve)
                                              att.SaveAsFile(audioTempPath)
                                              Exit For
                                          End If

@@ -7460,9 +7460,19 @@ Partial Public Class ThisAddIn
     ''' Executes a single tool call using an internal tool implementation or an external tool configuration.
     ''' Internal tools: <c>retrieve_web_content</c> and <c>internet_search</c> (when search is enabled).
     ''' </summary>
-    Public Async Function ExecuteToolCall(toolCall As ToolCall, toolConfig As ModelConfig, context As ToolExecutionContext, Optional cancellationToken As System.Threading.CancellationToken = Nothing) As Task(Of ToolResponse)
+    Public Async Function ExecuteToolCall(toolCall As ToolCall, toolConfig As ModelConfig, context As ToolExecutionContext, Optional cancellationToken As System.Threading.CancellationToken = Nothing) As System.Threading.Tasks.Task(Of ToolResponse)
+        Dim files As System.Collections.Generic.IEnumerable(Of System.Collections.Generic.KeyValuePair(Of System.String, System.String)) = Nothing
+        If Not System.String.IsNullOrWhiteSpace(_apCurrentTempDir) AndAlso _apCurrentAttachments IsNot Nothing Then
+            files = _apCurrentAttachments.ToArray().Where(Function(att) att IsNot Nothing AndAlso Not att.IsOverSizeLimit).
+                Select(Function(att) New System.Collections.Generic.KeyValuePair(Of System.String, System.String)(att.OriginalFileName, att.TempFilePath))
+        End If
+        Using scope As New Global.SharedLibrary.Agents.PathPolicy.StagedReadScope(_apCurrentTempDir, files)
+            Return Await ExecuteToolCallCore(toolCall, toolConfig, context, cancellationToken)
+        End Using
+    End Function
 
-
+    Private Async Function ExecuteToolCallCore(toolCall As ToolCall, toolConfig As ModelConfig, context As ToolExecutionContext,
+                                               cancellationToken As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of ToolResponse)
         If context IsNot Nothing AndAlso context.SequencingState IsNot Nothing Then
             If toolCall.Arguments Is Nothing Then
                 toolCall.Arguments = New System.Collections.Generic.Dictionary(Of String, Object)(System.StringComparer.OrdinalIgnoreCase)
@@ -7556,7 +7566,7 @@ Partial Public Class ThisAddIn
             Dim fullPath As System.String = ""
             Dim extracted As String = ""
             Try
-                fullPath = ResolveWorkspacePath(relPath)
+                fullPath = ResolveWorkspacePath(relPath, stagedRead:=True)
                 If String.IsNullOrWhiteSpace(fullPath) OrElse Not IO.File.Exists(fullPath) Then
                     resp.Success = False
                     resp.ErrorMessage = "Workspace file not found: " & If(relPath, "")
@@ -7655,7 +7665,7 @@ Partial Public Class ThisAddIn
 
             For Each etmRelPath In etmSelected
                 Try
-                    Dim etmFullPath As System.String = ResolveWorkspacePath(etmRelPath)
+                    Dim etmFullPath As System.String = ResolveWorkspacePath(etmRelPath, stagedRead:=True)
                     If String.IsNullOrWhiteSpace(etmFullPath) OrElse Not IO.File.Exists(etmFullPath) Then
                         etmItems.Add(New With {Key .path = etmRelPath, Key .error = "not_found", Key .message = "File not found."})
                         Continue For

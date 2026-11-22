@@ -451,6 +451,7 @@ Namespace Agents
             Public Property RegisteredUtc As DateTime
             Public Property VerifiedContentSha256 As System.String = System.String.Empty
             Public Property PreservedRevisionPath As System.String = System.String.Empty
+            Public Property CachedOriginalFileName As System.String = System.String.Empty
             Public Property VerifiedAfterFailureSequence As System.Int64
             ' Trusted host/tool evidence about what happened to this physical artifact.
             ' "materialized" is added when an existing file is registered. Additional

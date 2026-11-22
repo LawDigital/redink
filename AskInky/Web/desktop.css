@@ -1,4 +1,4 @@
-/* Part of Red Ink (Ask Inky). Copyright (c) LawDigital Ltd., Switzerland.
+/* Part of Red Ink (Ask Inky). Copyright (c) LawDigital AG, Switzerland.
  * File: desktop.css; Purpose: desktop-specific layout overrides for original Office Web CSS.
  * Notices: LICENSE.txt embedded in executable. */
 /* Red Ink desktop layout. office-web.css remains byte-for-byte the supplied add-in stylesheet.
@@ -180,3 +180,54 @@ body.is-busy .settings-actions button, body.is-busy .settings-scroll button { po
 /* First-run registration guidance, without altering the Office Web stylesheet. */
 .registration-setup-help { padding: 9px 10px; border-left: 3px solid var(--accent-color); background: var(--surface-subtle); }
 .settings-group .registration-needs-input { border-color: var(--accent-color); box-shadow: 0 0 0 2px var(--focus-ring); }
+
+/* P18 W367: Ask Inky 2 options (only when the Helper announces them), paste-back and file drop. */
+.question-card:has(.mode-row:not([hidden])) { grid-template-rows: minmax(0, 1fr) auto; }
+.question-card .mode-row { grid-column: 1 / -1; grid-row: 2; display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center;
+    padding: 4px 12px 7px; border-top: 1px solid var(--border-color); font-size: .88em; color: var(--text-secondary); }
+.mode-toggle, .mode-select { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+.mode-toggle input { margin: 0; accent-color: var(--accent-color); width: 14px; height: 14px; }
+.mode-select select { min-height: 24px; padding: 1px 6px; font-size: inherit; }
+.mode-toggle:has(input:disabled), .mode-select:has(select:disabled) { opacity: .6; cursor: default; }
+.drop-hint { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: var(--accent-soft); color: var(--accent-color); border: 2px dashed var(--accent-color); border-radius: var(--radius-lg); font-weight: 600; }
+.source-card { position: relative; }
+
+/* P18 W367 2.0.2 (DARO UID 571): one line per footer item (no 'Red Ink.©' / 'redink.aiVerwendete'). */
+.settings-copyright > * { display: block; margin-top: 2px; }
+
+/* P18 W367 2.0.3 (DARO UID 572): sign-in spacing, prominent "check your mail" notice in the Red Ink style. */
+#signin-section .signin-hint { margin-bottom: 10px; }
+#signin-section #signin-email { margin-top: 2px; }
+.signin-actions { align-items: center; }
+.signin-wait { margin-top: 10px; padding: 10px 12px; border-left: 3px solid var(--accent-color); border-radius: var(--radius-sm, 6px);
+    background: var(--accent-soft); color: var(--text-primary); font-weight: 600; line-height: 1.45; }
+.signin-wait .signin-wait-sub { display: block; margin-top: 4px; font-weight: 400; color: var(--text-secondary); }
+.desktop-status.important { font-weight: 700; color: var(--accent-color); }
+
+/* P18 W367 2.0.3 (DARO UID 572): send button vertically centred next to the question field. */
+.question-card > .desktop-field { grid-column: 1; grid-row: 1; }
+.question-card .action-rail { grid-column: 2; grid-row: 1; align-self: stretch; align-items: center; padding-top: 6px; padding-bottom: 6px; }
+
+/* P18 W367 2.0.4 (DARO UID 578): selected text is a local file path -> offer to send the file. */
+.file-offer { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0; padding: 10px 12px;
+    border-left: 3px solid var(--accent-color); background: var(--accent-soft); border-radius: var(--radius-lg, 10px); color: var(--text-primary); }
+.file-offer[hidden] { display: none; }
+.file-offer span { flex: 1 1 160px; overflow-wrap: anywhere; }
+
+/* P18 W367 2.0.4 (DARO UID 577): guided first-run sign-in and clear success state, Red Ink design. */
+body:not(.welcome) #welcome-intro { display: none; }
+body.welcome .settings-scroll > .settings-group:not(#welcome-intro):not(#signin-section):not(.welcome-visible) { display: none; }
+body.welcome .settings-scroll > #registration-section.welcome-visible { display: block; }
+body.welcome #save-settings { display: none; }
+.welcome-intro { padding-top: 14px; }
+.welcome-brand { display: flex; align-items: center; gap: 10px; margin: 0 0 12px; font-weight: 700; font-size: 1.05em; }
+.welcome-brand img { height: 30px; width: auto; display: block; }
+.welcome-title { font-size: 1.35em; line-height: 1.3; margin: 0 0 6px; color: var(--text-primary); }
+.signin-success { margin-top: 10px; padding: 12px 14px; border-left: 3px solid var(--accent-color); border-radius: 6px;
+    background: var(--accent-soft); color: var(--text-primary); line-height: 1.45; }
+.signin-success strong { display: block; font-size: 1.1em; margin-bottom: 4px; }
+.signin-link-row { margin: 8px 0 0; }
+.signin-link-row .action-btn-link { padding-left: 0; }
+
+body.welcome #registration-state, body.welcome #btn-unregister-device { display: none; }

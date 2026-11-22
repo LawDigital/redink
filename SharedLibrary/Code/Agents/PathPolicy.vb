@@ -293,6 +293,55 @@ Namespace Agents
             End Sub
         End Class
 
+        ' A tool call can read a staged attachment by its original leaf. The map changes
+        ' only a leaf in the SAME staging directory, before ordinary authorization runs.
+        Private Shared ReadOnly _stagedReads As New System.Threading.AsyncLocal(Of StagedReadScope)()
+
+        Public NotInheritable Class StagedReadScope
+            Implements System.IDisposable
+            Private ReadOnly _previous As StagedReadScope
+            Friend ReadOnly Root As System.String
+            Friend ReadOnly Names As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.OrdinalIgnoreCase)
+
+            Public Sub New(directory As System.String, files As System.Collections.Generic.IEnumerable(Of System.Collections.Generic.KeyValuePair(Of System.String, System.String)))
+                _previous = _stagedReads.Value
+                Root = If(directory, System.String.Empty)
+                If Root <> "" AndAlso files IsNot Nothing Then
+                    Dim prefix As System.String = Root.TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar) & System.IO.Path.DirectorySeparatorChar
+                    For Each item In files
+                        If System.String.IsNullOrWhiteSpace(item.Key) OrElse System.String.IsNullOrWhiteSpace(item.Value) OrElse
+                           Not item.Value.StartsWith(prefix, System.StringComparison.OrdinalIgnoreCase) Then Continue For
+                        Dim physical As System.String = item.Value.Substring(prefix.Length)
+                        If physical = "" OrElse physical = "." OrElse physical = ".." OrElse
+                           physical.IndexOfAny(System.IO.Path.GetInvalidFileNameChars()) >= 0 Then Continue For
+                        Dim previousName As System.String = Nothing
+                        If Not Names.TryGetValue(item.Key, previousName) Then
+                            Names.Add(item.Key, physical)
+                        ElseIf Not System.String.Equals(previousName, physical, System.StringComparison.OrdinalIgnoreCase) Then
+                            Names(item.Key) = Nothing
+                        End If
+                    Next
+                End If
+                _stagedReads.Value = Me
+            End Sub
+
+            Public Sub Dispose() Implements System.IDisposable.Dispose
+                If System.Object.ReferenceEquals(_stagedReads.Value, Me) Then _stagedReads.Value = _previous
+            End Sub
+        End Class
+
+        Public Shared Function ResolveStagedReadName(directory As System.String, name As System.String) As System.String
+            Dim scope As StagedReadScope = _stagedReads.Value
+            If scope Is Nothing OrElse scope.Names.Count = 0 OrElse _hostFileOperation.Value IsNot Nothing OrElse
+               Not System.String.Equals(directory, scope.Root, System.StringComparison.OrdinalIgnoreCase) OrElse
+               Not System.String.Equals(directory, SessionStagingRoot, System.StringComparison.OrdinalIgnoreCase) OrElse
+               System.String.IsNullOrEmpty(name) OrElse name.IndexOfAny(System.IO.Path.GetInvalidFileNameChars()) >= 0 OrElse
+               name = "." OrElse name = ".." Then Return name
+            Dim physical As System.String = Nothing
+            If scope.Names.TryGetValue(name, physical) AndAlso Not System.String.IsNullOrEmpty(physical) Then Return physical
+            Return name
+        End Function
+
         ' --------------------------------------------------------------- size limits
 
         Public Shared Property MaxFileSizeBytes As Integer = 2 * 1024 * 1024 ' 2 MiB
@@ -358,7 +407,9 @@ Namespace Agents
                 If Not wasRelative Then
                     full = Path.GetFullPath(requestedPath)
                 Else
-                    full = Path.GetFullPath(Path.Combine(GetDefaultWritableRoot(), requestedPath))
+                    Dim root As System.String = GetDefaultWritableRoot()
+                    Dim leafOrPath As System.String = If(access = PathAccess.Read, ResolveStagedReadName(root, requestedPath), requestedPath)
+                    full = Path.GetFullPath(Path.Combine(root, leafOrPath))
                 End If
             Catch ex As System.IO.PathTooLongException
                 Throw New System.IO.PathTooLongException(FilePathBudget.PathTooLongMessage, ex)
@@ -697,15 +748,15 @@ Namespace Agents
         Public Shared Function NewWritablePath(suggestedFileName As String) As String
             Dim root = GetDefaultWritableRoot()
             Dim safe = SanitizeFileName(If(suggestedFileName, "untitled.txt"))
-            Dim candidate = Path.Combine(root, safe)
+            Dim candidate = FilePathBudget.GeneratedFilePath(root, safe)
             If Not File.Exists(candidate) Then Return candidate
             Dim baseName = Path.GetFileNameWithoutExtension(safe)
             Dim ext = Path.GetExtension(safe)
             For i = 2 To 1000
-                Dim p = Path.Combine(root, baseName & " (" & i.ToString() & ")" & ext)
+                Dim p = FilePathBudget.GeneratedFilePath(root, baseName & " (" & i.ToString() & ")" & ext)
                 If Not File.Exists(p) Then Return p
             Next
-            Return Path.Combine(root, baseName & "_" & Guid.NewGuid().ToString("N").Substring(0, 8) & ext)
+            Return FilePathBudget.GeneratedFilePath(root, baseName & "_" & Guid.NewGuid().ToString("N").Substring(0, 8) & ext)
         End Function
 
         Private Shared Function SanitizeFileName(name As String) As String

@@ -157,7 +157,7 @@ Partial Public Class ThisAddIn
     ''' per-session temp directory so tools can operate on it safely.
     ''' The source file is deleted after a successful copy to avoid orphaned uploads.
     ''' </summary>
-    Private Function ChatAgentAddFile(sourcePath As String) As AutoPilotAttachmentInfo
+    Private Function ChatAgentAddFile(sourcePath As String, Optional uploadedName As System.String = Nothing) As AutoPilotAttachmentInfo
         If String.IsNullOrWhiteSpace(sourcePath) OrElse Not File.Exists(sourcePath) Then Return Nothing
 
         ' Ensure per-session temp dir exists (also reclaims stale dirs and registers the
@@ -175,8 +175,17 @@ Partial Public Class ThisAddIn
             End If
         End If
 
+        If Not System.String.IsNullOrWhiteSpace(uploadedName) Then
+            ' Only a host upload can supply a separate display name, of the same file type.
+            Dim uploadRoot As System.String = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "InkyUploads")
+            If Not System.String.Equals(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(sourcePath)), System.IO.Path.GetFullPath(uploadRoot), System.StringComparison.OrdinalIgnoreCase) OrElse
+               Not System.String.Equals(System.IO.Path.GetExtension(sourcePath), System.IO.Path.GetExtension(uploadedName), System.StringComparison.OrdinalIgnoreCase) Then Throw New System.ArgumentException("Invalid upload reference.")
+            If uploadedName.IndexOfAny(System.IO.Path.GetInvalidFileNameChars()) >= 0 OrElse
+               uploadedName = "." OrElse uploadedName = ".." Then Throw New System.ArgumentException("Invalid upload filename.")
+            fileName = uploadedName
+        End If
         fileName = UniqueSessionFileName(fileName)
-        Dim destPath As System.String = Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(_chatAgentTempDir, fileName)
+        Dim destPath As System.String = Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(_chatAgentTempDir, fileName, Global.SharedLibrary.Agents.FilePathBudget.ToolWorkingReserve)
         System.IO.File.Copy(sourcePath, destPath, overwrite:=False)
         LogCompactSessionCopy(fileName, destPath)
 
@@ -348,7 +357,7 @@ Partial Public Class ThisAddIn
         Dim tempDir = EnsureChatAgentTempDir()
         Dim logicalName As System.String = If(System.String.IsNullOrWhiteSpace(att.OriginalFileName), System.IO.Path.GetFileName(att.SourcePath), att.OriginalFileName)
         logicalName = UniqueSessionFileName(logicalName, att)
-        Dim destPath As System.String = Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(tempDir, logicalName)
+        Dim destPath As System.String = Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(tempDir, logicalName, Global.SharedLibrary.Agents.FilePathBudget.ToolWorkingReserve)
         System.IO.File.Copy(att.SourcePath, destPath, overwrite:=False)
         LogCompactSessionCopy(logicalName, destPath)
 
@@ -687,15 +696,7 @@ Partial Public Class ThisAddIn
         Try
             For Each srcPath As String In filesToCopy
                 Dim destName As String = Path.GetFileName(srcPath)
-                Dim destPath As String = Path.Combine(partialDir, destName)
-
-                Dim fileCounter As Integer = 1
-                While File.Exists(destPath)
-                    Dim baseName As String = Path.GetFileNameWithoutExtension(destName)
-                    Dim ext As String = Path.GetExtension(destName)
-                    destPath = Path.Combine(partialDir, baseName & $"_{fileCounter}" & ext)
-                    fileCounter += 1
-                End While
+                Dim destPath As System.String = Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(partialDir, destName)
 
                 File.Copy(srcPath, destPath, overwrite:=False)
             Next
@@ -1123,7 +1124,7 @@ Partial Public Class ThisAddIn
                 If existing IsNot Nothing Then Continue For
 
                 Dim fileName As System.String = UniqueSessionFileName(If(System.String.IsNullOrWhiteSpace(item.OriginalFileName), System.IO.Path.GetFileName(cachedPath), item.OriginalFileName))
-                Dim destPath As System.String = Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(tempDir, fileName)
+                Dim destPath As System.String = Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(tempDir, fileName, Global.SharedLibrary.Agents.FilePathBudget.ToolWorkingReserve)
                 System.IO.File.Copy(cachedPath, destPath, overwrite:=False)
                 createdPaths.Add(System.IO.Path.GetFullPath(destPath))
                 RegisterSessionFile(destPath, "Restored for Local Chat retry", isToolOutput:=False, logicalFileName:=fileName)
@@ -1148,7 +1149,7 @@ Partial Public Class ThisAddIn
                     requestFilePath = matching.TempFilePath
                 Else
                     requestName = UniqueSessionFileName(requestName)
-                    Dim destRequest As System.String = Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(tempDir, requestName)
+                    Dim destRequest As System.String = Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(tempDir, requestName, Global.SharedLibrary.Agents.FilePathBudget.ToolWorkingReserve)
                     System.IO.File.Copy(cachedRequest, destRequest, overwrite:=False)
                     createdPaths.Add(System.IO.Path.GetFullPath(destRequest))
                     RegisterSessionFile(destRequest, "Restored request file for Local Chat retry", isToolOutput:=False, logicalFileName:=requestName)
@@ -1286,7 +1287,7 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Sub CleanupStaleChatAgentTempDirs()
         Try
-            Dim tempRoot = Path.GetTempPath()
+            Dim tempRoot = Global.SharedLibrary.Agents.FilePathBudget.TemporaryWorkingRoot(CA_TempPrefix)
             Dim cutoff = DateTime.UtcNow.AddHours(-24)
 
             For Each dirPath In Directory.GetDirectories(tempRoot, CA_TempPrefix & "*")
@@ -1878,7 +1879,7 @@ Partial Public Class ThisAddIn
         Return fullCandidate.StartsWith(fullParent, StringComparison.OrdinalIgnoreCase)
     End Function
 
-    Private Function ResolveWorkspacePath(relativePath As String, Optional allowRoot As Boolean = False) As String
+    Private Function ResolveWorkspacePath(relativePath As String, Optional allowRoot As Boolean = False, Optional stagedRead As System.Boolean = False) As String
         If Not IsChatAgentWorkspaceConnected() Then Return Nothing
 
         Dim rel = If(relativePath, "").Trim()
@@ -1895,6 +1896,7 @@ Partial Public Class ThisAddIn
         End If
 
         Dim root = Global.SharedLibrary.Agents.FilePathBudget.GetFullPath(_chatAgentWorkspace.RootPath)
+        If stagedRead Then rel = Global.SharedLibrary.Agents.PathPolicy.ResolveStagedReadName(root, rel)
         Dim candidate = Global.SharedLibrary.Agents.FilePathBudget.GetFullPath(Path.Combine(root, rel))
 
         If Not IsPathWithinOrEqual(candidate, root) Then Return Nothing
@@ -1992,7 +1994,7 @@ Partial Public Class ThisAddIn
 
         If String.IsNullOrWhiteSpace(_chatAgentTempDir) OrElse Not Directory.Exists(_chatAgentTempDir) Then
             CleanupStaleChatAgentTempDirs()
-            _chatAgentTempDir = Path.Combine(Path.GetTempPath(), CA_TempPrefix & Guid.NewGuid().ToString("N"))
+            _chatAgentTempDir = Path.Combine(Global.SharedLibrary.Agents.FilePathBudget.TemporaryWorkingRoot(CA_TempPrefix), CA_TempPrefix & Guid.NewGuid().ToString("N"))
             Directory.CreateDirectory(_chatAgentTempDir)
         End If
 
@@ -2093,7 +2095,7 @@ Partial Public Class ThisAddIn
 
         Dim tempDir = EnsureChatAgentTempDir()
         Dim logicalName As System.String = UniqueSessionFileName(System.IO.Path.GetFileName(sourcePath))
-        Dim destPath As System.String = Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(tempDir, logicalName)
+        Dim destPath As System.String = Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(tempDir, logicalName, Global.SharedLibrary.Agents.FilePathBudget.ToolWorkingReserve)
         System.IO.File.Copy(sourcePath, destPath, overwrite:=False)
         Return RegisterSessionFile(destPath, "Loaded from agent workspace", sourcePath:=sourcePath, logicalFileName:=logicalName)
     End Function
@@ -3538,14 +3540,14 @@ Partial Public Class ThisAddIn
         Dim extension As String = Path.GetExtension(pathValue)
 
         For i As Integer = 1 To 9999
-            Dim candidate As String = Path.Combine(directoryName, $"{baseName} ({i}){extension}")
+            Dim candidate As String = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(directoryName, $"{baseName} ({i}){extension}")
 
             If Not File.Exists(candidate) AndAlso Not Directory.Exists(candidate) Then
                 Return candidate
             End If
         Next
 
-        Return Path.Combine(directoryName, $"{baseName}-{Guid.NewGuid():N}{extension}")
+        Return Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(directoryName, $"{baseName}-{Guid.NewGuid():N}{extension}")
     End Function
 
     Private Shared Function RemoveWorkspacePath(pathValue As String) As Boolean
@@ -4456,7 +4458,7 @@ Partial Public Class ThisAddIn
             If items.Count >= maxItems Then Exit For
         Next
 
-        Dim reportPath = GetUniqueFilePath(Path.Combine(root, outputFileName))
+        Dim reportPath = GetUniqueFilePath(Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(root, outputFileName))
         Dim errorMessage As String
 
         If outputFormat = "excel" Then

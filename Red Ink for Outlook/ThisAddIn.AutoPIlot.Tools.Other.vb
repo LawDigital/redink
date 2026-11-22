@@ -237,12 +237,12 @@ Partial Public Class ThisAddIn
                     If Not outputFileName.EndsWith(ext, StringComparison.OrdinalIgnoreCase) Then
                         outputFileName &= ext
                     End If
-                    Dim renamedPath = Path.Combine(_apCurrentTempDir, outputFileName)
+                    Dim renamedPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputFileName)
                     ' Handle collision
                     Dim counter = 1
                     While File.Exists(renamedPath)
                         Dim baseName = Path.GetFileNameWithoutExtension(outputFileName)
-                        renamedPath = Path.Combine(_apCurrentTempDir, baseName & $"_{counter}" & ext)
+                        renamedPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, baseName & $"_{counter}" & ext)
                         counter += 1
                     End While
                     Try
@@ -553,7 +553,7 @@ Partial Public Class ThisAddIn
                         pdfStr &= $", {att.PageSize}"
                     End If
                 End If
-                sb.AppendLine($"  {i + 1}. {att.OriginalFileName} ({att.Extension}, {sizeStr}{pdfStr}){statusStr}")
+                sb.AppendLine($"  {i + 1}. {att.OriginalFileName} ({att.Extension}, {sizeStr}{pdfStr}){statusStr}{WorkingPathHint(att)}")
             Next
 
             ' List output files produced by earlier tool calls
@@ -1777,7 +1777,7 @@ Partial Public Class ThisAddIn
                             Dim att = _apCurrentAttachments.FirstOrDefault(
                                 Function(a) a.OriginalFileName.Equals(name, StringComparison.OrdinalIgnoreCase))
                             If att IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(att.TempFilePath) AndAlso File.Exists(att.TempFilePath) Then
-                                SchedulerStoreAttachment(taskId, att.TempFilePath)
+                                SchedulerStoreAttachment(taskId, att.TempFilePath, att.OriginalFileName)
                             End If
                         Next
                     End If
@@ -1982,7 +1982,7 @@ Partial Public Class ThisAddIn
                                 Dim att = _apCurrentAttachments.FirstOrDefault(
                                     Function(a) a.OriginalFileName.Equals(name, StringComparison.OrdinalIgnoreCase))
                                 If att IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(att.TempFilePath) AndAlso File.Exists(att.TempFilePath) Then
-                                    If SchedulerStoreAttachment(task.Id, att.TempFilePath) Then storedCount += 1
+                                    If SchedulerStoreAttachment(task.Id, att.TempFilePath, att.OriginalFileName) Then storedCount += 1
                                 End If
                             Next
                         End If

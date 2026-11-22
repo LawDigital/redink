@@ -535,14 +535,15 @@ Partial Public Class ThisAddIn
             Next
             If Not fileName.EndsWith(".pptx", StringComparison.OrdinalIgnoreCase) Then fileName &= ".pptx"
 
-            Dim outputPath As String = Path.Combine(_apCurrentTempDir, fileName)
+            Dim outputPath As String = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, fileName)
             Dim counter As Integer = 1
             While File.Exists(outputPath)
                 Dim baseName As String = Path.GetFileNameWithoutExtension(fileName)
                 fileName = baseName & $"_{counter}.pptx"
-                outputPath = Path.Combine(_apCurrentTempDir, fileName)
+                outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, fileName)
                 counter += 1
             End While
+            fileName = System.IO.Path.GetFileName(outputPath)
 
             Dim presTitle As String = GetArgString(toolCall.Arguments, "title")
             If String.IsNullOrWhiteSpace(presTitle) Then
@@ -6267,14 +6268,15 @@ Partial Public Class ThisAddIn
                 fileName &= fileExt
             End If
 
-            Dim outputPath = Path.Combine(_apCurrentTempDir, fileName)
+            Dim outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, fileName)
             Dim counter = 1
             While File.Exists(outputPath)
                 Dim baseName = Path.GetFileNameWithoutExtension(fileName)
                 fileName = baseName & $"_{counter}{fileExt}"
-                outputPath = Path.Combine(_apCurrentTempDir, fileName)
+                outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, fileName)
                 counter += 1
             End While
+            fileName = System.IO.Path.GetFileName(outputPath)
 
             ' ── Parse shared parameters ──
             Dim columnWidths As Dictionary(Of String, Double) = ParseColumnWidths(toolCall.Arguments)
@@ -11818,15 +11820,16 @@ Partial Public Class ThisAddIn
                 fileName &= ".docx"
             End If
 
-            Dim outputPath = Path.Combine(_apCurrentTempDir, fileName)
+            Dim outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, fileName)
 
             Dim counter = 1
             While File.Exists(outputPath)
                 Dim baseName = Path.GetFileNameWithoutExtension(fileName)
                 fileName = baseName & $"_{counter}.docx"
-                outputPath = Path.Combine(_apCurrentTempDir, fileName)
+                outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, fileName)
                 counter += 1
             End While
+            fileName = System.IO.Path.GetFileName(outputPath)
 
             context.Log($"Creating Word document: {fileName}")
             ApDashboardLog($"📝 Creating Word document: {fileName}", "step")
@@ -12240,7 +12243,8 @@ Partial Public Class ThisAddIn
                 End If
 
                 Dim outputName = Path.GetFileNameWithoutExtension(att.OriginalFileName) & "_commented.docx"
-                Dim outputPath = Path.Combine(_apCurrentTempDir, outputName)
+                Dim outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName)
+                outputName = System.IO.Path.GetFileName(outputPath)
 
                 Dim success = Await CommentDocxForAutoPilot(att.TempFilePath, outputPath, instruction, ct, author)
 
@@ -12332,8 +12336,9 @@ Partial Public Class ThisAddIn
                 Return response
             End If
 
-            Dim compareName = $"Comparison_{Path.GetFileNameWithoutExtension(originalFilename)}_vs_{Path.GetFileNameWithoutExtension(revisedFilename)}.docx"
-            Dim comparePath = Path.Combine(_apCurrentTempDir, compareName)
+            Dim compareName = $"Comparison_{Path.GetFileNameWithoutExtension(originalAtt.OriginalFileName)}_vs_{Path.GetFileNameWithoutExtension(revisedAtt.OriginalFileName)}.docx"
+            Dim comparePath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, compareName)
+            compareName = System.IO.Path.GetFileName(comparePath)
 
             context.Log($"Comparing: {originalFilename} (original) vs {revisedFilename} (revised)")
             ApDashboardLog($"📊 Comparing: {originalFilename} vs {revisedFilename}", "step")
@@ -12527,15 +12532,16 @@ Partial Public Class ThisAddIn
                 Dim isXlsx As Boolean = ext.Equals(".xlsx", StringComparison.OrdinalIgnoreCase)
                 Dim outputExt As String = If(isPptx, ".pptx", If(isXlsx, ".xlsx", ".docx"))
                 Dim outputName = Path.GetFileNameWithoutExtension(att.OriginalFileName) & "_processed" & outputExt
-                Dim outputPath = Path.Combine(_apCurrentTempDir, outputName)
+                Dim outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName)
 
                 ' Prevent filename collision when re-processing
                 Dim counter = 1
                 While File.Exists(outputPath)
                     outputName = Path.GetFileNameWithoutExtension(att.OriginalFileName) & $"_processed_{counter}" & outputExt
-                    outputPath = Path.Combine(_apCurrentTempDir, outputName)
+                    outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName)
                     counter += 1
                 End While
+                outputName = System.IO.Path.GetFileName(outputPath)
 
                 ' Pass sheet filter only for Excel files
                 Dim sheetFilter As List(Of String) = If(isXlsx AndAlso sheetNames.Count > 0, sheetNames, Nothing)
@@ -12553,13 +12559,11 @@ Partial Public Class ThisAddIn
 
                     ' Compare document only for Word files (not PPTX or XLSX)
                     If Not isPptx AndAlso Not isXlsx Then
-                        Dim comparePath = Path.Combine(_apCurrentTempDir,
-                            Path.GetFileNameWithoutExtension(att.OriginalFileName) & "_compare.docx")
+                        Dim comparePath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, Path.GetFileNameWithoutExtension(att.OriginalFileName) & "_compare.docx")
                         ' Prevent compare filename collision too
                         Dim cmpCounter = 1
                         While File.Exists(comparePath)
-                            comparePath = Path.Combine(_apCurrentTempDir,
-                                Path.GetFileNameWithoutExtension(att.OriginalFileName) & $"_compare_{cmpCounter}.docx")
+                            comparePath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, Path.GetFileNameWithoutExtension(att.OriginalFileName) & $"_compare_{cmpCounter}.docx")
                             cmpCounter += 1
                         End While
 
@@ -13410,7 +13414,8 @@ Partial Public Class ThisAddIn
             If extension <> ".doc" AndAlso extension <> ".docx" Then Throw New System.ArgumentException("The attachment is not a Word document: " & fileName)
             ct.ThrowIfCancellationRequested()
             Dim outputName As System.String = System.IO.Path.GetFileNameWithoutExtension(att.OriginalFileName) & ".pdf"
-            Dim outputPath As System.String = System.IO.Path.Combine(_apCurrentTempDir, outputName)
+            Dim outputPath As System.String = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName, 37)
+            outputName = System.IO.Path.GetFileName(outputPath)
             attempt = New WordPdfConversionAttempt With {
                 .TemporaryPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "RedInkPdf-" & System.Guid.NewGuid().ToString("N") & ".pdf")
             }
@@ -13531,7 +13536,8 @@ Partial Public Class ThisAddIn
 
             Dim defaultOutput = Path.GetFileNameWithoutExtension(att.OriginalFileName) & ".docx"
             Dim outputName = If(GetArgString(toolCall.Arguments, "output_filename"), defaultOutput)
-            Dim outputPath = Path.Combine(_apCurrentTempDir, outputName)
+            Dim outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName)
+            outputName = System.IO.Path.GetFileName(outputPath)
             Dim conversionMode As System.String = NormalizePdfWordConversionMode(GetArgString(toolCall.Arguments, "conversion_mode"))
             Dim requestedLayoutAdapterId As System.String = If(GetArgString(toolCall.Arguments, "layout_adapter_id"), System.String.Empty)
 

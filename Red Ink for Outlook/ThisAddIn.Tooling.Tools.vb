@@ -2226,7 +2226,7 @@ Partial Public Class ThisAddIn
                                 End If
 
                                 Dim fileName As String = GetDownloadFileName(url, httpResponse)
-                                Dim targetPath As String = Path.Combine(downloadRoot, fileName)
+                                Dim targetPath As String = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(downloadRoot, fileName)
 
                                 If Not overwrite Then
                                     targetPath = GetUniqueFilePath(targetPath)

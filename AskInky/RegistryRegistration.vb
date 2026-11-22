@@ -1,5 +1,5 @@
 ' Part of "Red Ink" (Ask Inky)
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' Copyright (c) LawDigital AG, Switzerland. All rights reserved. For license to use see https://redink.ai.
 ' =============================================================================
 ' File: RegistryRegistration.vb
 ' Purpose: Read a Red Ink registration link for unconfigured Ask Inky installations.
@@ -40,6 +40,26 @@ Friend NotInheritable Class RegistryRegistration
             End Using
         Catch ex As System.Exception
             ClientLog.Write("registry.registration.read.failed", ex)
+        End Try
+        ' P18 W367: per-machine deployment (MSI property HELPERURL, Intune/GPO) writes only the Helper
+        ' address into the policy key. It is a configuration link without credentials.
+        Try
+            ' 2.0.2 (DARO UID 571): admin policies first (GPO/Intune, read only), then the value the per-user MSI writes
+            ' (HKCU\Software\Red Ink\AskInky; a per-user installer may not write under Software\Policies).
+            For Each location As System.Tuple(Of Microsoft.Win32.RegistryKey, String) In {
+                    System.Tuple.Create(Microsoft.Win32.Registry.LocalMachine, "Software\Policies\Red Ink\AskInky"),
+                    System.Tuple.Create(Microsoft.Win32.Registry.CurrentUser, "Software\Policies\Red Ink\AskInky"),
+                    System.Tuple.Create(Microsoft.Win32.Registry.CurrentUser, "Software\Red Ink\AskInky")}
+                Using key As Microsoft.Win32.RegistryKey = location.Item1.OpenSubKey(location.Item2, False)
+                    If key Is Nothing Then Continue For
+                    For Each name As String In {"HelperUrl", "HelperLink"}
+                        Dim candidate As String = TryValue(key, name)
+                        If IsAllowedLink(candidate) Then Return candidate
+                    Next
+                End Using
+            Next
+        Catch ex As System.Exception
+            ClientLog.Write("registry.policy.read.failed", ex)
         End Try
         Return ""
     End Function

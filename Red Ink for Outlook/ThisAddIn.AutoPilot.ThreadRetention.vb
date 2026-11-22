@@ -173,6 +173,49 @@ Partial Public Class ThisAddIn
         Return filesDir
     End Function
 
+    ' The name index lives beside the files directory. It is never loaded as an attachment
+    ' and does not count toward the retained-file quota. Old threads have no index.
+    Private Shared Function ReadRetainedNames(threadDir As System.String) As System.Collections.Generic.Dictionary(Of System.String, System.String)
+        Dim names As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.OrdinalIgnoreCase)
+        Dim indexPath As System.String = System.IO.Path.Combine(threadDir, "names.json")
+        If System.IO.File.Exists(indexPath) Then Newtonsoft.Json.JsonConvert.PopulateObject(System.IO.File.ReadAllText(indexPath), names)
+        Return names
+    End Function
+
+    Private Shared Function StoreRetainedFile(filesDir As System.String, name As System.String, source As System.String) As System.String
+        Dim threadDir As System.String = System.IO.Path.GetDirectoryName(filesDir)
+        Using gate As New System.IO.FileStream(System.IO.Path.Combine(threadDir, "names.lock"), System.IO.FileMode.OpenOrCreate, System.IO.FileAccess.ReadWrite, System.IO.FileShare.None)
+            Dim names = ReadRetainedNames(threadDir)
+            Dim previousCount As System.Int32 = names.Count
+            Dim destination As System.String = Global.SharedLibrary.Agents.FilePathBudget.PersistentCopyPath(filesDir, name, names)
+            If Not IsPathContained(destination, filesDir) Then Throw New System.IO.InvalidDataException("Unsafe retained filename.")
+            If names.Count = previousCount AndAlso System.String.Equals(name, System.IO.Path.GetFileName(destination), System.StringComparison.Ordinal) Then
+                System.IO.File.Copy(source, destination, overwrite:=True)
+                Return destination
+            End If
+            If names.Count <> previousCount Then
+                ' Commit the name before exposing bytes. Readers enumerate only committed files.
+                For Each old In names.Keys.ToArray()
+                    If Not System.String.Equals(old, System.IO.Path.GetFileName(destination), System.StringComparison.OrdinalIgnoreCase) AndAlso
+                       Not System.IO.File.Exists(System.IO.Path.Combine(filesDir, old)) Then names.Remove(old)
+                Next
+                ScanInbox.Registry.AtomicWrite(System.IO.Path.Combine(threadDir, "names.json"), Newtonsoft.Json.JsonConvert.SerializeObject(names))
+            End If
+            Dim pending As System.String = Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(threadDir, System.Guid.NewGuid().ToString("N") & ".tmp")
+            Try
+                System.IO.File.Copy(source, pending, overwrite:=False)
+                If System.IO.File.Exists(destination) Then
+                    System.IO.File.Replace(pending, destination, Nothing)
+                Else
+                    System.IO.File.Move(pending, destination)
+                End If
+            Finally
+                If System.IO.File.Exists(pending) Then System.IO.File.Delete(pending)
+            End Try
+            Return destination
+        End Using
+    End Function
+
     ''' <summary>Reads the DeleteAfterUtc from a thread's meta.json, or Nothing.</summary>
     Private Function GetThreadDeleteAfterUtc(threadDir As String) As DateTime?
         Try
@@ -241,24 +284,20 @@ Partial Public Class ThisAddIn
             If filesDir Is Nothing OrElse Not Directory.Exists(filesDir) Then Return 0
 
             Dim loaded As Integer = 0
-            For Each src In Directory.GetFiles(filesDir)
+            Dim retainedPaths = System.IO.Directory.GetFiles(filesDir)
+            Dim names = ReadRetainedNames(threadDir)
+            Dim occupied As New System.Collections.Generic.HashSet(Of System.String)(attachments.Where(Function(a) a IsNot Nothing).Select(Function(a) a.OriginalFileName), System.StringComparer.OrdinalIgnoreCase)
+            For Each src In retainedPaths
                 Try
-                    Dim fileName = Path.GetFileName(src)
-                    If String.IsNullOrWhiteSpace(fileName) Then Continue For
-
-                    ' Dedupe against already-present (current inbound) attachments.
-                    Dim destPath = Path.Combine(tempDir, fileName)
-                    Dim counter = 1
-                    While File.Exists(destPath)
-                        destPath = Path.Combine(tempDir,
-                            Path.GetFileNameWithoutExtension(fileName) & $"_{counter}" & Path.GetExtension(fileName))
-                        counter += 1
-                    End While
+                    Dim physicalName As System.String = System.IO.Path.GetFileName(src)
+                    Dim fileName As System.String = Nothing
+                    If Not names.TryGetValue(physicalName, fileName) Then fileName = physicalName
+                    Dim destPath As System.String = AllocateAttachmentCopyPath(tempDir, fileName, occupied)
 
                     File.Copy(src, destPath)
 
                     attachments.Add(New AutoPilotAttachmentInfo() With {
-                        .OriginalFileName = Path.GetFileName(destPath),
+                        .OriginalFileName = fileName,
                         .TempFilePath = destPath,
                         .Extension = Path.GetExtension(destPath).ToLowerInvariant(),
                         .SizeBytes = New FileInfo(destPath).Length,
@@ -270,7 +309,7 @@ Partial Public Class ThisAddIn
                     })
                     loaded += 1
                 Catch ex As System.Exception
-                    Debug.WriteLine($"[AutoPilot] LoadRetainedThreadFiles copy error: {ex.Message}")
+                    ApDashboardLog($"Could not reload a retained attachment: {ex.Message}", "warn")
                 End Try
             Next
 
@@ -279,7 +318,7 @@ Partial Public Class ThisAddIn
             End If
             Return loaded
         Catch ex As System.Exception
-            Debug.WriteLine($"[AutoPilot] LoadRetainedThreadFiles error: {ex.Message}")
+            ApDashboardLog($"Could not read the retained thread files: {ex.Message}", "warn")
             Return 0
         End Try
     End Function
@@ -319,13 +358,10 @@ Partial Public Class ThisAddIn
                         Dim bareName = Path.GetFileName(If(att.OriginalFileName, Path.GetFileName(att.TempFilePath)))
                         If String.IsNullOrWhiteSpace(bareName) Then Continue For
 
-                        Dim destPath = Path.Combine(filesDir, bareName)
-                        If Not IsPathContained(destPath, filesDir) Then Continue For
-
-                        File.Copy(att.TempFilePath, destPath, overwrite:=True)
+                        StoreRetainedFile(filesDir, bareName, att.TempFilePath)
                         stored += 1
                     Catch ex As System.Exception
-                        Debug.WriteLine($"[AutoPilot] PersistInboundAttachmentsToThread copy error: {ex.Message}")
+                        ApDashboardLog($"Could not retain attachment for a follow-up: {ex.Message}", "warn")
                     End Try
                 Next
             End If

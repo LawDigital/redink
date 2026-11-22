@@ -238,7 +238,7 @@ Partial Public Class ThisAddIn
             _apCurrentAttachments = New System.Collections.Generic.List(Of AutoPilotAttachmentInfo)()
             For Each doc In operation.Documents
                 Dim name = doc.RelativePath
-                Dim target = System.IO.Path.Combine(work, name)
+                Dim target = Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(work, name, Global.SharedLibrary.Agents.FilePathBudget.ToolWorkingReserve)
                 System.IO.File.Copy(ScanOperationFile(root, doc.RelativePath), target, True)
                 _apCurrentAttachments.Add(New AutoPilotAttachmentInfo With {.OriginalFileName = name, .TempFilePath = target, .SourcePath = target, .Extension = System.IO.Path.GetExtension(name).ToLowerInvariant(), .SizeBytes = New System.IO.FileInfo(target).Length, .IsOverSizeLimit = New System.IO.FileInfo(target).Length > _apConfig.MaxAttachmentBytes})
             Next
@@ -335,10 +335,10 @@ Partial Public Class ThisAddIn
             For Each file In delivered
                 If Not IsPathContained(file, work) Then Throw New System.IO.InvalidDataException("Task output escaped its isolated workspace.")
                 Dim name = System.IO.Path.GetFileName(file)
-                Dim target = System.IO.Path.Combine(destination, name)
+                Dim target = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(destination, name)
                 Dim number As System.Int32 = 2
                 While System.IO.File.Exists(target)
-                    target = System.IO.Path.Combine(destination, System.IO.Path.GetFileNameWithoutExtension(name) & " (" & number.ToString(System.Globalization.CultureInfo.InvariantCulture) & ")" & System.IO.Path.GetExtension(name))
+                    target = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(destination, System.IO.Path.GetFileNameWithoutExtension(name) & " (" & number.ToString(System.Globalization.CultureInfo.InvariantCulture) & ")" & System.IO.Path.GetExtension(name))
                     number += 1
                 End While
                 System.IO.File.Copy(file, target)

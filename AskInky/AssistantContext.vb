@@ -1,5 +1,5 @@
 ' Part of "Red Ink" (Ask Inky)
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' Copyright (c) LawDigital AG, Switzerland. All rights reserved. For license to use see https://redink.ai.
 ' =============================================================================
 ' File: AssistantContext.vb
 ' Purpose: Manages tray lifecycle, VDI hotkey recovery and the assistant windows.
@@ -37,7 +37,10 @@ Public NotInheritable Class AssistantContext
     Private startupRegistrationFeedback As String = ""
     Private pendingAutoRegistered As ClientConfig
 
-    Public Sub New()
+    Private ReadOnly startedByAutostart As Boolean
+
+    Public Sub New(Optional autostart As Boolean = False)
+        startedByAutostart = autostart
         config = ConfigStore.Load()
         initialConfigurationNeeded = Not ConfigStore.LoadFailed AndAlso Not ConfigStore.HasSavedHelperHost AndAlso
             String.IsNullOrEmpty(config.ApiKeyProtected) AndAlso String.IsNullOrEmpty(config.DeviceTokenProtected)
@@ -70,10 +73,26 @@ Public NotInheritable Class AssistantContext
         AddHandler uiHeartbeatTimer.Tick, AddressOf PulseUi
         uiHeartbeatTimer.Start()
         uiStallMonitor = New System.Threading.Timer(AddressOf CheckUiHeartbeat, Nothing, 10000, 5000)
+        ' P18 W367 (DARO UID 569): start with Windows as set (first start: installer default, else on).
+        ApplyAutostartSetting()
+        ' P18 W367: daily self-update check (first one a minute after start).
+        Dim updateTimer As New System.Windows.Forms.Timer With {.Interval = 60000}
+        AddHandler updateTimer.Tick, Sub(sender As Object, e As System.EventArgs)
+                                         updateTimer.Interval = 3600000
+                                         CheckForUpdateAsync()
+                                     End Sub
+        updateTimer.Start()
+        ' P18 W367: address handed over by the Helper's download page (redink-askinky://connect?helper=...).
+        Dim connectTimer As New System.Windows.Forms.Timer With {.Interval = 2000}
+        AddHandler connectTimer.Tick, Sub(sender As Object, e As System.EventArgs) ApplyPendingConnect()
+        connectTimer.Start()
         If Not hotkeys.TryApply(config, False) Then WarnHotkeyUnavailable()
         If Not ocrHotkeys.TryApply(OcrShortcutConfig(config), False) Then WarnHotkeyUnavailable()
         If ConfigStore.LoadFailed Then tray.ShowBalloonTip(6000, "Ask Inky", UiStrings.GetText("desktop.configLoadFailed", config.UiLanguage), System.Windows.Forms.ToolTipIcon.Warning)
         If initialConfigurationNeeded OrElse startupRegistryCheckNeeded Then AddHandler System.Windows.Forms.Application.Idle, AddressOf InitializeFirstRun
+        ' 2.0.4 (DARO UID 577): never stay silently in the tray when the person started Ask Inky or is not signed in.
+        AddHandler System.Windows.Forms.Application.Idle, AddressOf OpenOnStart
+        WatchExternalStarts()
     End Sub
 
     Private Async Sub InitializeFirstRun(sender As Object, e As System.EventArgs)
@@ -238,11 +257,11 @@ Public NotInheritable Class AssistantContext
             Dim process As UInteger
             Native.GetWindowThreadProcessId(source, process)
             Dim capture As Boolean = captureSelection AndAlso Not busy AndAlso source <> System.IntPtr.Zero AndAlso process <> CUInt(System.Environment.ProcessId)
-            Dim selected As String = Nothing
+            Dim selected As SelectionResult = Nothing
             If capture Then selected = Await SelectionService.CaptureAsync(source)
             If exiting Then Return
             If form Is Nothing OrElse form.IsDisposed Then form = New AssistantForm(Me)
-            If capture Then form.LoadSelection(selected)
+            If capture Then form.LoadSelection(selected.Text, selected)
             If form.WindowState = System.Windows.Forms.FormWindowState.Minimized Then form.WindowState = System.Windows.Forms.FormWindowState.Normal
             WindowPlacement.EnsureVisible(form)
             form.Show()
@@ -343,6 +362,10 @@ Public NotInheritable Class AssistantContext
     End Sub
 
     Friend Sub ShowSettings()
+        ShowSettings(NeedsSignIn())
+    End Sub
+
+    Friend Sub ShowSettings(welcome As Boolean)
         If exiting OrElse busy Then Return
         ' A tray or shortcut event can arrive before the first Application.Idle.
         ' Complete the very same startup attempt first, so a Settings save cannot
@@ -358,7 +381,7 @@ Public NotInheritable Class AssistantContext
         End If
         settingsForm = New SettingsForm(Me, If(pendingAutoRegistered, config),
                                         initialConfigurationNeeded AndAlso pendingAutoRegistered Is Nothing,
-                                        startupRegistrationFeedback, pendingAutoRegistered IsNot Nothing)
+                                        startupRegistrationFeedback, pendingAutoRegistered IsNot Nothing, welcome AndAlso pendingAutoRegistered Is Nothing)
         startupRegistrationFeedback = ""
         AddHandler settingsForm.FormClosed, Sub(sender As Object, e As System.Windows.Forms.FormClosedEventArgs)
                                                 settingsForm = Nothing
@@ -388,6 +411,79 @@ Public NotInheritable Class AssistantContext
             settingsForm.Activate()
             settingsForm.TopMost = False
         End If
+    End Sub
+
+' P18 W367 2.0.4 (DARO UID 577): not signed in = no device token and no API key (a loopback Helper without
+    ' credentials, the classic local setup, counts as ready).
+    Friend Function NeedsSignIn() As Boolean
+        If Not String.IsNullOrEmpty(config.DeviceTokenProtected) OrElse Not String.IsNullOrEmpty(config.ApiKeyProtected) Then Return False
+        Try
+            If Not HelperModern.IsUnconfigured(config.HelperUrl) Then
+                Dim uri As New System.Uri(HelperClient.NormalizeHelperUrl(config.HelperUrl))
+                If uri.IsLoopback Then Return False
+            End If
+        Catch
+        End Try
+        Return True
+    End Function
+
+    ' Started by the person (Start menu, after the installation, second start while running): not signed in ->
+    ' guided sign-in; signed in -> the question window. Autostart at Windows sign-in stays quiet when signed in.
+    Friend Sub OpenForPerson()
+        If exiting Then Return
+        If NeedsSignIn() Then
+            ShowSettings(True)
+        Else
+            ShowInky(False)
+        End If
+    End Sub
+
+    Friend Sub ShowAfterSignIn()
+        If exiting Then Return
+        ShowInky(False)
+        Try
+            If form IsNot Nothing AndAlso Not form.IsDisposed Then
+                form.ShowStatus(UiStrings.GetText("desktop.readyAfterSignIn", config.UiLanguage).Replace("{hotkey}", HotkeyService.Format(config.HotkeyModifiers, config.HotkeyKey)))
+            End If
+        Catch ex As System.Exception
+            ClientLog.Write("assistant.after-signin.status.failed", ex)
+        End Try
+    End Sub
+
+    Private Sub OpenOnStart(sender As Object, e As System.EventArgs)
+        RemoveHandler System.Windows.Forms.Application.Idle, AddressOf OpenOnStart
+        If exiting Then Return
+        ' The startup registry check runs first (it may sign Ask Inky in, or opens the sign-in itself).
+        If startupRegistrationPending OrElse (startupRegistryCheckNeeded AndAlso startupInitializationStarted) Then
+            Dim retry As New System.Windows.Forms.Timer With {.Interval = 400}
+            AddHandler retry.Tick, Sub(s As Object, a As System.EventArgs)
+                                       retry.Stop() : retry.Dispose()
+                                       OpenOnStart(Me, System.EventArgs.Empty)
+                                   End Sub
+            retry.Start()
+            Return
+        End If
+        If settingsForm IsNot Nothing AndAlso Not settingsForm.IsDisposed Then Return ' first-run sign-in already open
+        If startedByAutostart AndAlso Not NeedsSignIn() Then Return
+        OpenForPerson()
+    End Sub
+
+    Private uiContext As System.Threading.SynchronizationContext
+
+    Private Sub WatchExternalStarts()
+        uiContext = System.Threading.SynchronizationContext.Current
+        Dim thread As New System.Threading.Thread(Sub()
+                                                      Try
+                                                          Using signal As New System.Threading.EventWaitHandle(False, System.Threading.EventResetMode.AutoReset, Program.ShowSignalName)
+                                                              Do While Not exiting
+                                                                  If signal.WaitOne(1000) AndAlso Not exiting AndAlso uiContext IsNot Nothing Then uiContext.Post(Sub(s As Object) OpenForPerson(), Nothing)
+                                                              Loop
+                                                          End Using
+                                                      Catch ex As System.Exception
+                                                          ClientLog.Write("instance.signal.failed", ex)
+                                                      End Try
+                                                  End Sub) With {.IsBackground = True, .Name = "AskInky.ShowSignal"}
+        thread.Start()
     End Sub
 
     Friend Function TryCommit(candidate As ClientConfig) As Boolean
@@ -439,6 +535,105 @@ Public NotInheritable Class AssistantContext
     Friend Function Settings() As ClientConfig
         Return config
     End Function
+
+    ' P18 W367: mode switches of the assistant window (agent, thinking level, web search) only.
+    Friend Sub SaveOptions(candidate As ClientConfig)
+        Dim updated As ClientConfig = ConfigStore.Clone(config)
+        updated.AgentMode = candidate.AgentMode
+        updated.ThinkingLevel = candidate.ThinkingLevel
+        updated.WebSearch = candidate.WebSearch
+        Try
+            ConfigStore.Save(updated)
+            config = updated
+        Catch ex As System.Exception
+            ClientLog.Write("config.options.save.failed", ex)
+        End Try
+    End Sub
+
+    ' P18 W367: self-update from the Helper, at most once a day, only when the admin offers it
+    ' (/askinky/update.json answers 404 otherwise, also on every older Helper).
+    Private updateCheckRunning As Boolean
+    Friend Async Sub CheckForUpdateAsync()
+        If exiting OrElse updateCheckRunning OrElse busy Then Return
+        If System.DateTime.UtcNow - config.LastUpdateCheckUtc < System.TimeSpan.FromHours(20) Then Return
+        If String.IsNullOrEmpty(config.DeviceTokenProtected) Then Return
+        updateCheckRunning = True
+        Try
+            Dim snapshot As ClientConfig = ConfigStore.Clone(config)
+            Dim info As UpdateInfoHolder = New UpdateInfoHolder With {.Info = Await HelperModern.CheckUpdateAsync(snapshot, System.Threading.CancellationToken.None)}
+            Dim stamped As ClientConfig = ConfigStore.Clone(config)
+            stamped.LastUpdateCheckUtc = System.DateTime.UtcNow
+            ConfigStore.Save(stamped)
+            config = stamped
+            If info.Info Is Nothing OrElse Not HelperModern.IsNewer(info.Info.Version, HelperModern.ClientVersion) OrElse info.Info.Version = config.SkippedUpdateVersion Then Return
+            Dim text As String = UiStrings.GetText("desktop.updateAvailable", config.UiLanguage).Replace("{version}", info.Info.Version)
+            Dim answer As System.Windows.Forms.DialogResult = System.Windows.Forms.MessageBox.Show(text, "Ask Inky", System.Windows.Forms.MessageBoxButtons.YesNo, System.Windows.Forms.MessageBoxIcon.Information)
+            If answer <> System.Windows.Forms.DialogResult.Yes Then
+                Dim skipped As ClientConfig = ConfigStore.Clone(config)
+                skipped.SkippedUpdateVersion = info.Info.Version
+                ConfigStore.Save(skipped)
+                config = skipped
+                Return
+            End If
+            Dim path As String = Await HelperModern.DownloadUpdateAsync(snapshot, info.Info, System.Threading.CancellationToken.None)
+            ClientLog.Write("update.verified version=" & info.Info.Version)
+            HelperModern.StartInstaller(path)
+            ExitThread()
+        Catch ex As System.Exception
+            ClientLog.Write("update.failed", ex)
+            tray.ShowBalloonTip(6000, "Ask Inky", HelperClient.Describe(ex, config.UiLanguage), System.Windows.Forms.ToolTipIcon.Warning)
+        Finally
+            updateCheckRunning = False
+        End Try
+    End Sub
+
+    Private Sub ApplyAutostartSetting()
+        Try
+            ' Not chosen yet: follow the installer default on every start without writing config.json
+            ' (an early config.json would end the first-run setup).
+            Autostart.Apply(If(config.StartWithWindows.HasValue, config.StartWithWindows.Value, Autostart.InstallerDefault()))
+        Catch ex As System.Exception
+            ClientLog.Write("autostart.startup.failed", ex)
+        End Try
+    End Sub
+
+    Private connectPromptOpen As Boolean
+    Private Sub ApplyPendingConnect()
+        If exiting OrElse connectPromptOpen OrElse busy OrElse startupRegistrationPending Then Return
+        If Not System.IO.File.Exists(Program.PendingConnectPath) Then Return
+        Dim target As String = ""
+        Try
+            target = System.IO.File.ReadAllText(Program.PendingConnectPath).Trim()
+            System.IO.File.Delete(Program.PendingConnectPath)
+            target = HelperClient.NormalizeHelperUrl(target)
+        Catch ex As System.Exception
+            ClientLog.Write("connect.pending.invalid", ex)
+            Return
+        End Try
+        If Not target.StartsWith("https://", System.StringComparison.OrdinalIgnoreCase) Then Return
+        If String.Equals(HelperClient.GetOrigin(target), config.CredentialOrigin, System.StringComparison.OrdinalIgnoreCase) AndAlso Not String.IsNullOrEmpty(config.DeviceTokenProtected) Then
+            ShowSettings() ' already connected to this server
+            Return
+        End If
+        connectPromptOpen = True
+        Try
+            Dim question As String = UiStrings.GetText("desktop.connectConfirm", config.UiLanguage).Replace("{url}", target)
+            If System.Windows.Forms.MessageBox.Show(question, "Ask Inky", System.Windows.Forms.MessageBoxButtons.YesNo, System.Windows.Forms.MessageBoxIcon.Question) <> System.Windows.Forms.DialogResult.Yes Then Return
+            ' A configuration link without credentials: old credentials of another server are not forwarded.
+            Dim connected As ClientConfig = HelperClient.ApplyConnectionLink(target, ConfigStore.Clone(config))
+            CommitCredentials(connected)
+            ClientLog.Write("connect.helper-address.applied")
+            ShowSettings()
+        Catch ex As System.Exception
+            ClientLog.Write("connect.apply.failed", ex)
+        Finally
+            connectPromptOpen = False
+        End Try
+    End Sub
+
+    Private NotInheritable Class UpdateInfoHolder
+        Public Property Info As ClientUpdateInfo
+    End Class
 
     Private Sub HotkeyPressed(id As Integer)
         If Not hotkeys.IsActive(id) AndAlso Not ocrHotkeys.IsActive(id) Then Return

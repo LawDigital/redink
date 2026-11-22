@@ -1419,17 +1419,39 @@ Namespace Agents
                         Using hash As System.Security.Cryptography.SHA256 = System.Security.Cryptography.SHA256.Create()
                             identityHash = System.BitConverter.ToString(hash.ComputeHash(System.Text.Encoding.UTF8.GetBytes(identity))).Replace("-", "").ToLowerInvariant()
                         End Using
-                        Dim artifactDir As System.String = System.IO.Path.Combine(cacheRoot, identityHash, contentHash)
+                        Dim artifactDir As System.String
+                        Dim name As System.String = If(artifact.Value(Of System.String)("CachedOriginalFileName"), System.String.Empty)
+                        If name = "" Then name = System.IO.Path.GetFileName(sourcePath)
+                        Dim targetPath As System.String
+                        If CLng(cacheRoot.Length) + identityHash.Length + contentHash.Length + name.Length + 3L <= FilePathBudget.MaximumGeneratedPathLength Then
+                            artifactDir = System.IO.Path.Combine(cacheRoot, identityHash, contentHash)
+                            targetPath = System.IO.Path.Combine(artifactDir, FilePathBudget.FitFileName(name, FilePathBudget.FileNameBudget(artifactDir)))
+                        Else
+                            ' Keep the cache inside its workflow's existing retention/cleanup tree.
+                            ' The compact key includes the complete artifact identity AND byte hash.
+                            Dim key As System.String
+                            Using sha As System.Security.Cryptography.SHA256 = System.Security.Cryptography.SHA256.Create()
+                                key = System.BitConverter.ToString(sha.ComputeHash(System.Text.Encoding.ASCII.GetBytes(identityHash & contentHash))).Replace("-", "").Substring(0, 32)
+                            End Using
+                            artifactDir = System.IO.Path.Combine(cacheRoot, "c" & key)
+                            Dim leaf As System.String = FilePathBudget.FitFileName(name, FilePathBudget.FileNameBudget(artifactDir))
+                            targetPath = System.IO.Path.Combine(artifactDir, leaf)
+                            If Not System.String.Equals(leaf, name, System.StringComparison.Ordinal) Then artifact("CachedOriginalFileName") = name
+                            System.Diagnostics.Trace.TraceInformation("Bounded workflow artifact cache copy: " & name & " -> " & targetPath)
+                        End If
                         System.IO.Directory.CreateDirectory(artifactDir)
-                        Dim targetPath As System.String = System.IO.Path.Combine(artifactDir, System.IO.Path.GetFileName(sourcePath))
                         If Not System.IO.File.Exists(targetPath) Then
-                            Dim stagingPath As System.String = targetPath & "." & System.Guid.NewGuid().ToString("N") & ".tmp"
+                            Dim stagingPath As System.String = FilePathBudget.UniqueCopyPath(artifactDir, "." & System.Guid.NewGuid().ToString("N") & ".tmp")
                             Try
                                 System.IO.File.Copy(sourcePath, stagingPath, overwrite:=False)
                                 If Not System.String.Equals(ComputeContinuationFileHash(stagingPath), contentHash, System.StringComparison.Ordinal) Then
                                     Throw New System.IO.IOException("Continuation artifact changed while being copied.")
                                 End If
-                                System.IO.File.Move(stagingPath, targetPath)
+                                Try
+                                    System.IO.File.Move(stagingPath, targetPath)
+                                Catch ex As System.IO.IOException When System.IO.File.Exists(targetPath)
+                                    ' Another writer published first. Verify those bytes below.
+                                End Try
                             Finally
                                 If System.IO.File.Exists(stagingPath) Then System.IO.File.Delete(stagingPath)
                             End Try

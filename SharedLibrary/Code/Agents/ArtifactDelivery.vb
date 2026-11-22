@@ -927,6 +927,7 @@ Namespace Agents
             existing.ArtifactId = artifactId
             existing.LogicalDeliverableId = logicalId
             existing.OutputSlotId = slotId
+            If Not System.String.Equals(existing.SessionPath, fullPath, System.StringComparison.OrdinalIgnoreCase) Then existing.CachedOriginalFileName = System.String.Empty
             existing.SessionPath = fullPath
             If finalHash <> "" Then
                 existing.VerifiedContentSha256 = finalHash
@@ -2351,6 +2352,7 @@ Namespace Agents
                 .RegisteredUtc = source.RegisteredUtc,
                 .VerifiedContentSha256 = source.VerifiedContentSha256,
                 .PreservedRevisionPath = source.PreservedRevisionPath,
+                .CachedOriginalFileName = source.CachedOriginalFileName,
                 .VerifiedAfterFailureSequence = source.VerifiedAfterFailureSequence,
                 .VerifiedEffects = New System.Collections.Generic.HashSet(Of System.String)(
                     If(source.VerifiedEffects, New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)),

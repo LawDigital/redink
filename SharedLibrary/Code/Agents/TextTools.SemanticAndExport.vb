@@ -888,7 +888,8 @@ Namespace Agents
                 End If
 
                 Dim relativePath As String = sourcePath.Substring(inputPath.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
-                Dim outputPath As String = PathPolicy.Resolve(Path.Combine(outputRoot, relativePath & TextExportOutputExtension(sourcePath, outputFormat)), PathAccess.Write)
+                Dim outputParent As System.String = System.IO.Path.Combine(outputRoot, If(System.IO.Path.GetDirectoryName(relativePath), ""))
+                Dim outputPath As System.String = DefaultTextExportPath(outputParent, sourcePath, outputFormat)
 
                 Dim item As Newtonsoft.Json.Linq.JObject = Await ExportSingleTextFileAsync(
                     sourcePath, outputPath, overwrite, ocrPdf, context, cancellationToken, outputFormat).ConfigureAwait(False)
@@ -1744,11 +1745,28 @@ Namespace Agents
                                                                 outputDirectoryArg As String,
                                                                 Optional outputFormat As System.String = "text") As String
             If String.IsNullOrWhiteSpace(outputDirectoryArg) Then
-                Return PathPolicy.Resolve(inputPath & TextExportOutputExtension(inputPath, outputFormat), PathAccess.Write)
+                Return DefaultTextExportPath(System.IO.Path.GetDirectoryName(inputPath), inputPath, outputFormat)
             End If
 
             Dim outputRoot As String = ResolveRelativeOrAbsoluteOutputDirectory(inputPath, outputDirectoryArg, False)
-            Return PathPolicy.Resolve(Path.Combine(outputRoot, Path.GetFileName(inputPath) & TextExportOutputExtension(inputPath, outputFormat)), PathAccess.Write)
+            Return DefaultTextExportPath(outputRoot, inputPath, outputFormat)
+        End Function
+
+        Private Shared Function DefaultTextExportPath(directory As System.String, source As System.String, format As System.String) As System.String
+            Dim root As System.String = FilePathBudget.GetFullPath(directory)
+            Dim leaf As System.String = System.IO.Path.GetFileName(source) & TextExportOutputExtension(source, format)
+            Dim budget As System.Int32 = FilePathBudget.FileNameBudget(root)
+            If leaf.Length > budget Then
+                Dim fingerprint As System.String = TextExtractionResourceRegistry.HashString(leaf.ToUpperInvariant())
+                leaf = FilePathBudget.FitFileName(leaf, budget, "~" & fingerprint.Substring(0, 16))
+                Dim target As System.String = PathPolicy.Resolve(System.IO.Path.Combine(root, leaf), PathAccess.Write)
+                If System.IO.File.Exists(target) AndAlso Not TextExtractionResourceRegistry.HasPublishedOutput(target) Then
+                    target = PathPolicy.Resolve(FilePathBudget.UniqueCopyPath(root, leaf), PathAccess.Write)
+                End If
+                System.Diagnostics.Trace.TraceInformation("Bounded text export path for " & source & " -> " & target)
+                Return target
+            End If
+            Return PathPolicy.Resolve(System.IO.Path.Combine(root, leaf), PathAccess.Write)
         End Function
 
         Private Shared Function ResolveDirectoryTextOutputRoot(inputDirectory As String,

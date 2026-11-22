@@ -1,4 +1,4 @@
-/* Part of Red Ink (Ask Inky). Copyright (c) LawDigital Ltd., Switzerland.
+/* Part of Red Ink (Ask Inky). Copyright (c) LawDigital AG, Switzerland.
  * File: assistant.js
  * Purpose: Embedded desktop web user interface behavior.
  * License: Red Ink License; third-party attribution in embedded LICENSE.txt.
@@ -24,6 +24,15 @@
     const turnQuestion = document.getElementById('turn-question');
     const answerScroll = document.getElementById('answer-scroll');
     const historyToggle = document.getElementById('include-history');
+    // P18 W367: options of newer Helpers, paste-back and file drop.
+    const modeRow = document.getElementById('mode-row');
+    // 2.0.3 (DARO UID 572): no agent mode in Ask Inky (quick, short requests only).
+    const webOption = document.getElementById('web-option'), webMode = document.getElementById('web-mode');
+    const thinkingOption = document.getElementById('thinking-option'), thinkingLevel = document.getElementById('thinking-level');
+    const replace = document.getElementById('replace-button');
+    const dropHint = document.getElementById('drop-hint');
+    const fileOffer = document.getElementById('file-offer'), sendFile = document.getElementById('send-file-button');
+    let modes = { modern: false, replaceEnabled: false };
     let ready = false, busy = false, locked = false, fontSize = 12, rawHtml = '';
     let payload = { html: '', text: '' };
     let selectedPayload = null;
@@ -61,6 +70,11 @@
         next.disabled = disabled || turnIndex < 0 || turnIndex >= turnCount - 1;
         remove.disabled = disabled || turnIndex < 0;
         clear.disabled = disabled || turnCount === 0;
+        replace.hidden = !modes.replaceEnabled;
+        replace.disabled = disabled || !rawHtml || !modes.replaceEnabled;
+        webMode.disabled = thinkingLevel.disabled = sendFile.disabled = disabled;
+        webOption.hidden = !(modes.modern && modes.webAvailable);
+        thinkingOption.hidden = !(modes.modern && Array.isArray(modes.thinkingLevels) && modes.thinkingLevels.length > 0);
         document.body.classList.toggle('is-busy', busy);
         requestSize();
         document.querySelector('main').setAttribute('aria-busy', String(busy));
@@ -147,9 +161,47 @@
             case 'answer': rawHtml = message.html || ''; setTurn(message); answerScroll.scrollTop = 0; question.value = message.question || ''; historyToggle.checked = message.includeHistory !== false; ui.status(message.status); render(); state(); break;
             case 'busy': busy = !!message.busy; if (message.status !== undefined) ui.status(message.status); state(); break;
             case 'locked': locked = !!message.locked; state(); break;
+            // 2.0.4 (DARO UID 578): the selection is the path of a local file -> 'Datei senden'.
+            case 'fileOffer': fileOffer.hidden = !message.name; document.getElementById('file-offer-text').textContent = message.name ? ui.t('desktop.fileOffer').replace('{name}', message.name) : ''; state(); break;
             case 'error': busy = false; ui.status(message.message, true); state(); break;
             case 'status': ui.status(message.status); break;
             case 'focus': if (ready && !busy && !locked) question.focus(); break;
+            case 'modes': applyModes(message); break;
+        }
+    });
+    function applyModes(message) {
+        modes = message;
+        modeRow.hidden = !message.modern;
+        webMode.checked = !!message.web;
+        const levels = Array.isArray(message.thinkingLevels) ? message.thinkingLevels : [];
+        // 2.0.3: exactly the levels the Helper offers for this model; no 'Standard' entry.
+        thinkingLevel.replaceChildren();
+        for (const level of levels) thinkingLevel.add(new Option(ui.t('desktop.thinking.' + level) === 'desktop.thinking.' + level ? level : ui.t('desktop.thinking.' + level), level));
+        if (levels.length) thinkingLevel.value = levels.includes(message.thinking) ? message.thinking : levels[0];
+        state();
+    }
+    function modeChanged() {
+        if (!ready || busy || locked) return;
+        ui.post('modeChanged', { agent: false, web: webMode.checked, thinking: thinkingLevel.value });
+        state();
+    }
+    webMode.addEventListener('change', modeChanged);
+    thinkingLevel.addEventListener('change', modeChanged);
+    replace.addEventListener('click', () => { if (!replace.disabled) ui.post('replace'); });
+    sendFile.addEventListener('click', () => { if (!sendFile.disabled) { fileOffer.hidden = true; ui.post('sendFile'); } });
+    // A file dropped on the window: only the WebView2 file object goes to the host (no content in JS).
+    let dragDepth = 0;
+    document.addEventListener('dragenter', event => { if (event.dataTransfer && Array.from(event.dataTransfer.types || []).includes('Files')) { dragDepth++; dropHint.hidden = !ready || busy || locked; } });
+    document.addEventListener('dragleave', () => { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) dropHint.hidden = true; });
+    document.addEventListener('dragover', event => { event.preventDefault(); if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'; });
+    document.addEventListener('drop', event => {
+        event.preventDefault();
+        dragDepth = 0; dropHint.hidden = true;
+        const files = event.dataTransfer ? Array.from(event.dataTransfer.files || []) : [];
+        if (!files.length || !ready || busy || locked) return;
+        const bridge = window.chrome && window.chrome.webview;
+        if (bridge && typeof bridge.postMessageWithAdditionalObjects === 'function') {
+            bridge.postMessageWithAdditionalObjects({ version: '1', action: 'dropFile' }, [files[0]]);
         }
     });
     question.addEventListener('input', () => ui.post('questionChanged', { question: question.value }));

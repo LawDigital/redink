@@ -148,15 +148,16 @@ Partial Public Class ThisAddIn
                 End If
 
                 Dim outputName = Path.GetFileNameWithoutExtension(att.OriginalFileName) & "_commented.pdf"
-                Dim outputPath = Path.Combine(_apCurrentTempDir, outputName)
+                Dim outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName)
 
                 ' Prevent filename collision
                 Dim counter = 1
                 While File.Exists(outputPath)
                     outputName = Path.GetFileNameWithoutExtension(att.OriginalFileName) & $"_commented_{counter}.pdf"
-                    outputPath = Path.Combine(_apCurrentTempDir, outputName)
+                    outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName)
                     counter += 1
                 End While
+                outputName = System.IO.Path.GetFileName(outputPath)
 
                 Dim commentReport As New PdfCommentProcessingReport()
                 Dim commentRunId As System.String = System.Guid.NewGuid().ToString("N")
@@ -252,7 +253,7 @@ Partial Public Class ThisAddIn
                 Return response
             End If
 
-            Dim outputPath = Path.Combine(_apCurrentTempDir, fileName)
+            Dim outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, fileName)
 
             ' Prevent filename collision
             Dim counter = 1
@@ -260,9 +261,10 @@ Partial Public Class ThisAddIn
                 Dim baseName = Path.GetFileNameWithoutExtension(fileName)
                 Dim extension = Path.GetExtension(fileName)
                 fileName = baseName & $"_{counter}{extension}"
-                outputPath = Path.Combine(_apCurrentTempDir, fileName)
+                outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, fileName)
                 counter += 1
             End While
+            fileName = System.IO.Path.GetFileName(outputPath)
 
             context.Log($"Creating code file: {fileName}")
             ApDashboardLog($"💻 Creating code file: {fileName}", "step")
@@ -606,7 +608,8 @@ Partial Public Class ThisAddIn
             End If
 
             context.Log($"Merging {toMerge.Count} PDFs into {outputName}")
-            Dim outputPath = Path.Combine(_apCurrentTempDir, outputName)
+            Dim outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName)
+            outputName = System.IO.Path.GetFileName(outputPath)
 
             Using outputDoc As New PdfSharp.Pdf.PdfDocument()
                 For Each att In toMerge
@@ -654,7 +657,8 @@ Partial Public Class ThisAddIn
 
             Dim outputName = If(GetArgString(toolCall.Arguments, "output_filename"), "output.pdf")
             Dim title = GetArgString(toolCall.Arguments, "title")
-            Dim outputPath = Path.Combine(_apCurrentTempDir, outputName)
+            Dim outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName)
+            outputName = System.IO.Path.GetFileName(outputPath)
 
             context.Log($"Creating PDF: {outputName}")
             ApDashboardLog($"📝 Creating PDF: {outputName}", "step")
@@ -1237,7 +1241,8 @@ Partial Public Class ThisAddIn
             Dim att = FindAttachment(fileName)
             If att Is Nothing Then response.Success = False : response.Response = $"Attachment '{fileName}' not found." : Return response
 
-            Dim outputPath = Path.Combine(_apCurrentTempDir, outputName)
+            Dim outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName)
+            outputName = System.IO.Path.GetFileName(outputPath)
 
             context.Log($"Splitting PDF: {fileName} pages {startPage}-{endPage}")
 
@@ -1293,7 +1298,8 @@ Partial Public Class ThisAddIn
             Dim att = FindAttachment(fileName)
             If att Is Nothing Then response.Success = False : response.Response = $"Attachment '{fileName}' not found." : Return response
 
-            Dim outputPath = Path.Combine(_apCurrentTempDir, outputName)
+            Dim outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName, 41)
+            outputName = System.IO.Path.GetFileName(outputPath)
 
             context.Log($"Adding watermark to: {fileName}")
             ApDashboardLog($"💧 Adding watermark to: {fileName}", "step")
@@ -1485,15 +1491,16 @@ Partial Public Class ThisAddIn
                 outputName &= ".pdf"
             End If
 
-            Dim outputPath = Path.Combine(_apCurrentTempDir, outputName)
+            Dim outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName)
 
             ' Prevent filename collision
             Dim counter = 1
             While File.Exists(outputPath)
                 outputName = baseName & suffix & $"_{counter}.pdf"
-                outputPath = Path.Combine(_apCurrentTempDir, outputName)
+                outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName)
                 counter += 1
             End While
+            outputName = System.IO.Path.GetFileName(outputPath)
 
             context.Log($"PDF redaction ({mode}): {fileName}" &
                         If(Not String.IsNullOrWhiteSpace(instruction), $" — {instruction}", ""))
@@ -1785,15 +1792,16 @@ Partial Public Class ThisAddIn
                 outputName &= ".pdf"
             End If
 
-            Dim outputPath = Path.Combine(_apCurrentTempDir, outputName)
+            Dim outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName, 41)
 
             ' Prevent filename collision
             Dim counter = 1
             While File.Exists(outputPath)
                 outputName = Path.GetFileNameWithoutExtension(att.OriginalFileName) & $"_overlay_{counter}.pdf"
-                outputPath = Path.Combine(_apCurrentTempDir, outputName)
+                outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName, 41)
                 counter += 1
             End While
+            outputName = System.IO.Path.GetFileName(outputPath)
 
             context.Log($"Overlaying {elementsArray.Count} element(s) on: {fileName}")
             ApDashboardLog($"🖌 Overlaying {elementsArray.Count} element(s) on: {fileName}", "step")

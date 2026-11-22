@@ -103,14 +103,15 @@ Partial Public Class ThisAddIn
 
                 Dim baseName As String = Path.GetFileNameWithoutExtension(att.OriginalFileName)
                 Dim outputName As String = baseName & "_completed.docx"
-                Dim outputPath As String = Path.Combine(_apCurrentTempDir, outputName)
+                Dim outputPath As String = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName)
 
                 Dim counter As Integer = 1
                 While File.Exists(outputPath)
                     outputName = $"{baseName}_completed_{counter}.docx"
-                    outputPath = Path.Combine(_apCurrentTempDir, outputName)
+                    outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName)
                     counter += 1
                 End While
+                outputName = System.IO.Path.GetFileName(outputPath)
 
                 context.Log($"Completing Word tables: {att.OriginalFileName}")
                 ApDashboardLog($"📋 Completing tables: {att.OriginalFileName}", "step")
@@ -566,7 +567,7 @@ Partial Public Class ThisAddIn
                 nameWithoutExt &= "_compare"
             End If
 
-            Return Path.Combine(dir, nameWithoutExt & ext)
+            Return Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(dir, nameWithoutExt & ext)
         End Function
 
 #End Region

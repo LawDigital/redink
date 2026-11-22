@@ -1,5 +1,5 @@
 ' Part of "Red Ink" (Ask Inky)
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' Copyright (c) LawDigital AG, Switzerland. All rights reserved. For license to use see https://redink.ai.
 ' =============================================================================
 ' File: WebAssets.vb
 ' Purpose: Ask Inky desktop functionality in the modular Windows client.
@@ -27,7 +27,7 @@ Friend NotInheritable Class WebAssets
 
     Public Shared Function IsPublicAsset(name As String) As Boolean
         Select Case name
-            Case "assistant.html", "settings.html", "office-web.css", "desktop.css", "common.js", "rendering.js", "assistant.js", "settings.js"
+            Case "assistant.html", "settings.html", "office-web.css", "desktop.css", "common.js", "rendering.js", "assistant.js", "settings.js", "redink-logo.png"
                 Return True
             Case Else
                 Return False
@@ -39,6 +39,7 @@ Friend NotInheritable Class WebAssets
             Case ".html" : Return "text/html; charset=utf-8"
             Case ".css" : Return "text/css; charset=utf-8"
             Case ".js" : Return "text/javascript; charset=utf-8"
+            Case ".png" : Return "image/png"
             Case Else : Return "application/octet-stream"
         End Select
     End Function
