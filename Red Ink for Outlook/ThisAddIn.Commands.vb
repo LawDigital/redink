@@ -944,13 +944,13 @@ Partial Public Class ThisAddIn
                         _context)
                     If String.IsNullOrEmpty(TranslateLanguage) Then Return
                     Dim dictionarySelectionCancelled As System.Boolean = False
-                    Dim translatePrompt As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.BuildInteractiveTranslationPrompt(_context, SP_Translate, $"{AN} Translate", TranslateLanguage, AddressOf InterpolateAtRuntime, dictionarySelectionCancelled)
+                    Dim translatePrompt As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.BuildInteractiveTranslationPrompt(_context, SP_Translate, $"{AN} Translate", TranslateLanguage, AddressOf InterpolateAtRuntime, dictionarySelectionCancelled, choosePreferences:=True)
                     If dictionarySelectionCancelled Then Return
                     Command_InsertAfter(translatePrompt, False, INI_KeepFormat1, INI_ReplaceText1)
                 Case "PrimLang"
                     TranslateLanguage = INI_Language1
                     Dim dictionarySelectionCancelled As System.Boolean = False
-                    Dim translatePrompt As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.BuildInteractiveTranslationPrompt(_context, SP_Translate, $"{AN} Translate", TranslateLanguage, AddressOf InterpolateAtRuntime, dictionarySelectionCancelled)
+                    Dim translatePrompt As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.BuildInteractiveTranslationPrompt(_context, SP_Translate, $"{AN} Translate", TranslateLanguage, AddressOf InterpolateAtRuntime, dictionarySelectionCancelled, choosePreferences:=True)
                     If dictionarySelectionCancelled Then Return
                     Command_InsertAfter(translatePrompt, False, INI_KeepFormat1, INI_ReplaceText1)
                 Case "Correct"
@@ -1502,7 +1502,7 @@ Partial Public Class ThisAddIn
 
         Dim LLMResult As String = ""
         Dim dictionarySelectionCancelled As System.Boolean = False
-        Dim translatePrompt As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.BuildInteractiveTranslationPrompt(_context, SP_Translate, $"{AN} Translate", TranslateLanguage, AddressOf InterpolateAtRuntime, dictionarySelectionCancelled)
+        Dim translatePrompt As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.BuildInteractiveTranslationPrompt(_context, SP_Translate, $"{AN} Translate", TranslateLanguage, AddressOf InterpolateAtRuntime, dictionarySelectionCancelled, choosePreferences:=True)
         If dictionarySelectionCancelled Then Return
 
         LLMResult = Await LLM(translatePrompt, "<TEXTTOPROCESS>" & selectedtext & "</TEXTTOPROCESS>", "", "", 0, EnsureUI:=False)

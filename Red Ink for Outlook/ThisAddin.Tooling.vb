@@ -3144,6 +3144,17 @@ Partial Public Class ThisAddIn
                                     toolResponse.ErrorCode = artifactFailureCode
                                     toolResponse.ErrorMessage = artifactFailureMessage
                                     toolResponse.ResultKind = "error"
+                                    If _apActive Then ApDashboardLog("Output registration failed: " & artifactFailureMessage, "warn")
+                                ElseIf _apActive AndAlso context.SequencingState.ExpectedDeliverableSlots IsNot Nothing Then
+                                    Dim expectedCount As System.Int32 = context.SequencingState.ExpectedDeliverableSlots.Count
+                                    If expectedCount > 0 Then
+                                        ' Show registry progress without rehashing every previous file for the dashboard.
+                                        Dim registeredFinalCount As System.Int32 = context.SequencingState.RegisteredDeliverableArtifacts.Where(
+                                            Function(item) item IsNot Nothing AndAlso item.IsFinalDeliverable AndAlso
+                                                item.LifecycleState = Global.SharedLibrary.Agents.ArtifactLifecycleState.Final AndAlso
+                                                context.SequencingState.IsExpectedDeliverableSlot(item.LogicalDeliverableId, item.OutputSlotId)).Count()
+                                        ApDashboardLog($"Expected files registered: {registeredFinalCount}/{expectedCount}", "info")
+                                    End If
                                 End If
                             End If
 
@@ -7460,9 +7471,19 @@ Partial Public Class ThisAddIn
     ''' Executes a single tool call using an internal tool implementation or an external tool configuration.
     ''' Internal tools: <c>retrieve_web_content</c> and <c>internet_search</c> (when search is enabled).
     ''' </summary>
-    Public Async Function ExecuteToolCall(toolCall As ToolCall, toolConfig As ModelConfig, context As ToolExecutionContext, Optional cancellationToken As System.Threading.CancellationToken = Nothing) As Task(Of ToolResponse)
+    Public Async Function ExecuteToolCall(toolCall As ToolCall, toolConfig As ModelConfig, context As ToolExecutionContext, Optional cancellationToken As System.Threading.CancellationToken = Nothing) As System.Threading.Tasks.Task(Of ToolResponse)
+        Dim files As System.Collections.Generic.IEnumerable(Of System.Collections.Generic.KeyValuePair(Of System.String, System.String)) = Nothing
+        If Not System.String.IsNullOrWhiteSpace(_apCurrentTempDir) AndAlso _apCurrentAttachments IsNot Nothing Then
+            files = _apCurrentAttachments.ToArray().Where(Function(att) att IsNot Nothing AndAlso Not att.IsOverSizeLimit).
+                Select(Function(att) New System.Collections.Generic.KeyValuePair(Of System.String, System.String)(att.OriginalFileName, att.TempFilePath))
+        End If
+        Using scope As New Global.SharedLibrary.Agents.PathPolicy.StagedReadScope(_apCurrentTempDir, files)
+            Return Await ExecuteToolCallCore(toolCall, toolConfig, context, cancellationToken)
+        End Using
+    End Function
 
-
+    Private Async Function ExecuteToolCallCore(toolCall As ToolCall, toolConfig As ModelConfig, context As ToolExecutionContext,
+                                               cancellationToken As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of ToolResponse)
         If context IsNot Nothing AndAlso context.SequencingState IsNot Nothing Then
             If toolCall.Arguments Is Nothing Then
                 toolCall.Arguments = New System.Collections.Generic.Dictionary(Of String, Object)(System.StringComparer.OrdinalIgnoreCase)
@@ -7556,7 +7577,7 @@ Partial Public Class ThisAddIn
             Dim fullPath As System.String = ""
             Dim extracted As String = ""
             Try
-                fullPath = ResolveWorkspacePath(relPath)
+                fullPath = ResolveWorkspacePath(relPath, stagedRead:=True)
                 If String.IsNullOrWhiteSpace(fullPath) OrElse Not IO.File.Exists(fullPath) Then
                     resp.Success = False
                     resp.ErrorMessage = "Workspace file not found: " & If(relPath, "")
@@ -7655,7 +7676,7 @@ Partial Public Class ThisAddIn
 
             For Each etmRelPath In etmSelected
                 Try
-                    Dim etmFullPath As System.String = ResolveWorkspacePath(etmRelPath)
+                    Dim etmFullPath As System.String = ResolveWorkspacePath(etmRelPath, stagedRead:=True)
                     If String.IsNullOrWhiteSpace(etmFullPath) OrElse Not IO.File.Exists(etmFullPath) Then
                         etmItems.Add(New With {Key .path = etmRelPath, Key .error = "not_found", Key .message = "File not found."})
                         Continue For
@@ -7708,7 +7729,11 @@ Partial Public Class ThisAddIn
                 SyncWorkspaceToPathPolicy(includeSessionTempFallback:=True)
             End If
 
-            wsResp.Response = SharedLibrary.Agents.WorkspaceTools.Execute(toolCall.ToolName, toolCall.Arguments, context?.SequencingState)
+            If System.String.Equals(toolCall.ToolName, Global.SharedLibrary.Agents.WorkspaceTools.ToolTranslatePdf, System.StringComparison.OrdinalIgnoreCase) Then
+                wsResp.Response = Await Global.SharedLibrary.Agents.WorkspaceTools.TranslatePdfAsync(toolCall.Arguments, _context, _apUseSecondApi, cancellationToken, CreateAutoPilotPdfProgress(context, GetArgString(toolCall.Arguments, "path")), context.SequencingState, toolCall.CallId)
+            Else
+                wsResp.Response = SharedLibrary.Agents.WorkspaceTools.Execute(toolCall.ToolName, toolCall.Arguments, context?.SequencingState)
+            End If
             wsResp.Success = True
 
             Try

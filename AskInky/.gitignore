@@ -1,0 +1,4 @@
+# Ask Inky build outputs and local build tools (W382: everything of Ask Inky lives in this folder)
+dist/
+.tools/
+.wix/

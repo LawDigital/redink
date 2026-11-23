@@ -26,7 +26,7 @@
 '    to auto-detect whether a file or folder was selected.
 '  - Unit Conversion: Offset/size values entered with "cm" or "in" suffix
 '    are automatically converted to points (1 cm ≈ 28.35 pts, 1 in = 72 pts).
-'  - Font Handling: Own EnsureFontResolver mirrors PdfRedactionService's
+'  - Font Handling: EnsureFontResolver delegates to PdfRedactionService's
 '    ArialFontResolver setup for PdfSharp text rendering; falls back to
 '    Helvetica.
 '  - External Dependencies: PdfSharp for PDF manipulation; SharedLibrary
@@ -734,25 +734,11 @@ Partial Public Class ThisAddIn
         ''' <summary>
         ''' Configures PdfSharp global font resolver to use Arial from Windows Fonts folder.
         ''' Falls back to Base-14 fonts (Helvetica) if Arial is unavailable.
-        ''' Mirrors PdfRedactionService.EnsurePdfSharpFontResolver which is Private.
+        ''' Uses the same font initialization as the redaction service.
         ''' </summary>
         ''' <returns>True if Arial configured; False if using Base-14 fallback.</returns>
         Private Shared Function EnsureFontResolver() As System.Boolean
-            ' If already configured, keep it.
-            If PdfSharp.Fonts.GlobalFontSettings.FontResolver IsNot Nothing Then
-                Return True
-            End If
-
-            ' Try to locate Arial on Windows
-            Dim fontsDir As System.String = System.Environment.GetFolderPath(System.Environment.SpecialFolder.Fonts)
-            Dim arialRegular As System.String = System.IO.Path.Combine(fontsDir, "arial.ttf")
-            If System.IO.File.Exists(arialRegular) Then
-                PdfSharp.Fonts.GlobalFontSettings.FontResolver = New PdfRedactionService.ArialFontResolver()
-                Return True
-            End If
-
-            ' No Arial installed → use Base14 later (Helvetica) without resolver
-            Return False
+            Return PdfRedactionService.EnsurePdfSharpFontResolver()
         End Function
 
 

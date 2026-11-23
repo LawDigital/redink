@@ -6081,6 +6081,7 @@ Public Class frmAIChat
         FailedCommandsList.Clear()
         _verifiedChatBlocksInBatch = 0
         Dim LastCommandsList As String = ""
+        Dim completedCommands As System.Int32 = 0
         Dim activateDocumentAfterCommands As Boolean = False
 
         Dim wordApp As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
@@ -6365,6 +6366,7 @@ Public Class frmAIChat
                 _lastRecentWordChangeId = ""
             End If
 
+            If commandSuccess Then completedCommands += 1
             If commandSuccess AndAlso changedRangeCount = 1 Then
                 CommitRecentWordChange(pc.Command, actionSerialBeforeCommand)
             End If
@@ -6376,12 +6378,14 @@ Public Class frmAIChat
                         _lastRecentWordChangeId = ""
                 End Select
                 If System.String.Equals(pc.Command, "replace", System.StringComparison.OrdinalIgnoreCase) Then
-                    ' The replace routine already knows the result cardinality and failure phase.
-                    ' Do not report the same unsuccessful command twice or print full paragraphs.
-                    FailedCommandsList.Add(If(
-                        System.String.IsNullOrWhiteSpace(_lastReplaceFailureMessage),
-                        "Replacement could not be completed for '" & PreviewForLog(pc.Argument1, 90) & "'. Review the passage before retrying.",
-                        _lastReplaceFailureMessage))
+                    Dim reason As System.String = If(System.String.IsNullOrWhiteSpace(_lastReplaceFailureMessage),
+                        "Replacement could not be completed. Review the affected passage.", _lastReplaceFailureMessage)
+                    Dim intendedEdit As System.String = If(System.String.IsNullOrEmpty(pc.Argument2),
+                        "Requested action: Delete the text above.",
+                        "Requested replacement:" & System.Environment.NewLine & pc.Argument2)
+                    FailedCommandsList.Add(reason & System.Environment.NewLine &
+                        "Text sought:" & System.Environment.NewLine & pc.Argument1 & System.Environment.NewLine &
+                        intendedEdit)
                 Else
                     FailedCommandsList.Add($"Failed or incomplete: {commandDescription}. Check the affected passage before retrying; other commands may already have succeeded.")
                 End If
@@ -6463,7 +6467,7 @@ Public Class frmAIChat
         End If
 
         If FailedCommandsList.Count > 0 Then
-            ReportFailedCommands()
+            ReportFailedCommands(noChangesMade:=(commands.Count = 0), completedCommands:=completedCommands, plannedCommands:=commands.Count)
         End If
 
     End Sub
@@ -6520,13 +6524,18 @@ Public Class frmAIChat
     ''' Error rendered with red styling (#d93025) to distinguish from warnings (orange).
     ''' Failures formatted as bulleted list in HTML view.
     ''' </remarks>
-    Private Sub ReportFailedCommands(Optional noChangesMade As Boolean = False)
+    Private Sub ReportFailedCommands(Optional noChangesMade As Boolean = False,
+                                     Optional completedCommands As System.Int32 = 0,
+                                     Optional plannedCommands As System.Int32 = 0)
         If FailedCommandsList Is Nothing OrElse FailedCommandsList.Count = 0 Then Return
 
         Dim userSummary As String = If(
             noChangesMade,
             "The requested Word actions could not start. No changes were made. Please check the document and try again.",
             "Not all requested Word actions could be completed. Some changes may already have been applied. Please review the document before trying again.")
+        If plannedCommands > 0 Then
+            userSummary = $"Word actions completed: {completedCommands} of {plannedCommands}. Review the details below before retrying."
+        End If
         Dim errorMessage As New System.Text.StringBuilder()
         errorMessage.AppendLine()
         errorMessage.AppendLine("─────────────────────────────────────")
@@ -6552,7 +6561,7 @@ Public Class frmAIChat
                 <ul style='margin: 8px 0;'>"
 
         For Each failedCmd In FailedCommandsList
-            htmlError += $"<li>{HtmlEncode(failedCmd)}</li>"
+            htmlError += $"<li style='white-space:pre-wrap;word-wrap:break-word;'>{HtmlEncode(failedCmd)}</li>"
         Next
 
         htmlError += "</ul><hr style='border: none; border-top: 1px solid #d93025; margin: 8px 0;' /></div></div>"
@@ -7581,6 +7590,8 @@ Public Class frmAIChat
                                    " iterations=" & iterationCount.ToString(System.Globalization.CultureInfo.InvariantCulture))
 
             If matchPositions.Count = 0 Then
+                searchTraceOutcome = "no-match"
+                _lastReplaceFailureMessage = "Search text was not found in the requested scope. This command made no change."
                 CommandsList = $"Note: The search term '{oldText}' was not found." & System.Environment.NewLine & CommandsList
                 Try
                     doc.Application.Selection.SetRange(savedSelectionStart, savedSelectionEnd)
@@ -7593,6 +7604,8 @@ Public Class frmAIChat
                 SelectMatchPositions(matchPositions, matchSpec, System.Int32.MaxValue)
 
             If selectedMatchPositions.Count = 0 Then
+                searchTraceOutcome = "occurrence-not-found"
+                _lastReplaceFailureMessage = "The requested occurrence was not found. This command made no change."
                 CommandsList = $"Note: The requested occurrence(s) of '{oldText}' were not found." & System.Environment.NewLine & CommandsList
                 Try
                     doc.Application.Selection.SetRange(savedSelectionStart, savedSelectionEnd)

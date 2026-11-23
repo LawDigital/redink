@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Part of "Red Ink" (Ask Inky). Copyright (c) LawDigital AG, Switzerland.
+     File: Package.wxs (WiX Toolset 5 source; the WiX tool is used only to build, nothing of it is shipped).
+     P18 W367 2.0.1 (DARO UID 569): per-user MSI only - install, update and uninstall never need admin rights.
+     Software distribution installs it in the USER context (Intune user assignment, GPO user policy).
+     Properties: HELPERURL   optional Helper address, written to HKCU\Software\Red Ink\AskInky (no credentials; admins may set the same value as policy).
+                 AUTOSTART   1 (default) = start Ask Inky at Windows sign-in, 0 = no autostart.
+                 AUTOSTARTAFTERINSTALL  1 = start Ask Inky when the installation finished (self-update). -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui" xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  <Package Name="Ask Inky" Manufacturer="LawDigital AG" Version="$(var.ProductVersion)" Language="1031"
+           UpgradeCode="8BB73DA5-96F5-4836-92A1-C209B173F481" Scope="perUser" Compressed="yes">
+    <SummaryInformation Description="Ask Inky (Red Ink) desktop assistant" />
+    <MajorUpgrade IgnoreLanguage="yes" DowngradeErrorMessage="A newer version of Ask Inky is already installed." Schedule="afterInstallInitialize" />
+    <MediaTemplate EmbedCab="yes" />
+    <Icon Id="AskInkyIcon" SourceFile="$(var.SourceDir)\RedInk.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AskInkyIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://redink.ai" />
+    <Property Id="AUTOSTART" Value="1" />
+    <!-- 2.0.3 (DARO UID 574): no Restart Manager scan/dialog; the running Ask Inky is closed by CloseAskInky (below). -->
+    <Property Id="MSIRESTARTMANAGERCONTROL" Value="Disable" />
+    <Property Id="HELPERURL" Secure="yes" />
+    <Property Id="AUTOSTARTAFTERINSTALL" Secure="yes" />
+
+    <!-- Per-user location (%LOCALAPPDATA%\Programs\Red Ink\Ask Inky): writable without admin rights for
+         install, self-update and uninstall. Per-user components use HKCU key paths (Windows Installer rule). -->
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="UserProgramsFolder" Name="Programs">
+        <Directory Id="RedInkFolder" Name="Red Ink">
+          <Directory Id="INSTALLFOLDER" Name="Ask Inky" />
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <ComponentGroup Id="AskInkyFiles" Directory="INSTALLFOLDER">
+      <Component Id="AskInkyExe" Guid="5D0C1E4B-0E55-4C2F-9D3B-7A2E6F1B9A11">
+        <File Id="AskInkyExeFile" Source="$(var.SourceDir)\AskInky.exe" />
+        <RegistryValue Root="HKCU" Key="Software\Red Ink\AskInky\Install" Name="Executable" Type="string" Value="[INSTALLFOLDER]AskInky.exe" KeyPath="yes" />
+        <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+        <RemoveFolder Id="RemoveRedInkFolder" Directory="RedInkFolder" On="uninstall" />
+        <RemoveFolder Id="RemoveUserProgramsFolder" Directory="UserProgramsFolder" On="uninstall" />
+      </Component>
+      <!-- P18 W367 2.0.1: plain (not advertised) shortcut, so switching autostart off in Ask Inky never
+           triggers a Windows Installer repair that would write the Run value again. -->
+      <Component Id="AskInkyShortcut" Directory="ProgramMenuFolder" Guid="5D0C1E4B-0E55-4C2F-9D3B-7A2E6F1B9A06">
+        <Shortcut Id="AskInkyStartMenu" Name="Ask Inky" Target="[INSTALLFOLDER]AskInky.exe" WorkingDirectory="INSTALLFOLDER"
+                  Description="Ask Inky (Red Ink)" Icon="AskInkyIcon" />
+        <RegistryValue Root="HKCU" Key="Software\Red Ink\AskInky\Install" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="AskInkyLicense" Guid="5D0C1E4B-0E55-4C2F-9D3B-7A2E6F1B9A12">
+        <File Id="AskInkyLicenseFile" Source="$(var.SourceDir)\LICENSE.txt" />
+        <RegistryValue Root="HKCU" Key="Software\Red Ink\AskInky\Install" Name="License" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <!-- P18 W367 2.0.1 (DARO UID 569): per-user Run value (no admin rights); Ask Inky keeps it in line with its
+           setting "Mit Windows starten". -->
+      <Component Id="AskInkyAutostart" Guid="5D0C1E4B-0E55-4C2F-9D3B-7A2E6F1B9A03" Condition="AUTOSTART = &quot;1&quot;">
+        <RegistryValue Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="Ask Inky"
+                       Type="string" Value="&quot;[INSTALLFOLDER]AskInky.exe&quot; --autostart" KeyPath="yes" />
+      </Component>
+      <Component Id="AskInkyAutostartDefault" Guid="5D0C1E4B-0E55-4C2F-9D3B-7A2E6F1B9A07">
+        <!-- 2.0.2 (DARO UID 571): never under Software\Policies (admin-protected on managed PCs, even in HKCU). -->
+        <RegistryValue Root="HKCU" Key="Software\Red Ink\AskInky" Name="StartWithWindowsDefault"
+                       Type="string" Value="[AUTOSTART]" KeyPath="yes" />
+      </Component>
+      <Component Id="AskInkyHelperUrl" Guid="5D0C1E4B-0E55-4C2F-9D3B-7A2E6F1B9A04" Condition="HELPERURL">
+        <RegistryValue Root="HKCU" Key="Software\Red Ink\AskInky" Name="HelperUrl"
+                       Type="string" Value="[HELPERURL]" KeyPath="yes" />
+      </Component>
+      <!-- P18 W367 (DARO UID 551): the Helper's download page hands over its address with
+           redink-askinky://connect?helper=<address> (no credentials; Ask Inky asks before using it). -->
+      <Component Id="AskInkyProtocol" Guid="5D0C1E4B-0E55-4C2F-9D3B-7A2E6F1B9A05">
+        <RegistryKey Root="HKCU" Key="Software\Classes\redink-askinky">
+          <RegistryValue Type="string" Value="URL:Ask Inky" KeyPath="yes" />
+          <RegistryValue Name="URL Protocol" Type="string" Value="" />
+          <RegistryKey Key="DefaultIcon"><RegistryValue Type="string" Value="&quot;[INSTALLFOLDER]AskInky.exe&quot;,0" /></RegistryKey>
+          <RegistryKey Key="shell\open\command"><RegistryValue Type="string" Value="&quot;[INSTALLFOLDER]AskInky.exe&quot; &quot;%1&quot;" /></RegistryKey>
+        </RegistryKey>
+      </Component>
+    </ComponentGroup>
+
+    <!-- 2.0.3 (DARO UID 574): close the running Ask Inky of THIS user (tray instance included) before files are
+         replaced or removed: first a normal close request, then the process is ended. Runs in the user's context
+         (immediate, impersonated), so no admin rights; other users' Ask Inky on the same computer stay untouched. -->
+    <SetProperty Id="WixQuietExecCmdLine" Before="CloseAskInky" Sequence="execute"
+                 Value="&quot;[System64Folder]cmd.exe&quot; /d /c &quot;taskkill /FI &quot;USERNAME eq %USERDOMAIN%\%USERNAME%&quot; /IM AskInky.exe &gt;nul 2&gt;&amp;1 &amp; ping -n 3 127.0.0.1 &gt;nul &amp; taskkill /F /FI &quot;USERNAME eq %USERDOMAIN%\%USERNAME%&quot; /IM AskInky.exe &gt;nul 2&gt;&amp;1 &amp; exit /b 0&quot;" />
+    <CustomAction Id="CloseAskInky" DllEntry="WixQuietExec" Execute="immediate" Return="ignore" BinaryRef="Wix4UtilCA_X64" />
+
+    <Feature Id="Main" Title="Ask Inky" Level="1">
+      <ComponentGroupRef Id="AskInkyFiles" />
+    </Feature>
+
+    <!-- P18 W367 2.0.1 (DARO UID 570): visible installer (licence, progress, finish page with "Ask Inky starten",
+         ticked by default). The 2.0.0 test MSI had no dialogs and did not start Ask Inky. -->
+    <ui:WixUI Id="WixUI_Minimal" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.SourceDir)\License.rtf" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Ask Inky jetzt starten" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <Property Id="WixShellExecTarget" Value="[#AskInkyExeFile]" />
+    <CustomAction Id="LaunchAskInkyUi" DllEntry="WixShellExec" Impersonate="yes" BinaryRef="Wix4UtilCA_X64" Return="ignore" />
+    <UI>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchAskInkyUi"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT REMOVE" />
+    </UI>
+
+    <CustomAction Id="LaunchAskInky" FileRef="AskInkyExeFile" ExeCommand="" Return="asyncNoWait" Impersonate="yes" Execute="immediate" />
+    <InstallExecuteSequence>
+      <Custom Action="CloseAskInky" Before="InstallValidate" />
+      <Custom Action="LaunchAskInky" After="InstallFinalize" Condition="AUTOSTARTAFTERINSTALL = &quot;1&quot; AND NOT REMOVE" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

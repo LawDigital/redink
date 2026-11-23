@@ -357,11 +357,11 @@ Partial Public Class ThisAddIn
         Dim ext = System.IO.Path.GetExtension(path)
 
         For i As Integer = 2 To 1000
-            Dim candidate = System.IO.Path.Combine(dir, $"{name} ({i}){ext}")
+            Dim candidate = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(dir, $"{name} ({i}){ext}")
             If Not File.Exists(candidate) Then Return candidate
         Next
 
-        Return System.IO.Path.Combine(dir, $"{name}_{Guid.NewGuid():N}{ext}")
+        Return Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(dir, $"{name}_{Guid.NewGuid():N}{ext}")
     End Function
 
     Private Async Function ReadResponseBytesLimitedAsync(content As System.Net.Http.HttpContent,
@@ -531,7 +531,7 @@ Partial Public Class ThisAddIn
                                     End If
 
                                     Dim fileName As String = BuildDownloadFileName(url, httpResponse)
-                                    Dim targetPath As String = Path.Combine(resolvedTargetDirectory, fileName)
+                                    Dim targetPath As String = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(resolvedTargetDirectory, fileName)
 
                                     If Not overwrite Then
                                         targetPath = GetUniqueDownloadPath(targetPath)

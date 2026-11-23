@@ -1,5 +1,5 @@
 ' Part of "Red Ink" (Ask Inky)
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' Copyright (c) LawDigital AG, Switzerland. All rights reserved. For license to use see https://redink.ai.
 ' =============================================================================
 ' File: WebDialog.vb
 ' Purpose: Ask Inky desktop functionality in the modular Windows client.
@@ -134,6 +134,8 @@ Friend MustInherit Class WebDialog
         End Try
     End Sub
 
+    Protected Property DroppedFilePath As String = ""
+
     Protected Function IsTrustedPage() As Boolean
         Try
             Return Not IsDisposed AndAlso Not View.IsDisposed AndAlso View.CoreWebView2 IsNot Nothing AndAlso String.Equals(View.CoreWebView2.Source, Origin & pageName, System.StringComparison.Ordinal)
@@ -157,6 +159,16 @@ Friend MustInherit Class WebDialog
                 ElseIf ViewReady AndAlso HelperClient.TextValue(message, "action") = "openLink" Then
                     OpenLink(HelperClient.TextValue(message, "url"))
                 ElseIf ViewReady Then
+                    ' P18 W367: a file dropped on the page arrives as a WebView2 file object (path only, no content in the message).
+                    DroppedFilePath = ""
+                    Try
+                        If args.AdditionalObjects IsNot Nothing AndAlso args.AdditionalObjects.Count > 0 Then
+                            Dim dropped As Microsoft.Web.WebView2.Core.CoreWebView2File = TryCast(args.AdditionalObjects(0), Microsoft.Web.WebView2.Core.CoreWebView2File)
+                            If dropped IsNot Nothing Then DroppedFilePath = dropped.Path
+                        End If
+                    Catch ex As System.Exception
+                        ClientLog.Write("webview.dropped-file.unavailable", ex)
+                    End Try
                     Await HandleMessageAsync(message)
                 End If
             End Using

@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- Part of Red Ink (Ask Inky). Copyright (c) LawDigital Ltd., Switzerland.
+<!-- Part of Red Ink (Ask Inky). Copyright (c) LawDigital AG, Switzerland.
      File: assistant.html; Purpose: offline WebView2 user interface.
      License: Red Ink License; notices in bundled LICENSE.txt. -->
 <html lang="de">
@@ -16,13 +16,20 @@
 <main class="desktop-shell" aria-busy="false">
     <section class="desktop-card source-card">
         <textarea id="selected-text" class="desktop-field source-field" readonly spellcheck="false" data-title="desktop.selectedTip" data-placeholder="desktop.selectedPlaceholder"></textarea>
+        <div id="drop-hint" class="drop-hint" data-text="desktop.dropHint" hidden></div>
 
     </section>
+    <div id="file-offer" class="file-offer" hidden><span id="file-offer-text"></span><button id="send-file-button" type="button" class="action-btn-primary" data-text="desktop.sendFile"></button></div>
+
     <section class="desktop-card question-card">
         <textarea id="question" class="desktop-field" maxlength="200000" spellcheck="true" data-title="desktop.questionTip" data-placeholder="desktop.questionPlaceholder" disabled></textarea>
         <div class="action-rail"><button id="send-button" type="button" class="action-btn-primary icon-button" data-title="desktop.sendTip" disabled>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 3-6.8 18-3.6-7.6L3 9.8 21 3Z"/><path d="M21 3 10.6 13.4"/></svg>
         </button></div>
+    <div id="mode-row" class="mode-row" hidden>
+        <label class="mode-toggle" id="web-option" hidden data-title="desktop.mode.webTip"><input id="web-mode" type="checkbox"><span data-text="desktop.mode.web"></span></label>
+        <label class="mode-select" id="thinking-option" hidden data-title="desktop.mode.thinkingTip"><span data-text="desktop.mode.thinking"></span><select id="thinking-level" class="dropdown"></select></label>
+    </div>
     </section>
     <section class="desktop-card answer-card">
         <div id="answer-scroll" class="answer-scroll" tabindex="0" data-title="desktop.answerTip">
@@ -47,6 +54,9 @@
         </button>
             <button id="copy-selection-button" type="button" class="quick-access-btn icon-button" data-title="desktop.copySelectionTip" disabled hidden>
                 <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 5V4a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h1"/><path d="M10 12h6M10 15h4"/></svg>
+            </button>
+            <button id="replace-button" type="button" class="quick-access-btn icon-button" data-title="desktop.replaceTip" disabled hidden>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h11M4 12h7M4 17h9"/><path d="m15 14 3 3 3-3"/><path d="M18 17V9"/></svg>
             </button>
             <button type="button" id="clear-answers" class="quick-access-btn icon-button" data-title="desktop.clearAnswers" disabled>
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 4h4M6 7l1 14h10l1-14M10 11v6M14 11v6"/><path d="M3 3l18 18"/></svg>

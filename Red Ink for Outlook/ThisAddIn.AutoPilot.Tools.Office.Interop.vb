@@ -677,11 +677,11 @@ Partial Public Class ThisAddIn
         End If
 
         Dim baseName As String = Path.GetFileNameWithoutExtension(safeName)
-        Dim outputPath As String = Path.Combine(_apCurrentTempDir, safeName)
+        Dim outputPath As String = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, safeName)
         Dim counter As Integer = 1
 
         While File.Exists(outputPath)
-            outputPath = Path.Combine(_apCurrentTempDir, $"{baseName}_{counter}.xlsx")
+            outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, $"{baseName}_{counter}.xlsx")
             counter += 1
         End While
 

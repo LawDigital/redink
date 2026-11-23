@@ -1600,7 +1600,6 @@ Partial Public Class ThisAddIn
         End Sub
 
 
-        Private Shared _fontResolverConfigured As Boolean = False
 
         ''' <summary>
         ''' Configures PdfSharp global font resolver to use Arial from Windows Fonts folder.
@@ -1608,24 +1607,13 @@ Partial Public Class ThisAddIn
         ''' </summary>
         ''' <returns>True if Arial configured; False if using Base-14 fallback</returns>
 
-        Private Shared Function EnsurePdfSharpFontResolver() As Boolean
-            ' If already configured by caller, keep it.
-            If PdfSharp.Fonts.GlobalFontSettings.FontResolver IsNot Nothing Then
-                _fontResolverConfigured = True
-                Return True
-            End If
-
-            ' Try to locate Arial on Windows
-            Dim fontsDir As String = System.Environment.GetFolderPath(Environment.SpecialFolder.Fonts)
-            Dim arialRegular = System.IO.Path.Combine(fontsDir, "arial.ttf")
-            If System.IO.File.Exists(arialRegular) Then
-                PdfSharp.Fonts.GlobalFontSettings.FontResolver = New ArialFontResolver()
-                _fontResolverConfigured = True
-                Return True
-            End If
-
-            ' No Arial installed → use Base14 later (Helvetica) without resolver
-            Return False
+        Friend Shared Function EnsurePdfSharpFontResolver() As System.Boolean
+            Return Global.SharedLibrary.Agents.WindowsPdfFontResolver.EnsureAvailable(
+                Function()
+                    Dim fontsDir = System.Environment.GetFolderPath(System.Environment.SpecialFolder.Fonts)
+                    If Not System.IO.File.Exists(System.IO.Path.Combine(fontsDir, "arial.ttf")) Then Return Nothing
+                    Return New ArialFontResolver()
+                End Function)
         End Function
 
         ''' <summary>

@@ -4560,7 +4560,7 @@ Partial Public Class ThisAddIn
     Private Function WordEnsureAgentTempDir() As String
         If String.IsNullOrWhiteSpace(_wordAgentTempDir) OrElse Not Directory.Exists(_wordAgentTempDir) Then
             WordCleanupStaleAgentTempDirs()
-            _wordAgentTempDir = Path.Combine(Path.GetTempPath(), WordAgentTempPrefix & Guid.NewGuid().ToString("N"))
+            _wordAgentTempDir = Path.Combine(Global.SharedLibrary.Agents.FilePathBudget.TemporaryWorkingRoot(WordAgentTempPrefix), WordAgentTempPrefix & Guid.NewGuid().ToString("N"))
             Directory.CreateDirectory(_wordAgentTempDir)
         End If
 
@@ -4590,7 +4590,7 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Sub WordCleanupStaleAgentTempDirs()
         Try
-            Dim tempRoot = Path.GetTempPath()
+            Dim tempRoot = Global.SharedLibrary.Agents.FilePathBudget.TemporaryWorkingRoot(WordAgentTempPrefix)
             Dim cutoff = DateTime.UtcNow.AddHours(-24)
 
             For Each dirPath In Directory.GetDirectories(tempRoot, WordAgentTempPrefix & "*")
@@ -4673,17 +4673,7 @@ Partial Public Class ThisAddIn
                 Dim destinationName As String = System.IO.Path.GetFileName(sourcePath)
                 If System.String.IsNullOrWhiteSpace(destinationName) Then Continue For
 
-                Dim destinationPath As String = System.IO.Path.Combine(preferredRoot, destinationName)
-                Dim counter As Integer = 1
-
-                While System.IO.File.Exists(destinationPath)
-                    Dim baseName As String = System.IO.Path.GetFileNameWithoutExtension(destinationName)
-                    Dim extension As String = System.IO.Path.GetExtension(destinationName)
-                    destinationPath = System.IO.Path.Combine(
-                        preferredRoot,
-                        baseName & "_" & counter.ToString(System.Globalization.CultureInfo.InvariantCulture) & extension)
-                    counter += 1
-                End While
+                Dim destinationPath As System.String = Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(preferredRoot, destinationName)
 
                 System.IO.File.Copy(sourcePath, destinationPath, overwrite:=False)
                 excludedOriginalPaths.Add(sourcePath)
@@ -4962,28 +4952,7 @@ Partial Public Class ThisAddIn
                         Continue For
                     End If
 
-                    Dim destPath As String =
-                        System.IO.Path.Combine(pendingDir, destName)
-
-                    Dim fileCounter As Integer = 1
-
-                    While System.IO.File.Exists(destPath)
-                        Dim baseName As String =
-                            System.IO.Path.GetFileNameWithoutExtension(destName)
-
-                        Dim ext As String =
-                            System.IO.Path.GetExtension(destName)
-
-                        destPath =
-                            System.IO.Path.Combine(
-                                pendingDir,
-                                baseName &
-                                "_" &
-                                fileCounter.ToString(System.Globalization.CultureInfo.InvariantCulture) &
-                                ext)
-
-                        fileCounter += 1
-                    End While
+                    Dim destPath As System.String = Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(pendingDir, destName)
 
                     System.IO.File.Copy(srcPath, destPath, overwrite:=False)
                     publishedFileNames.Add(System.IO.Path.GetFileName(destPath))

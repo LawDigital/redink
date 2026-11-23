@@ -79,7 +79,22 @@
     <DebugType>pdbonly</DebugType>
     <PlatformTarget>x64</PlatformTarget>
   </PropertyGroup>
+  <PropertyGroup Condition="Exists('$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.26100.0\Windows.winmd')">
+    <DefineConstants>$(DefineConstants),PDF_LAYOUT_WINRT</DefineConstants>
+  </PropertyGroup>
   <ItemGroup>
+    <Reference Include="Windows" Condition="Exists('$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.26100.0\Windows.winmd')">
+      <HintPath>$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.26100.0\Windows.winmd</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="System.Runtime.WindowsRuntime, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089" Condition="Exists('$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.26100.0\Windows.winmd')">
+      <HintPath>$(MSBuildProgramFiles32)\Reference Assemblies\Microsoft\Framework\.NETCore\v4.5\System.Runtime.WindowsRuntime.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="System.Runtime.InteropServices.WindowsRuntime, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a" Condition="Exists('$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.26100.0\Windows.winmd')">
+      <Private>False</Private>
+    </Reference>
+
     <Reference Include="BouncyCastle.Cryptography, Version=2.0.0.0, Culture=neutral, PublicKeyToken=072edcf4a5328938, processorArchitecture=MSIL">
       <HintPath>..\packages\BouncyCastle.Cryptography.2.7.0\lib\net461\BouncyCastle.Cryptography.dll</HintPath>
     </Reference>
@@ -764,6 +779,15 @@
     <Compile Include="Code\Core\Various\SharedMethods.ProcessParameterPlaceholders.vb" />
     <Compile Include="Code\Core\Various\SharedMethods.SandboxedReaders.Docx.vb" />
     <Compile Include="Code\Core\Various\SharedMethods.SandboxedReaders.vb" />
+    <Compile Include="Code\PdfTranslation\PdfFileTranslation.vb" />
+    <Compile Include="Code\PdfTranslation\WindowsPdfFontResolver.vb" />
+    <Compile Include="Code\PdfTranslation\PdfOriginalFont.vb" />
+    <Compile Include="Code\PdfTranslation\PdfPaintOrder.vb" />
+    <Compile Include="Code\PdfTranslation\PdfOperationSource.vb" />
+    <Compile Include="Code\PdfTranslation\PdfParagraphLayout.vb" />
+    <Compile Include="Code\PdfTranslation\PdfVisualCheck.vb" />
+    <Compile Include="Code\Core\Various\SharedMethods.TranslationOptions.vb" />
+    <Compile Include="Code\Core\Various\SharedMethods.TranslationFit.vb" />
     <Compile Include="Code\Core\Various\SharedMethods.VarHelpers.vb" />
     <Compile Include="Code\Core\UI\SplashScreenWorks.vb">
       <SubType>Form</SubType>

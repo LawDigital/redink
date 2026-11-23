@@ -596,9 +596,8 @@ Namespace Agents
 
             If trustedXlsxCandidates.Count = 1 Then
                 trustedBaselineDirectory = CreateTemporaryInputDirectory()
-                Dim sanitizedSourcePath As System.String = System.IO.Path.Combine(
-                    trustedBaselineDirectory,
-                    System.IO.Path.GetFileName(trustedXlsxCandidates(0).SourcePath))
+                Dim sanitizedSourcePath As System.String = FilePathBudget.UniqueCopyPath(
+                    trustedBaselineDirectory, System.IO.Path.GetFileName(trustedXlsxCandidates(0).SourcePath))
                 Dim candidateBaseline As TrustedXlsxExternalRelationshipBaseline = Nothing
                 If TryCreateTrustedXlsxSanitizedBaseline(
                     trustedXlsxCandidates(0).SourcePath,
@@ -1919,28 +1918,29 @@ Namespace Agents
 
             Dim occupied As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
             For Each item As RedInkPythonAgentInputFile In logicalInputs
-                occupied.Add(item.RelativePath.Replace("\"c, "/"c))
+                occupied.Add(item.RelativePath.Replace("\"c, "/"c).Split("/"c)(0))
             Next
 
             Dim replacements As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.OrdinalIgnoreCase)
             Dim physicalInputs As New System.Collections.Generic.List(Of RedInkPythonAgentInputFile)(logicalInputs.Count)
+            Dim stageFolder As System.String = "__ri_stage"
+            Dim folderIndex As System.Int32 = 0
+            While occupied.Contains(stageFolder)
+                folderIndex += 1
+                stageFolder = "__ri_stage" & folderIndex.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            End While
             Dim aliasIndex As System.Int32 = 0
 
             For Each item As RedInkPythonAgentInputFile In logicalInputs
                 Dim logicalRelative As System.String = item.RelativePath.Replace("\"c, "/"c)
-                Dim projected As System.String = System.IO.Path.Combine(projectedPrefix, logicalRelative.Replace("/"c, System.IO.Path.DirectorySeparatorChar))
-                If projected.Length < projectedSafePathLength Then
+                If CLng(projectedPrefix.Length) + 1L + logicalRelative.Length < projectedSafePathLength Then
                     physicalInputs.Add(item)
                     Continue For
                 End If
 
                 Dim extension As System.String = System.IO.Path.GetExtension(logicalRelative)
-                Dim compactRelative As System.String = Nothing
-                Do
-                    aliasIndex += 1
-                    compactRelative = "__ri_stage/i" & aliasIndex.ToString("D4", System.Globalization.CultureInfo.InvariantCulture) & extension
-                Loop While occupied.Contains(compactRelative)
-                occupied.Add(compactRelative)
+                aliasIndex += 1
+                Dim compactRelative As System.String = stageFolder & "/i" & aliasIndex.ToString("D4", System.Globalization.CultureInfo.InvariantCulture) & extension
 
                 physicalInputs.Add(New RedInkPythonAgentInputFile(item.SourcePath, compactRelative))
                 replacements(logicalRelative) = compactRelative
@@ -1960,17 +1960,21 @@ Namespace Agents
 
             Dim normalizedAliases As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.Ordinal)
             For Each pair As System.Collections.Generic.KeyValuePair(Of System.String, System.String) In aliases
-                normalizedAliases(pair.Key.Replace("\"c, "/"c).ToLowerInvariant()) = pair.Value.Replace("\"c, "/"c)
+                normalizedAliases(pair.Key.Replace("\"c, "/"c)) = pair.Value.Replace("\"c, "/"c)
             Next
 
             Dim aliasJson As System.String = Newtonsoft.Json.JsonConvert.SerializeObject(normalizedAliases)
+            Dim encodedAliases As System.String = System.Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(aliasJson))
             Dim encodedSource As System.String = System.Convert.ToBase64String(New System.Text.UTF8Encoding(False, True).GetBytes(code))
             Dim builder As New System.Text.StringBuilder()
             builder.AppendLine("import base64 as __redink_base64")
             builder.AppendLine("import os as __redink_os")
             builder.AppendLine("from redink_pythonagent import agent_api as __redink_agent_api")
-            builder.Append("__redink_input_aliases = ")
-            builder.AppendLine(aliasJson)
+            builder.AppendLine("import json as __redink_alias_json")
+            builder.Append("__redink_input_aliases = __redink_alias_json.loads(__redink_base64.b64decode('")
+            builder.Append(encodedAliases)
+            builder.AppendLine("').decode('utf-8'))")
+            builder.AppendLine("__redink_input_aliases = {k.lower(): v for k, v in __redink_input_aliases.items()}")
             builder.AppendLine("__redink_original_input_path = __redink_agent_api.input_path")
             builder.AppendLine("def __redink_mapped_input_path(name):")
             builder.AppendLine("    try:")
@@ -2120,7 +2124,7 @@ Namespace Agents
         End Sub
 
         Private Shared Function CreateTemporaryInputDirectory() As System.String
-            Dim directory As System.String = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "RedInkPythonExecute", System.Guid.NewGuid().ToString("D"))
+            Dim directory As System.String = System.IO.Path.Combine(FilePathBudget.TemporaryWorkingRoot("RedInkPythonExecute" & System.IO.Path.DirectorySeparatorChar), "RedInkPythonExecute", System.Guid.NewGuid().ToString("D"))
             System.IO.Directory.CreateDirectory(directory)
             Return directory
         End Function
