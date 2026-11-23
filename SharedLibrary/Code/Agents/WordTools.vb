@@ -306,18 +306,65 @@ Namespace Agents
                 End If
             Next
 
+            Dim stagedPath As System.String = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(p), System.IO.Path.GetRandomFileName())
+            Dim ownsStage As System.Boolean = False
+            Dim taskIndex As System.Int32 = 0
+            Dim currentTask As New MarkupTask()
+            Try
+                Using original As New System.IO.FileStream(p, System.IO.FileMode.Open, System.IO.FileAccess.ReadWrite, System.IO.FileShare.Read Or System.IO.FileShare.Delete)
+                    Using staged As New System.IO.FileStream(stagedPath, System.IO.FileMode.CreateNew, System.IO.FileAccess.Write, System.IO.FileShare.None)
+                        ownsStage = True
+                        original.CopyTo(staged)
+                    End Using
+                    Dim anyApplied As System.Boolean
+                    Dim result As System.String = ApplyStagedWordTasks(p, stagedPath, tasks, author, asMarkup, anyApplied, taskIndex, currentTask)
+                    If anyApplied Then
+                        System.IO.File.Replace(stagedPath, p, Nothing)
+                        ownsStage = False
+                    End If
+                    Return result
+                End Using
+            Catch denied As System.UnauthorizedAccessException
+                Return Err_("access_denied", denied.Message)
+            Catch ex As System.Exception
+                Dim location As System.String = If(taskIndex > 0, $"Task {taskIndex}/{tasks.Count}, operation_id={currentTask.OperationId}, op={currentTask.Op}", "Document preparation or publication")
+                Dim message As System.String = location & ": " & ex.Message
+                Try
+                    Dim diagnostic As System.String = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "RedInk-WordBatch-" & System.Guid.NewGuid().ToString("N") & ".log")
+                    System.IO.File.WriteAllText(diagnostic, location & System.Environment.NewLine & ex.ToString())
+                    message &= " Diagnostic log: " & diagnostic
+                Catch logError As System.Exception
+                    System.Diagnostics.Trace.TraceWarning(logError.Message)
+                End Try
+                Return Err_("word_tool_failed", message)
+            Finally
+                If ownsStage Then
+                    Try
+                        System.IO.File.Delete(stagedPath)
+                    Catch cleanupError As System.Exception
+                        System.Diagnostics.Trace.TraceWarning(cleanupError.Message)
+                    End Try
+                End If
+            End Try
+        End Function
+
+        Private Shared Function ApplyStagedWordTasks(p As System.String, stagedPath As System.String,
+            tasks As System.Collections.Generic.List(Of MarkupTask), author As System.String, asMarkup As System.Boolean,
+            ByRef anyApplied As System.Boolean, ByRef taskIndex As System.Int32, ByRef currentTask As MarkupTask) As System.String
             Dim results As New List(Of Object)()
-            Dim anyApplied As Boolean = False
+            anyApplied = False
             Dim failedCount As Integer = 0
 
             Using doc As WordprocessingDocument =
-                WordprocessingDocument.Open(p, isEditable:=True)
+                WordprocessingDocument.Open(stagedPath, isEditable:=True)
 
                 Dim body As W.Body =
                     doc.MainDocumentPart.Document.Body
 
                 Using revisionScope As System.IDisposable = BeginRevisionIdScope(doc)
                 For Each t As MarkupTask In tasks
+                    taskIndex += 1
+                    currentTask = t
                     Dim op As String =
                         If(String.IsNullOrWhiteSpace(t.Op), "replace", t.Op)
 
@@ -479,6 +526,7 @@ Namespace Agents
                     End If
                 Next
 
+                taskIndex = 0
                 If anyApplied Then
                     doc.MainDocumentPart.Document.Save()
 
@@ -1186,17 +1234,31 @@ Namespace Agents
                 Return result
             End If
 
-            Dim t1 As List(Of String) = TokenizeForDiff(o)
-            Dim t2 As List(Of String) = TokenizeForDiff(n)
-            Dim j1 As String = String.Join(vbLf, t1)
-            Dim j2 As String = String.Join(vbLf, t2)
+            ' Each DiffPlex line represents one token. Encode the tokens as ordinal IDs
+            ' so whitespace normalization and embedded newlines cannot change their lengths.
+            Dim tokens As New System.Collections.Generic.List(Of System.String)()
+            Dim tokenIds As New System.Collections.Generic.Dictionary(Of System.String, System.Int32)(System.StringComparer.Ordinal)
+            Dim encode As System.Func(Of System.String, System.String) =
+                Function(value As System.String) As System.String
+                    Dim lines As New System.Collections.Generic.List(Of System.String)()
+                    For Each token As System.String In TokenizeForDiff(value)
+                        Dim id As System.Int32
+                        If Not tokenIds.TryGetValue(token, id) Then
+                            id = tokens.Count
+                            tokens.Add(token)
+                            tokenIds.Add(token, id)
+                        End If
+                        lines.Add(id.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                    Next
+                    Return System.String.Join(vbLf, lines)
+                End Function
 
             Dim builder As New DiffPlex.DiffBuilder.InlineDiffBuilder(New DiffPlex.Differ())
-            Dim model As DiffPlex.DiffBuilder.Model.DiffPaneModel = builder.BuildDiffModel(j1, j2)
+            Dim model As DiffPlex.DiffBuilder.Model.DiffPaneModel = builder.BuildDiffModel(encode(o), encode(n))
 
             For Each line As DiffPlex.DiffBuilder.Model.DiffPiece In model.Lines
-                Dim txt As String = If(line.Text, String.Empty)
-                If txt.Length = 0 Then Continue For
+                If System.String.IsNullOrEmpty(line.Text) Then Continue For
+                Dim txt As System.String = tokens(System.Int32.Parse(line.Text, System.Globalization.CultureInfo.InvariantCulture))
 
                 Dim opv As SharedMethods.Diff.Operation
                 Select Case line.Type

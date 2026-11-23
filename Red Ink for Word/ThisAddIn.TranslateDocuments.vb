@@ -474,6 +474,20 @@ Partial Public Class ThisAddIn
         Await ProcessWordDocuments(DocumentProcessMode.Translate)
     End Sub
 
+    Private Async Function TranslatePdfFile(source As System.String, destination As System.String, language As System.String,
+                                            replaceExisting As System.Boolean) As System.Threading.Tasks.Task(Of System.String)
+        TranslateLanguage = language
+        Dim instruction = Global.SharedLibrary.SharedLibrary.SharedMethods.InterpolateTranslationTemplateAtRuntime(
+            _context, SP_Translate, language, _documentTranslationDictionarySegments, AddressOf InterpolateAtRuntime) & _translationOptions.Value
+        Return Await Global.SharedLibrary.Agents.PdfFileTranslation.TranslateWithModelAsync(source, destination, instruction,
+            _context, _useSecondAPI,
+            Sub()
+                If ProgressBarModule.CancelOperation Then Throw New System.OperationCanceledException()
+            End Sub,
+            Sub(message) ProgressBarModule.GlobalProgressLabel = System.IO.Path.GetFileName(source) & " — " & message,
+            System.Threading.CancellationToken.None, replaceExisting, _pdfPreferWording.Value, targetLanguage:=language)
+    End Function
+
     ' --- Correction overrides (optional) ---
     Private _correctPromptOverride As String = Nothing
     Private _correctSuffixOverride As String = Nothing
@@ -484,6 +498,8 @@ Partial Public Class ThisAddIn
     ''' Whether to use formatting-aware marker mode for the current processing run.
     ''' </summary>
     Private _useFormattingMarkers As Boolean = False
+    Private ReadOnly _pdfPreferWording As New System.Threading.AsyncLocal(Of System.Boolean)()
+    Private ReadOnly _translationOptions As New System.Threading.AsyncLocal(Of System.String)()
     Private _documentTranslationDictionarySegments As System.Collections.Generic.HashSet(Of System.String) = Nothing
 
     ''' <summary>
@@ -575,14 +591,18 @@ Partial Public Class ThisAddIn
         ' Effective correction suffix (used throughout for correction mode)
         Dim effectiveCorrectedSuffix As String = If(String.IsNullOrWhiteSpace(_correctSuffixOverride), CorrectedFileSuffix, _correctSuffixOverride)
 
-        If INI_AllowLegacyDocFiles Then
-            Globals.ThisAddIn.DragDropFormLabel = $"Select a Word or PowerPoint document or folder to {modeVerb}, or use the currently active Word document"
-            Globals.ThisAddIn.DragDropFormFilter = "Supported Documents|*.doc;*.docx;*.pptx|Word Documents|*.doc;*.docx|Word Document (*.docx)|*.docx|Word 97-2003 (*.doc)|*.doc|PowerPoint (*.pptx)|*.pptx"
-        Else
-            Globals.ThisAddIn.DragDropFormLabel = $"Select a Word or PowerPoint document or folder to {modeVerb}, or use the currently active Word document"
-            Globals.ThisAddIn.DragDropFormFilter = "Supported Documents|*.docx;*.pptx|Word Document (*.docx)|*.docx|PowerPoint (*.pptx)|*.pptx"
-        End If
+        Dim translatePdf As System.Boolean = (mode = DocumentProcessMode.Translate)
+        Dim supportedExtensions As New System.Collections.Generic.List(Of System.String) From {".docx", ".pptx"}
+        If INI_AllowLegacyDocFiles Then supportedExtensions.Insert(0, ".doc")
+        If translatePdf Then supportedExtensions.Add(".pdf")
 
+        Dim formats = If(translatePdf, "Word, PowerPoint or PDF", "Word or PowerPoint")
+        Globals.ThisAddIn.DragDropFormLabel = $"Select a {formats} document or folder to {modeVerb}, or use the currently active Word document"
+        Dim individualFilters = If(INI_AllowLegacyDocFiles, "Word Documents|*.doc;*.docx|", "") & "Word Document (*.docx)|*.docx|" &
+            If(INI_AllowLegacyDocFiles, "Word 97-2003 (*.doc)|*.doc|", "") & "PowerPoint (*.pptx)|*.pptx" &
+            If(translatePdf, "|PDF (*.pdf)|*.pdf", "")
+        Globals.ThisAddIn.DragDropFormFilter = "Supported Documents|" &
+            System.String.Join(";", supportedExtensions.Select(Function(ext) "*" & ext)) & "|" & individualFilters
         Try
             Using frm As New DragDropForm(DragDropMode.FileOrDirectory, allowUseActiveDocument:=True)
                 Dim __safeDialogOwner507 As System.Windows.Forms.IWin32Window = SharedLibrary.SharedLibrary.SharedMethods.ResolveSameThreadDialogOwner()
@@ -612,9 +632,9 @@ Partial Public Class ThisAddIn
 
         ' Collect files
         Dim filesToProcess As New List(Of String)()
-        Dim supportedExtensions As String() = If(INI_AllowLegacyDocFiles,
-                                                  {".doc", ".docx", ".pptx"},
-                                                  {".docx", ".pptx"})
+        Dim approvedPdfReplacements As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+        Dim pdfNotices As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.OrdinalIgnoreCase)
+        Dim translationDetails As New System.Collections.Generic.List(Of System.String)()
 
         If isFile Then
             Dim ext As String = Path.GetExtension(selectedPath).ToLowerInvariant()
@@ -641,7 +661,7 @@ Partial Public Class ThisAddIn
             Next
 
             If filesToProcess.Count = 0 Then
-                ShowCustomMessageBox("No Word or PowerPoint documents found.")
+                ShowCustomMessageBox(If(translatePdf, "No Word, PowerPoint or PDF files found.", "No Word or PowerPoint documents found."))
                 Exit Function
             End If
         End If
@@ -649,6 +669,7 @@ Partial Public Class ThisAddIn
         ' Get target language (only for translation mode)
         Dim targetLanguage As String = Nothing
         Dim targetLanguageToken As String = Nothing
+        Dim checkTranslationFit As System.Boolean = False
 
         If mode = DocumentProcessMode.Translate Then
             Dim defaultLanguage As String = If(String.IsNullOrWhiteSpace(INI_Language1), "English", INI_Language1)
@@ -664,6 +685,10 @@ Partial Public Class ThisAddIn
             Dim dictionarySelectionCancelled As System.Boolean = False
             _documentTranslationDictionarySegments = Global.SharedLibrary.SharedLibrary.SharedMethods.ResolveInteractiveTranslationDictionarySegments(
                 _context, AN & " Translate Files", targetLanguage, dictionarySelectionCancelled)
+            If dictionarySelectionCancelled Then Exit Function
+            Dim preferWording As System.Boolean = False
+            _translationOptions.Value = Global.SharedLibrary.SharedLibrary.SharedMethods.ChooseTranslationOptions(_context, AN & " Translate Files", dictionarySelectionCancelled, checkTranslationFit, preferWording)
+            _pdfPreferWording.Value = preferWording
             If dictionarySelectionCancelled Then Exit Function
 
             ' Normalize for file matching (also used for output filenames)
@@ -682,16 +707,14 @@ Partial Public Class ThisAddIn
 
         For Each f In filesToProcess
             Dim ext As String = Path.GetExtension(f)
-            If Not ext.Equals(".doc", StringComparison.OrdinalIgnoreCase) AndAlso
-               Not ext.Equals(".docx", StringComparison.OrdinalIgnoreCase) AndAlso
-               Not ext.Equals(".pptx", StringComparison.OrdinalIgnoreCase) Then Continue For
+            If Not supportedExtensions.Contains(ext, System.StringComparer.OrdinalIgnoreCase) Then Continue For
 
             Dim dir As String = Path.GetDirectoryName(f)
             Dim nameWithoutExt As String = Path.GetFileNameWithoutExtension(f)
             Dim impliedBase As String = TryGetImpliedBaseName(nameWithoutExt, targetLanguageToken)
 
             Dim groupBaseName As String = If(impliedBase, nameWithoutExt)
-            Dim key As String = dir & "|" & groupBaseName
+            Dim key As String = dir & "|" & groupBaseName & If(ext.Equals(".pdf", System.StringComparison.OrdinalIgnoreCase), "|pdf", "")
 
             If Not groups.ContainsKey(key) Then
                 groups(key) = (New List(Of String)(), New List(Of String)())
@@ -766,6 +789,10 @@ Partial Public Class ThisAddIn
                 For Each k In pairedGroups
                     For Each procPath In groups(k).ProcessedFiles
                         Try
+                            If System.IO.Path.GetExtension(procPath).Equals(".pdf", System.StringComparison.OrdinalIgnoreCase) Then
+                                approvedPdfReplacements.Add(procPath)
+                                Continue For
+                            End If
                             If File.Exists(procPath) Then File.Delete(procPath)
                             ' Also delete compare file if it exists (for correction mode)
                             If mode = DocumentProcessMode.Correct Then
@@ -837,10 +864,10 @@ Partial Public Class ThisAddIn
         ' Confirm if many files to process
         If filesToProcess.Count > 10 Then
             ' Count file types for informative message
-            Dim wordCount As Integer = filesToProcess.Where(Function(f) Not Path.GetExtension(f).Equals(".pptx", StringComparison.OrdinalIgnoreCase)).Count
+            Dim wordCount As Integer = filesToProcess.Where(Function(f) System.String.Equals(Path.GetExtension(f), ".doc", System.StringComparison.OrdinalIgnoreCase) OrElse System.String.Equals(Path.GetExtension(f), ".docx", System.StringComparison.OrdinalIgnoreCase)).Count()
             Dim pptxCount As Integer = filesToProcess.Where(Function(f) Path.GetExtension(f).Equals(".pptx", StringComparison.OrdinalIgnoreCase)).Count
             Dim fileDesc As String = $"{filesToProcess.Count} document(s)"
-            If wordCount > 0 AndAlso pptxCount > 0 Then
+            If wordCount > 0 AndAlso pptxCount > 0 AndAlso wordCount + pptxCount = filesToProcess.Count Then
                 fileDesc = $"{filesToProcess.Count} document(s) ({wordCount} Word, {pptxCount} PowerPoint)"
             End If
 
@@ -869,6 +896,7 @@ Partial Public Class ThisAddIn
                 Dim fileName As String = Path.GetFileName(filePath)
                 Dim fileExt As String = Path.GetExtension(filePath).ToLowerInvariant()
                 Dim isPptx As Boolean = (fileExt = ".pptx")
+                Dim isPdf As System.Boolean = (fileExt = ".pdf")
 
                 ProgressBarModule.GlobalProgressValue = i
                 ProgressBarModule.GlobalProgressLabel = $"{modeVerbGerund} {i + 1}/{filesToProcess.Count}: {fileName}"
@@ -876,12 +904,13 @@ Partial Public Class ThisAddIn
                 Try
                     Dim dir As String = Path.GetDirectoryName(filePath)
                     Dim nameWithoutExt As String = Path.GetFileNameWithoutExtension(filePath)
-                    Dim outputExt As String = If(isPptx, ".pptx", ".docx")
+                    Dim outputExt As String = If(isPdf, ".pdf", If(isPptx, ".pptx", ".docx"))
                     Dim outputPath As String
                     Dim compareOutputPath As String = Nothing
 
                     If mode = DocumentProcessMode.Translate Then
-                        outputPath = Path.Combine(dir, $"{nameWithoutExt}_{targetLanguageToken}{outputExt}")
+                        Dim translatedName As System.String = $"{nameWithoutExt}_{targetLanguageToken}{outputExt}"
+                        outputPath = If(isPdf, Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(dir, translatedName, 0), Path.Combine(dir, translatedName))
                     Else
                         outputPath = Path.Combine(dir, $"{nameWithoutExt}{effectiveCorrectedSuffix}{outputExt}")
                         If Not isPptx Then
@@ -890,14 +919,32 @@ Partial Public Class ThisAddIn
                     End If
 
                     Dim success As Boolean
+                    Dim pdfNotice As System.String = System.String.Empty
 
-                    If isPptx Then
+                    If isPdf Then
+                        Dim canReplace = approvedPdfReplacements.Contains(outputPath)
+                        If System.IO.File.Exists(outputPath) AndAlso Not canReplace Then
+                            Dim choice = ShowCustomYesNoBox($"Replace the existing {System.IO.Path.GetFileName(outputPath)} after the translation verifies?", "Replace", "Skip")
+                            If choice <> 1 Then Continue For
+                            canReplace = True
+                        End If
+                        pdfNotice = Await TranslatePdfFile(filePath, outputPath, targetLanguage, canReplace)
+                        success = True
+                    ElseIf isPptx Then
                         ' PowerPoint: copy then process via PPTX OpenXML pipeline
                         File.Copy(filePath, outputPath, overwrite:=True)
                         success = Await ProcessPptxOpenXml(outputPath, targetLanguage, mode)
                     Else
                         ' Word: existing pipeline (handles .doc → .docx conversion)
                         success = Await ProcessDocumentViaOpenXml(filePath, outputPath, targetLanguage, mode)
+                    End If
+
+                    If success AndAlso checkTranslationFit AndAlso Not isPdf Then
+                        Dim guidance = Global.SharedLibrary.SharedLibrary.SharedMethods.InterpolateTranslationTemplateAtRuntime(
+                            _context, SP_Translate, targetLanguage, _documentTranslationDictionarySegments, AddressOf InterpolateAtRuntime) & _translationOptions.Value
+                        Dim fitDetail = Await Global.SharedLibrary.SharedLibrary.SharedMethods.CheckTranslationFit(outputPath, _context, guidance, _useSecondAPI, System.Threading.CancellationToken.None)
+                        translationDetails.Add(fileName & " — " & fitDetail)
+                        LogWordCommandDiagnostic("TranslationFit", fitDetail)
                     End If
 
                     If success Then
@@ -938,6 +985,7 @@ Partial Public Class ThisAddIn
                         If desktopMoveSucceeded Then
                             If Not String.IsNullOrWhiteSpace(finalOutputPath) AndAlso File.Exists(finalOutputPath) Then
                                 resultFilePaths.Add(finalOutputPath)
+                                If Not System.String.IsNullOrWhiteSpace(pdfNotice) Then pdfNotices(finalOutputPath) = pdfNotice
                             End If
                             If Not String.IsNullOrWhiteSpace(finalComparePath) AndAlso File.Exists(finalComparePath) Then
                                 resultFilePaths.Add(finalComparePath)
@@ -955,7 +1003,7 @@ Partial Public Class ThisAddIn
                     Exit For
                 Catch ex As System.Exception
                     LogWordCommandDiagnostic("ProcessDocumentBatch", ex.ToString())
-                    failedFiles.Add($"{fileName}: Inky could not finish processing this file.")
+                    failedFiles.Add(If(isPdf, $"{fileName}: {ex.Message}", $"{fileName}: Inky could not finish processing this file."))
                 End Try
             Next
         Finally
@@ -1001,6 +1049,8 @@ Partial Public Class ThisAddIn
             summary.AppendLine(If(usedActiveDocument, "Result files saved to Desktop:", "Created result files:"))
             For Each resultPath In distinctResultPaths.Take(20)
                 summary.AppendLine($"  • {Path.GetFileName(resultPath)}")
+                Dim notice As System.String = Nothing
+                If pdfNotices.TryGetValue(resultPath, notice) Then summary.AppendLine("    " & notice)
             Next
             If distinctResultPaths.Count > 20 Then
                 summary.AppendLine($"  ... and {distinctResultPaths.Count - 20} more")
@@ -1012,6 +1062,10 @@ Partial Public Class ThisAddIn
             summary.AppendLine("Temporary files were kept because moving the result failed:")
             summary.AppendLine($"  {activeDocumentTempFolder}")
         End If
+
+        For Each detail In translationDetails
+            summary.AppendLine(detail)
+        Next
 
         If failedFiles.Count > 0 Then
             summary.AppendLine()
@@ -1026,7 +1080,21 @@ Partial Public Class ThisAddIn
             summary.AppendLine("(Log copied to clipboard)")
         End If
 
-        ShowCustomMessageBox(summary.ToString().TrimEnd(), AN & " " & modeNoun)
+        Dim summaryText = summary.ToString().TrimEnd()
+        Dim summaryTitle = AN & " " & modeNoun
+        If distinctResultPaths.Count = 1 AndAlso System.String.Equals(System.IO.Path.GetExtension(distinctResultPaths(0)), ".pdf", System.StringComparison.OrdinalIgnoreCase) Then
+            If ShowCustomYesNoBox(summaryText, "Open PDF", "Close", summaryTitle) = 1 Then
+                Try
+                    Dim openResult As New System.Diagnostics.ProcessStartInfo(distinctResultPaths(0)) With {.UseShellExecute = True}
+                    System.Diagnostics.Process.Start(openResult)
+                Catch ex As System.Exception
+                    LogWordCommandDiagnostic("OpenTranslatedPdf", ex.ToString())
+                    ShowCustomMessageBox("The PDF was saved. You can open it from this location:" & System.Environment.NewLine & distinctResultPaths(0), summaryTitle)
+                End Try
+            End If
+        Else
+            ShowCustomMessageBox(summaryText, summaryTitle)
+        End If
     End Function
 
     ''' <summary>
@@ -1798,7 +1866,7 @@ Partial Public Class ThisAddIn
         If mode = DocumentProcessMode.Translate Then
             TranslateLanguage = targetLanguage
             systemPrompt = Global.SharedLibrary.SharedLibrary.SharedMethods.InterpolateTranslationTemplateAtRuntime(
-                _context, SP_Translate_Document, targetLanguage, _documentTranslationDictionarySegments, AddressOf InterpolateAtRuntime)
+                _context, SP_Translate_Document, targetLanguage, _documentTranslationDictionarySegments, AddressOf InterpolateAtRuntime) & _translationOptions.Value
         Else
             Dim effectivePrompt As String = If(String.IsNullOrWhiteSpace(_correctPromptOverride), SP_Correct_Document, _correctPromptOverride)
             systemPrompt = InterpolateAtRuntime(effectivePrompt)

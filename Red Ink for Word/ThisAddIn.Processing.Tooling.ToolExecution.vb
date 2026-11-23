@@ -428,7 +428,11 @@ Partial Public Class ThisAddIn
             End If
 
             If SharedLibrary.Agents.WorkspaceTools.IsWorkspaceTool(toolCall.ToolName) Then
-                response.Response = SharedLibrary.Agents.WorkspaceTools.Execute(toolCall.ToolName, toolCall.Arguments, context?.SequencingState)
+                If System.String.Equals(toolCall.ToolName, Global.SharedLibrary.Agents.WorkspaceTools.ToolTranslatePdf, System.StringComparison.OrdinalIgnoreCase) Then
+                    response.Response = Await Global.SharedLibrary.Agents.WorkspaceTools.TranslatePdfAsync(toolCall.Arguments, _context, False, cancellationToken, Sub(message) context.Log(message), context.SequencingState, toolCall.CallId)
+                Else
+                    response.Response = SharedLibrary.Agents.WorkspaceTools.Execute(toolCall.ToolName, toolCall.Arguments, context?.SequencingState)
+                End If
                 response.Success = True
 
                 Try

@@ -64,7 +64,7 @@ Partial Public Class ThisAddIn
         If INILoadFail() OrElse Not IsDocumentEditable() Then Return
         TranslateLanguage = INI_Language1
         Dim dictionarySelectionCancelled As System.Boolean = False
-        Dim translatePrompt As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.BuildInteractiveTranslationPrompt(_context, SP_Translate, $"{AN} Translate", TranslateLanguage, AddressOf InterpolateAtRuntime, dictionarySelectionCancelled)
+        Dim translatePrompt As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.BuildInteractiveTranslationPrompt(_context, SP_Translate, $"{AN} Translate", TranslateLanguage, AddressOf InterpolateAtRuntime, dictionarySelectionCancelled, choosePreferences:=True)
         If dictionarySelectionCancelled Then Return
         Dim result As String = Await ProcessSelectedText(translatePrompt, True, INI_KeepFormat1, INI_KeepParaFormatInline, INI_ReplaceText1, False, 0, False, False, True, False, INI_KeepFormatCap, NoFormatAndFieldSaving:=Not INI_ReplaceText1)
     End Sub
@@ -78,7 +78,7 @@ Partial Public Class ThisAddIn
         If INILoadFail() OrElse Not IsDocumentEditable() Then Return
         TranslateLanguage = INI_Language2
         Dim dictionarySelectionCancelled As System.Boolean = False
-        Dim translatePrompt As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.BuildInteractiveTranslationPrompt(_context, SP_Translate, $"{AN} Translate", TranslateLanguage, AddressOf InterpolateAtRuntime, dictionarySelectionCancelled)
+        Dim translatePrompt As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.BuildInteractiveTranslationPrompt(_context, SP_Translate, $"{AN} Translate", TranslateLanguage, AddressOf InterpolateAtRuntime, dictionarySelectionCancelled, choosePreferences:=True)
         If dictionarySelectionCancelled Then Return
         Dim result As String = Await ProcessSelectedText(translatePrompt, True, INI_KeepFormat1, INI_KeepParaFormatInline, INI_ReplaceText1, False, 0, False, False, True, False, INI_KeepFormatCap, NoFormatAndFieldSaving:=Not INI_ReplaceText1)
     End Sub
@@ -105,7 +105,7 @@ Partial Public Class ThisAddIn
             _context)
         If Not String.IsNullOrEmpty(TranslateLanguage) Then
             Dim dictionarySelectionCancelled As System.Boolean = False
-            Dim translatePrompt As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.BuildInteractiveTranslationPrompt(_context, SP_Translate, $"{AN} Translate", TranslateLanguage, AddressOf InterpolateAtRuntime, dictionarySelectionCancelled)
+            Dim translatePrompt As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.BuildInteractiveTranslationPrompt(_context, SP_Translate, $"{AN} Translate", TranslateLanguage, AddressOf InterpolateAtRuntime, dictionarySelectionCancelled, choosePreferences:=True)
             If dictionarySelectionCancelled Then Return
             Dim result As String = Await ProcessSelectedText(translatePrompt, True, INI_KeepFormat1, INI_KeepParaFormatInline, INI_ReplaceText1, False, 0, False, False, True, False, INI_KeepFormatCap, NoFormatAndFieldSaving:=Not INI_ReplaceText1)
         End If

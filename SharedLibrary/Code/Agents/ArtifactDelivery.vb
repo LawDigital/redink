@@ -2292,6 +2292,19 @@ Namespace Agents
             End Using
         End Function
 
+        Friend Shared Function HasDifferentVerifiedContent(artifact As ToolCallSequencing.DeliverableArtifact) As System.Boolean
+            If artifact Is Nothing OrElse System.String.IsNullOrEmpty(artifact.VerifiedContentSha256) Then Return False
+            Try
+                Return Not System.String.Equals(artifact.VerifiedContentSha256, ComputeFileSha256(artifact.SessionPath), System.StringComparison.Ordinal)
+            Catch ex As System.IO.IOException
+                Return False
+            Catch ex As System.UnauthorizedAccessException
+                Return False
+            Catch ex As System.ArgumentException
+                Return False
+            End Try
+        End Function
+
         Public Shared Function IsVerifiedArtifactRevisionCurrent(artifact As ToolCallSequencing.DeliverableArtifact) As System.Boolean
             If artifact Is Nothing OrElse System.String.IsNullOrWhiteSpace(artifact.SessionPath) Then Return False
             Try

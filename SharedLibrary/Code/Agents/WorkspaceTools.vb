@@ -92,6 +92,7 @@ Namespace Agents
         Public Const ToolRename As String = "workspace_rename"
         Public Const ToolDelete As String = "workspace_delete"
         Public Const ToolMakeDir As String = "workspace_make_dir"
+        Public Const ToolTranslatePdf As System.String = "workspace_translate_pdf"
         Public Const ToolExtractText As String = "workspace_extract_text"
         Public Const ToolExtractTextMany As String = "workspace_extract_text_many"
 
@@ -109,7 +110,7 @@ Namespace Agents
             Select Case name
                 Case ToolGet, ToolInventory, ToolRead, ToolReadMany, ToolWrite, ToolSearch,
                      ToolCopy, ToolMove, ToolRename, ToolDelete, ToolMakeDir,
-                     ToolExtractText, ToolExtractTextMany
+                     ToolExtractText, ToolExtractTextMany, ToolTranslatePdf
                     Return True
                 Case Else
                     Return False
@@ -120,13 +121,13 @@ Namespace Agents
             Dim tools As New List(Of ModelConfig) From {
                 BuildGet(), BuildInventory(), BuildRead(), BuildReadMany(), BuildWrite(), BuildSearch(),
                 BuildCopy(), BuildMove(), BuildRename(), BuildDelete(), BuildMakeDir(),
-                BuildExtractText(), BuildExtractTextMany()
+                BuildExtractText(), BuildExtractTextMany(), BuildTranslatePdf()
             }
 
             For Each tool As ModelConfig In tools
                 If tool Is Nothing Then Continue For
                 Select Case tool.ToolName
-                    Case ToolCopy, ToolMove, ToolRename
+                    Case ToolCopy, ToolMove, ToolRename, ToolTranslatePdf
                         ArtifactDelivery.EnableOptionalSingleFileArtifactProtocol(tool)
                 End Select
             Next
@@ -164,7 +165,7 @@ Namespace Agents
                     Case ToolRename : Return ExecuteRename(arguments)
                     Case ToolDelete : Return ExecuteDelete(arguments, runState)
                     Case ToolMakeDir : Return ExecuteMakeDir(arguments)
-                    Case ToolExtractText, ToolExtractTextMany
+                    Case ToolExtractText, ToolExtractTextMany, ToolTranslatePdf
                         Return Err_("host_only_tool", toolName & " must be executed by the host (Word/Outlook), not via the shared dispatcher.")
                     Case Else : Return Err_("unknown_workspace_tool", "Unknown tool '" & toolName & "'.")
                 End Select
@@ -1043,6 +1044,79 @@ Namespace Agents
                 .ToolDefinition = def,
                 .ToolInstructionsPrompt = ToolReadMany & ": Read many text files from inside the workspace in one call."
             }
+        End Function
+
+        Private Shared Function BuildTranslatePdf() As ModelConfig
+            Dim definition = Newtonsoft.Json.JsonConvert.SerializeObject(New With {
+                .name = ToolTranslatePdf,
+                .description = "Translate native PDF page text into a separate PDF copy in the connected writable workspace. Preserve page layout. Report image-text limitations and any unsupported page. Use process_word_document for Outlook attachments.",
+                .parameters = New With {.type = "object", .properties = New With {
+                    .path = New With {.type = "string", .description = "Source PDF in the workspace."},
+                    .target_language = New With {.type = "string", .description = "Requested target language."},
+                    .translation_style = New With {.type = "string", .[enum] = New System.String() {"default", "close", "natural", "adapt"}, .description = "User-selected translation style. Omit when unspecified."},
+                    .translation_length = New With {.type = "string", .[enum] = New System.String() {"default", "flexible", "similar", "fit"}, .description = "User-selected length preference. Omit when unspecified."},
+                    .dictionary_segments = New With {.type = "array", .items = New With {.type = "string"}, .description = "Optional translation dictionary segment names explicitly warranted by the request."},
+                    .global_context = New With {.type = "string", .description = "Optional document-wide terminology and translation guidance."}},
+                    .required = New System.String() {"path", "target_language"}}})
+            Return New ModelConfig() With {.ToolName = ToolTranslatePdf, .ToolDefinition = definition,
+                .Tool = True, .ToolPriority = 905, .ToolErrorHandling = "skip", .CapabilityTags = "artifact_generation",
+                .ModelDescription = "Translate a workspace PDF in its original layout",
+                .ToolInstructionsPrompt = "Use workspace_translate_pdf for a translated PDF copy of a workspace file. Return the exact output path and any image-text or layout limitations."}
+        End Function
+
+        Public Shared Async Function TranslatePdfAsync(args As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+                context As Global.SharedLibrary.SharedLibrary.SharedContext.ISharedContext, selectedSecondApi As System.Boolean,
+                token As System.Threading.CancellationToken, report As System.Action(Of System.String),
+                Optional runState As ToolCallSequencing.ToolingRunState = Nothing, Optional toolCallId As System.String = Nothing) As System.Threading.Tasks.Task(Of System.String)
+            Try
+                Dim workspace = Active
+                If workspace Is Nothing OrElse Not workspace.AllowRead OrElse Not workspace.AllowWrite OrElse RequireConnected() IsNot Nothing Then
+                    Return Err_("not_permitted", "PDF translation requires a readable and writable workspace.")
+                End If
+                Dim source = PathPolicy.Resolve(ResolveInsideWorkspace(GetStr(args, "path"), stagedRead:=True), PathAccess.Read)
+                If Not System.String.Equals(System.IO.Path.GetExtension(source), ".pdf", System.StringComparison.OrdinalIgnoreCase) Then
+                    Return Err_("invalid_pdf", "Choose a PDF source file.")
+                End If
+                Dim language = GetStr(args, "target_language").Trim()
+                If language.Length = 0 Then Return Err_("missing_target_language", "Specify the target language.")
+                Dim segments As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+                For Each segment In GetStringList(args, "dictionary_segments")
+                    Dim name = segment.Trim()
+                    segments.Add(If(name.Contains(":"), name, language & ":" & name))
+                Next
+                Dim instruction = "Translate to " & language & ". " & GetStr(args, "global_context") & System.Environment.NewLine &
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.GetTranslationDictionaryText(context, language, segments) &
+                    Global.SharedLibrary.SharedLibrary.SharedMethods.TranslationPreferencePrompt(context, GetStr(args, "translation_style"), GetStr(args, "translation_length"))
+                Dim metadata As OptionalToolArtifactMetadata = Nothing
+                Dim code As System.String = Nothing
+                Dim message As System.String = Nothing
+                Dim artifactArguments = args
+                If runState IsNot Nothing AndAlso args IsNot Nothing Then
+                    artifactArguments = New System.Collections.Generic.Dictionary(Of System.String, System.Object)(args, System.StringComparer.OrdinalIgnoreCase)
+                    runState.BindSingleFileProducerToExpectedSlot(artifactArguments, toolCallId, System.IO.Path.GetFileName(source), ".pdf")
+                End If
+                If Not ArtifactDelivery.TryPrepareOptionalToolArtifactMetadata(artifactArguments, ArtifactStorageKind.ConnectedWorkspace, metadata, code, message) Then
+                    Return Err_(code, message)
+                End If
+                Dim destination = PathPolicy.Resolve(FilePathBudget.UniqueCopyPath(System.IO.Path.GetDirectoryName(source),
+                    System.IO.Path.GetFileNameWithoutExtension(source) & "_translated.pdf"), PathAccess.Write)
+                Dim root = workspace.RootPath
+                Dim guard As System.Action = Sub()
+                    token.ThrowIfCancellationRequested()
+                    Dim current = Active
+                    If current Is Nothing OrElse Not current.AllowRead OrElse Not current.AllowWrite OrElse
+                        Not System.String.Equals(current.RootPath, root, System.StringComparison.OrdinalIgnoreCase) Then
+                        Throw New System.UnauthorizedAccessException("Workspace permissions changed during PDF translation.")
+                    End If
+                End Sub
+                Dim detail = Await PdfFileTranslation.TranslateWithModelAsync(source, destination, instruction, context, selectedSecondApi, guard, report, token, preferWording:=System.String.Equals(GetStr(args, "translation_style"), "close", System.StringComparison.OrdinalIgnoreCase), targetLanguage:=language)
+                Dim response = Newtonsoft.Json.JsonConvert.SerializeObject(New With {.path = destination, .detail = detail})
+                Return ArtifactDelivery.AttachOptionalSingleFileArtifactToResult(response, metadata, destination)
+            Catch ex As System.OperationCanceledException
+                Throw
+            Catch ex As System.Exception
+                Return Err_("pdf_translation_failed", ex.Message)
+            End Try
         End Function
 
         Private Shared Function BuildExtractText() As ModelConfig

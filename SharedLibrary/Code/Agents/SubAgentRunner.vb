@@ -420,6 +420,7 @@ Namespace Agents
         Private Shared ReadOnly PhysicalSourceReaderToolNames As New System.Collections.Generic.HashSet(Of String)(
             New String() {
                 "read_attachment",
+                "read_word_document_details",
                 "search_in_attachments",
                 "extract_pdf_text",
                 "word_search",

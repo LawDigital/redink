@@ -80,7 +80,8 @@ Namespace Agents
             "EXISTING ARTIFACT RULE: Distinguish each artifact the user wants changed from a source used only as input to a separate new output. Editing, shortening, translating or revising the existing artifact itself is a transformation. " &
             "Use an available editing or transformation path that preserves native styles, layouts, masters, placeholders and structure except for the requested changes. Reading its text does not authorize rebuilding it from Markdown or plain text, or applying an implicit default design. " &
             "sourceFormatAuthority=false does not authorize reconstructing an artifact being edited. Apply this rule per artifact: a separately requested new synthesis or other new output may use source facts as content, including in mixed requests. " &
-            "Respect an explicit request for a different format or redesign. If source preservation is impossible, use only an authorized controlled fallback and disclose the limitation."
+            "Select tools by the intended operation, the actual file type and location from the host inventory, and the requested deliverable. Interpret the request by meaning across languages and phrasings, including implicit references to files attached to the current request. " &
+            "When a transformation has a file deliverable and no output format is specified, keep the input format. Prefer a tool that performs the operation directly in that format. Add conversion only for a requested format change, an independent conversion task, or an authorized fallback when the direct path is unavailable. Respect explicit requests for redesign and disclose fallback limitations."
 
         ' ---------------------------------------------------------------------
         ' TASK_STATUS footer contract text (replaces the per-host const).

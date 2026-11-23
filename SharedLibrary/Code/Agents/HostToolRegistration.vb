@@ -60,6 +60,7 @@ Namespace Agents
             FileTools.ToolRemoveDir,
             JsRunTool.ToolName,
             PythonExecuteTool.ToolName,
+            WorkspaceTools.ToolTranslatePdf,
             SkillInvokeTool.ToolName,
             ContextExpandTool.ToolName,
             ContextCompactTool.ToolName,
@@ -207,6 +208,7 @@ Namespace Agents
         Private ReadOnly OutlookDeliverableToolNames As String() = New String() {
             "download_web_files",
             WorkspaceTools.ToolWrite,
+            WorkspaceTools.ToolTranslatePdf,
             WorkspaceTools.ToolCopy,
             WorkspaceTools.ToolMove,
             WorkspaceTools.ToolRename,
@@ -256,6 +258,7 @@ Namespace Agents
         Private ReadOnly WordDeliverableToolNames As String() = New String() {
             "download_web_files",
             WorkspaceTools.ToolWrite,
+            WorkspaceTools.ToolTranslatePdf,
             WorkspaceTools.ToolCopy,
             WorkspaceTools.ToolMove,
             WorkspaceTools.ToolRename,

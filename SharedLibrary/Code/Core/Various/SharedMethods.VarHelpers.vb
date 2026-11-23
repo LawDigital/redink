@@ -952,12 +952,24 @@ Namespace SharedLibrary
             ByVal targetLanguage As System.String,
             ByVal interpolator As System.Func(Of System.String, System.String),
             ByRef cancelled As System.Boolean) As System.String
+            Return BuildInteractiveTranslationPrompt(context, template, title, targetLanguage, interpolator, cancelled, choosePreferences:=False)
+        End Function
+
+        Public Shared Function BuildInteractiveTranslationPrompt(
+            ByVal context As ISharedContext,
+            ByVal template As System.String,
+            ByVal title As System.String,
+            ByVal targetLanguage As System.String,
+            ByVal interpolator As System.Func(Of System.String, System.String),
+            ByRef cancelled As System.Boolean, ByVal choosePreferences As System.Boolean) As System.String
 
             cancelled = False
             Dim selected As System.Collections.Generic.HashSet(Of System.String) =
                 ResolveInteractiveTranslationDictionarySegments(context, title, targetLanguage, cancelled)
             If cancelled Then Return System.String.Empty
-            Return InterpolateTranslationTemplateAtRuntime(context, template, targetLanguage, selected, interpolator)
+            Dim optionsText = If(choosePreferences, ChooseTranslationOptions(context, title, cancelled), System.String.Empty)
+            If cancelled Then Return System.String.Empty
+            Return InterpolateTranslationTemplateAtRuntime(context, template, targetLanguage, selected, interpolator) & optionsText
         End Function
 
         Private Shared Function FilterTranslationDictionary(ByVal rawDictionary As System.String,

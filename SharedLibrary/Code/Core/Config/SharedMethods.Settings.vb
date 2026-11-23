@@ -3036,6 +3036,16 @@ Namespace SharedLibrary
                     {"SP_Translate_Multi", context.SP_Translate_Multi},
                     {"SP_Translate_Multi_Source", context.SP_Translate_Multi_Source},
                     {"SP_Translate_Document", context.SP_Translate_Document},
+                    {"SP_Translate_Style_Close", context.SP_Translate_Style_Close},
+                    {"SP_Translate_Style_Natural", context.SP_Translate_Style_Natural},
+                    {"SP_Translate_Style_Adapt", context.SP_Translate_Style_Adapt},
+                    {"SP_Translate_Length_Flexible", context.SP_Translate_Length_Flexible},
+                    {"SP_Translate_Length_Similar", context.SP_Translate_Length_Similar},
+                    {"SP_Translate_Length_Fit", context.SP_Translate_Length_Fit},
+                    {"SP_Translate_Pdf_Line", context.SP_Translate_Pdf_Line},
+                    {"SP_Translate_Pdf_Group", context.SP_Translate_Pdf_Group},
+                    {"SP_Translate_Pdf_Retry", context.SP_Translate_Pdf_Retry},
+                    {"SP_Translate_Office_Retry", context.SP_Translate_Office_Retry},
                     {"SP_Correct", context.SP_Correct},
                     {"SP_Correct_Document", context.SP_Correct_Document},
                     {"SP_Improve", context.SP_Improve},
@@ -3357,6 +3367,16 @@ Namespace SharedLibrary
                 {"SP_Translate_Multi", Default_SP_Translate_Multi},
                 {"SP_Translate_Multi_Source", Default_SP_Translate_Multi_Source},
                 {"SP_Translate_Document", Default_SP_Translate_Document},
+                {"SP_Translate_Style_Close", Default_SP_Translate_Style_Close},
+                {"SP_Translate_Style_Natural", Default_SP_Translate_Style_Natural},
+                {"SP_Translate_Style_Adapt", Default_SP_Translate_Style_Adapt},
+                {"SP_Translate_Length_Flexible", Default_SP_Translate_Length_Flexible},
+                {"SP_Translate_Length_Similar", Default_SP_Translate_Length_Similar},
+                {"SP_Translate_Length_Fit", Default_SP_Translate_Length_Fit},
+                {"SP_Translate_Pdf_Line", Default_SP_Translate_Pdf_Line},
+                {"SP_Translate_Pdf_Group", Default_SP_Translate_Pdf_Group},
+                {"SP_Translate_Pdf_Retry", Default_SP_Translate_Pdf_Retry},
+                {"SP_Translate_Office_Retry", Default_SP_Translate_Office_Retry},
                 {"SP_Correct", Default_SP_Correct},
                 {"SP_Correct_Document", Default_SP_Correct_Document},
                 {"SP_Improve", Default_SP_Improve},
@@ -4765,6 +4785,16 @@ Namespace SharedLibrary
             variableValues.Add("SP_Translate_Multi", context.SP_Translate_Multi)
             variableValues.Add("SP_Translate_Multi_Source", context.SP_Translate_Multi_Source)
             variableValues.Add("SP_Translate_Document", context.SP_Translate_Document)
+            variableValues.Add("SP_Translate_Style_Close", context.SP_Translate_Style_Close)
+            variableValues.Add("SP_Translate_Style_Natural", context.SP_Translate_Style_Natural)
+            variableValues.Add("SP_Translate_Style_Adapt", context.SP_Translate_Style_Adapt)
+            variableValues.Add("SP_Translate_Length_Flexible", context.SP_Translate_Length_Flexible)
+            variableValues.Add("SP_Translate_Length_Similar", context.SP_Translate_Length_Similar)
+            variableValues.Add("SP_Translate_Length_Fit", context.SP_Translate_Length_Fit)
+            variableValues.Add("SP_Translate_Pdf_Line", context.SP_Translate_Pdf_Line)
+            variableValues.Add("SP_Translate_Pdf_Group", context.SP_Translate_Pdf_Group)
+            variableValues.Add("SP_Translate_Pdf_Retry", context.SP_Translate_Pdf_Retry)
+            variableValues.Add("SP_Translate_Office_Retry", context.SP_Translate_Office_Retry)
             variableValues.Add("SP_Correct", context.SP_Correct)
             variableValues.Add("SP_Correct_Document", context.SP_Correct_Document)
             variableValues.Add("SP_Improve", context.SP_Improve)
@@ -4997,6 +5027,16 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_Translate_Multi") Then context.SP_Translate_Multi = CStr(updatedValues("SP_Translate_Multi"))
                 If updatedValues.ContainsKey("SP_Translate_Multi_Source") Then context.SP_Translate_Multi_Source = CStr(updatedValues("SP_Translate_Multi_Source"))
                 If updatedValues.ContainsKey("SP_Translate_Document") Then context.SP_Translate_Document = CStr(updatedValues("SP_Translate_Document"))
+                If updatedValues.ContainsKey("SP_Translate_Style_Close") Then context.SP_Translate_Style_Close = System.Text.RegularExpressions.Regex.Replace(CStr(updatedValues("SP_Translate_Style_Close")), "[\r\n]+", " ")
+                If updatedValues.ContainsKey("SP_Translate_Style_Natural") Then context.SP_Translate_Style_Natural = System.Text.RegularExpressions.Regex.Replace(CStr(updatedValues("SP_Translate_Style_Natural")), "[\r\n]+", " ")
+                If updatedValues.ContainsKey("SP_Translate_Style_Adapt") Then context.SP_Translate_Style_Adapt = System.Text.RegularExpressions.Regex.Replace(CStr(updatedValues("SP_Translate_Style_Adapt")), "[\r\n]+", " ")
+                If updatedValues.ContainsKey("SP_Translate_Length_Flexible") Then context.SP_Translate_Length_Flexible = System.Text.RegularExpressions.Regex.Replace(CStr(updatedValues("SP_Translate_Length_Flexible")), "[\r\n]+", " ")
+                If updatedValues.ContainsKey("SP_Translate_Length_Similar") Then context.SP_Translate_Length_Similar = System.Text.RegularExpressions.Regex.Replace(CStr(updatedValues("SP_Translate_Length_Similar")), "[\r\n]+", " ")
+                If updatedValues.ContainsKey("SP_Translate_Length_Fit") Then context.SP_Translate_Length_Fit = System.Text.RegularExpressions.Regex.Replace(CStr(updatedValues("SP_Translate_Length_Fit")), "[\r\n]+", " ")
+                If updatedValues.ContainsKey("SP_Translate_Pdf_Line") Then context.SP_Translate_Pdf_Line = System.Text.RegularExpressions.Regex.Replace(CStr(updatedValues("SP_Translate_Pdf_Line")), "[\r\n]+", " ")
+                If updatedValues.ContainsKey("SP_Translate_Pdf_Group") Then context.SP_Translate_Pdf_Group = System.Text.RegularExpressions.Regex.Replace(CStr(updatedValues("SP_Translate_Pdf_Group")), "[\r\n]+", " ")
+                If updatedValues.ContainsKey("SP_Translate_Pdf_Retry") Then context.SP_Translate_Pdf_Retry = System.Text.RegularExpressions.Regex.Replace(CStr(updatedValues("SP_Translate_Pdf_Retry")), "[\r\n]+", " ")
+                If updatedValues.ContainsKey("SP_Translate_Office_Retry") Then context.SP_Translate_Office_Retry = System.Text.RegularExpressions.Regex.Replace(CStr(updatedValues("SP_Translate_Office_Retry")), "[\r\n]+", " ")
                 If updatedValues.ContainsKey("SP_Correct") Then context.SP_Correct = CStr(updatedValues("SP_Correct"))
                 If updatedValues.ContainsKey("SP_Correct_Document") Then context.SP_Correct_Document = CStr(updatedValues("SP_Correct_Document"))
                 If updatedValues.ContainsKey("SP_Improve") Then context.SP_Improve = CStr(updatedValues("SP_Improve"))
