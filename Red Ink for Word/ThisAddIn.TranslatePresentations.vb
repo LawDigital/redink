@@ -87,7 +87,11 @@ Partial Public Class ThisAddIn
                 ProgressBarModule.GlobalProgressValue = partIdx
                 ProgressBarModule.GlobalProgressLabel = allParts(partIdx).Label
 
-                Await ProcessPptxXmlPart(allParts(partIdx).FilePath, targetLanguage, mode, allParts(partIdx).Label)
+                If Not Await ProcessPptxXmlPart(allParts(partIdx).FilePath, targetLanguage, mode, allParts(partIdx).Label) Then
+                    ProgressBarModule.GlobalProgressMax = savedProgressMax
+                    ProgressBarModule.GlobalProgressValue = savedProgressValue
+                    Return False
+                End If
             Next
 
             ' Restore progress for the outer file loop

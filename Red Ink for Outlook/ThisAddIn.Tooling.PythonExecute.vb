@@ -95,7 +95,18 @@ Partial Public Class ThisAddIn
     End Function
 
     Private Function ResolvePythonInputFile(rel As String) As Agents.RedInkPythonAgentInputFile
-        Dim staged As AutoPilotAttachmentInfo = StageWorkspaceFile(rel)
+        Dim staged As AutoPilotAttachmentInfo = Nothing
+        If _chatAgentWorkspace IsNot Nothing Then
+            ' When the workspace IS staging, prefer the registered attachment for a mapped
+            ' name. Staging it again would assign a second identity to the same bytes.
+            Dim mapped As System.String = Global.SharedLibrary.Agents.PathPolicy.ResolveStagedReadName(_chatAgentWorkspace.RootPath, rel)
+            If Not System.String.Equals(mapped, rel, System.StringComparison.OrdinalIgnoreCase) Then staged = FindAttachment(rel)
+            Try
+                If staged Is Nothing Then staged = StageWorkspaceFile(rel)
+            Catch ex As System.IO.PathTooLongException
+                ToolingFileLogger.LogStep("Checking registered attachment names after the workspace path exceeded the host limit.")
+            End Try
+        End If
         If staged Is Nothing Then
             staged = FindAttachment(rel)
         End If
@@ -206,13 +217,9 @@ Partial Public Class ThisAddIn
         If _chatAgentActive OrElse _apActive Then
             Try
                 Dim tempDir As String = EnsureChatAgentTempDir()
-                Dim destPath As String = System.IO.Path.Combine(tempDir, fileName)
-                Dim counter As Integer = 1
-                While System.IO.File.Exists(destPath)
-                    destPath = System.IO.Path.Combine(tempDir,
-                        System.IO.Path.GetFileNameWithoutExtension(fileName) & $"_{counter}" & System.IO.Path.GetExtension(fileName))
-                    counter += 1
-                End While
+                Dim logicalName As System.String = fileName
+                Dim occupied As New System.Collections.Generic.HashSet(Of System.String)(GetAllAvailableFileNames(), System.StringComparer.OrdinalIgnoreCase)
+                Dim destPath As System.String = Global.SharedLibrary.Agents.FilePathBudget.UniqueCopyPath(tempDir, fileName, logicalName, Global.SharedLibrary.Agents.FilePathBudget.ToolWorkingReserve, occupied)
                 ' Copy the produced file into the per-session temp dir and REGISTER it so it becomes
                 ' usable by future calls (read_attachment, list_attachments, workspace save) and appears
                 ' as a clickable session chip in the browser. Registration keeps the file inside the
@@ -220,7 +227,7 @@ Partial Public Class ThisAddIn
                 ' still delivers it to Desktop\Inky\<timestamp>\. IsToolOutput distinguishes produced
                 ' artifacts from user uploads.
                 System.IO.File.Copy(output.FullPath, destPath, overwrite:=False)
-                RegisterSessionFile(destPath, "Produced by python_execute", isToolOutput:=True)
+                RegisterSessionFile(destPath, "Produced by python_execute", isToolOutput:=True, logicalFileName:=logicalName)
                 Return destPath
             Catch ex As Exception
                 ToolingFileLogger.LogWarn("Failed to publish python_execute output to the session.", ex:=ex)

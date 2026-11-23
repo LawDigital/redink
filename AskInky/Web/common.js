@@ -1,4 +1,4 @@
-/* Part of Red Ink (Ask Inky). Copyright (c) LawDigital Ltd., Switzerland.
+/* Part of Red Ink (Ask Inky). Copyright (c) LawDigital AG, Switzerland.
  * File: common.js
  * Purpose: Embedded desktop web user interface behavior.
  * License: Red Ink License; third-party attribution in embedded LICENSE.txt.

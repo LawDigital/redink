@@ -145,9 +145,7 @@ Partial Public Class ThisAddIn
         ' No private per-person output or future reply is included in this immutable seed.
         For Each doc In operation.Documents
             Dim source = ScanOperationFile(root, doc.RelativePath)
-            Dim dest = System.IO.Path.Combine(filesDir, ScanRetainedFileName(operation, doc))
-            If Not IsPathContained(dest, filesDir) Then Throw New System.IO.InvalidDataException("Unsafe retained scan filename.")
-            System.IO.File.Copy(source, dest, True)
+            Dim dest = StoreRetainedFile(filesDir, ScanRetainedFileName(operation, doc), source)
             Using stream = System.IO.File.OpenRead(dest)
                 Using sha = System.Security.Cryptography.SHA256.Create()
                     Dim actual = System.BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant()

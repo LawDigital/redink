@@ -162,9 +162,11 @@ Partial Public Class ThisAddIn
 
         ''' <summary>Filenames stored in the attachment directory (original input files).</summary>
         Public Property AttachmentFiles As New List(Of String)()
+        Public Property AttachmentFileNames As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.OrdinalIgnoreCase)
 
         ''' <summary>Filenames stored in the workspace directory (persisted across executions).</summary>
         Public Property WorkspaceFiles As New List(Of String)()
+        Public Property WorkspaceFileNames As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.OrdinalIgnoreCase)
 
         ''' <summary>UTC timestamp when the task was created.</summary>
         Public Property CreatedUtc As DateTime = DateTime.UtcNow
@@ -322,6 +324,8 @@ Partial Public Class ThisAddIn
         If task.AttachmentFiles Is Nothing Then task.AttachmentFiles = New List(Of String)()
         If task.WorkspaceFiles Is Nothing Then task.WorkspaceFiles = New List(Of String)()
 
+        If task.AttachmentFileNames Is Nothing Then task.AttachmentFileNames = New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.OrdinalIgnoreCase)
+        If task.WorkspaceFileNames Is Nothing Then task.WorkspaceFileNames = New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.OrdinalIgnoreCase)
         If String.IsNullOrWhiteSpace(task.Status) Then task.Status = "active"
         If String.IsNullOrWhiteSpace(task.Subject) Then task.Subject = "Scheduled Task Result"
 
@@ -406,6 +410,14 @@ Partial Public Class ThisAddIn
             Dim schedule = ReadScheduleFile(failClosed:=True)
             Dim idx = schedule.Tasks.FindIndex(Function(t) t.Id.Equals(updated.Id, StringComparison.OrdinalIgnoreCase))
             If idx < 0 Then Return False
+            ' File stores update these mappings under the same gate while a scheduled run
+            ' holds an older task object. Dashboard and status updates must preserve them.
+            updated.AttachmentFileNames = schedule.Tasks(idx).AttachmentFileNames
+            updated.WorkspaceFileNames = schedule.Tasks(idx).WorkspaceFileNames
+            If updated.WorkspaceFileNames.Count > 0 Then SyncWorkspaceFileList(updated)
+            For Each name In schedule.Tasks(idx).AttachmentFiles
+                If updated.AttachmentFileNames.ContainsValue(name) AndAlso Not updated.AttachmentFiles.Contains(name, System.StringComparer.OrdinalIgnoreCase) Then updated.AttachmentFiles.Add(name)
+            Next
             schedule.Tasks(idx) = updated
             WriteScheduleFile(schedule)
             ApDashboardLog($"📅 Scheduler: Updated task {updated.Id.Substring(0, 8)}...", "info")
@@ -443,7 +455,7 @@ Partial Public Class ThisAddIn
     End Function
 
     ''' <summary>Stores an attachment file for a task from the current AutoPilot temp directory.</summary>
-    Friend Function SchedulerStoreAttachment(taskId As String, sourceFilePath As String) As Boolean
+    Friend Function SchedulerStoreAttachment(taskId As String, sourceFilePath As String, Optional logicalName As System.String = Nothing) As Boolean
         SyncLock _apScheduleFileGate
             Try
                 Dim schedule As ScheduleFile = ReadScheduleFile(failClosed:=True)
@@ -457,8 +469,10 @@ Partial Public Class ThisAddIn
                 Dim fullDir As String = Path.Combine(Path.GetDirectoryName(GetScheduleFilePath()), task.AttachmentDir)
                 If Not Directory.Exists(fullDir) Then Directory.CreateDirectory(fullDir)
 
-                Dim destName As String = Path.GetFileName(sourceFilePath)
-                Dim destPath As String = Path.Combine(fullDir, destName)
+                Dim destName As System.String = If(System.String.IsNullOrWhiteSpace(logicalName), System.IO.Path.GetFileName(sourceFilePath), logicalName)
+                Dim priorNameCount As System.Int32 = task.AttachmentFileNames.Count
+                Dim destPath As System.String = Global.SharedLibrary.Agents.FilePathBudget.PersistentCopyPath(fullDir, destName, task.AttachmentFileNames)
+                If task.AttachmentFileNames.Count <> priorNameCount Then WriteScheduleFile(schedule)
                 File.Copy(sourceFilePath, destPath, overwrite:=True)
 
                 If Not task.AttachmentFiles.Contains(destName, StringComparer.OrdinalIgnoreCase) Then
@@ -490,8 +504,13 @@ Partial Public Class ThisAddIn
                 Dim wsDir As String = GetTaskWorkspaceDir(taskId)
                 If Not Directory.Exists(wsDir) Then Directory.CreateDirectory(wsDir)
 
-                Dim destName As String = Path.GetFileName(sourceFilePath)
-                Dim destPath As String = Path.Combine(wsDir, destName)
+                Dim destName As System.String = System.IO.Path.GetFileName(sourceFilePath)
+                If System.String.Equals(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(sourceFilePath)), System.IO.Path.GetFullPath(wsDir), System.StringComparison.OrdinalIgnoreCase) Then
+                    destName = ScheduledLogicalName(sourceFilePath, task.WorkspaceFileNames)
+                End If
+                Dim priorNameCount As System.Int32 = task.WorkspaceFileNames.Count
+                Dim destPath As System.String = Global.SharedLibrary.Agents.FilePathBudget.PersistentCopyPath(wsDir, destName, task.WorkspaceFileNames)
+                If task.WorkspaceFileNames.Count <> priorNameCount Then WriteScheduleFile(schedule)
                 Dim newFileSize As Long = New FileInfo(sourceFilePath).Length
 
                 Dim sourceFullPath As String = Path.GetFullPath(sourceFilePath)
@@ -580,6 +599,13 @@ Partial Public Class ThisAddIn
         End SyncLock
     End Sub
 
+    Private Shared Function ScheduledLogicalName(filePath As System.String, names As System.Collections.Generic.Dictionary(Of System.String, System.String)) As System.String
+        Dim leaf As System.String = System.IO.Path.GetFileName(filePath)
+        Dim original As System.String = Nothing
+        If names IsNot Nothing AndAlso names.TryGetValue(leaf, original) Then Return original
+        Return leaf
+    End Function
+
     ''' <summary>
     ''' Synchronizes the task's WorkspaceFiles list with what is actually on disk.
     ''' Removes stale entries and adds any files found on disk but not in the list.
@@ -594,7 +620,7 @@ Partial Public Class ThisAddIn
         End If
 
         Dim onDisk As New HashSet(Of String)(
-            Directory.GetFiles(wsDir).Select(Function(f) Path.GetFileName(f)),
+            Directory.GetFiles(wsDir).Select(Function(f) ScheduledLogicalName(f, task.WorkspaceFileNames)),
             StringComparer.OrdinalIgnoreCase)
 
         ' Remove entries that no longer exist on disk
@@ -984,7 +1010,7 @@ Partial Public Class ThisAddIn
             _lastCompletedToolResponses = New List(Of ToolResponse)()
 
             ' Create isolated temp directory
-            tempDir = Path.Combine(Path.GetTempPath(), AP_TempPrefix & "sched_" & Guid.NewGuid().ToString("N"))
+            tempDir = Path.Combine(Global.SharedLibrary.Agents.FilePathBudget.TemporaryWorkingRoot(AP_TempPrefix & "sched_"), AP_TempPrefix & "sched_" & Guid.NewGuid().ToString("N"))
             Directory.CreateDirectory(tempDir)
 
             ActivateScheduledTaskWorkspace(task.Id)
@@ -998,11 +1024,11 @@ Partial Public Class ThisAddIn
                 If Directory.Exists(fullAttDir) Then
                     ' Only load files directly in the task dir (not workspace subdir)
                     For Each filePath In Directory.GetFiles(fullAttDir)
-                        Dim destPath = Path.Combine(tempDir, Path.GetFileName(filePath))
-                        File.Copy(filePath, destPath, overwrite:=True)
-                        inputFileNames.Add(Path.GetFileName(filePath))
+                        Dim logicalName As System.String = ScheduledLogicalName(filePath, task.AttachmentFileNames)
+                        Dim destPath As System.String = AllocateAttachmentCopyPath(tempDir, logicalName, inputFileNames)
+                        File.Copy(filePath, destPath, overwrite:=False)
                         attachments.Add(New AutoPilotAttachmentInfo() With {
-                            .OriginalFileName = Path.GetFileName(filePath),
+                            .OriginalFileName = logicalName,
                             .TempFilePath = destPath,
                             .Extension = Path.GetExtension(filePath).ToLowerInvariant(),
                             .SizeBytes = New FileInfo(destPath).Length,
@@ -1015,17 +1041,18 @@ Partial Public Class ThisAddIn
 
             ' ── Load workspace files into temp dir ──
             Dim workspaceFileNames As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+            Dim allNames As New System.Collections.Generic.HashSet(Of System.String)(inputFileNames, System.StringComparer.OrdinalIgnoreCase)
             Dim wsDir = GetTaskWorkspaceDir(task.Id)
             If Directory.Exists(wsDir) Then
                 For Each filePath In Directory.GetFiles(wsDir)
-                    Dim fileName = Path.GetFileName(filePath)
+                    Dim fileName = ScheduledLogicalName(filePath, task.WorkspaceFileNames)
                     ' Avoid collision with input files — workspace files get a prefix
                     Dim destName = fileName
                     If inputFileNames.Contains(fileName) Then
                         destName = "ws_" & fileName
                     End If
-                    Dim destPath = Path.Combine(tempDir, destName)
-                    File.Copy(filePath, destPath, overwrite:=True)
+                    Dim destPath As System.String = AllocateAttachmentCopyPath(tempDir, destName, allNames)
+                    File.Copy(filePath, destPath, overwrite:=False)
                     workspaceFileNames.Add(destName)
                     attachments.Add(New AutoPilotAttachmentInfo() With {
                         .OriginalFileName = destName,
@@ -2298,11 +2325,12 @@ Partial Public Class ThisAddIn
             ChatAgentClearFiles()
 
             If String.IsNullOrWhiteSpace(_chatAgentTempDir) OrElse Not Directory.Exists(_chatAgentTempDir) Then
-                _chatAgentTempDir = Path.Combine(Path.GetTempPath(), CA_TempPrefix & Guid.NewGuid().ToString("N"))
+                _chatAgentTempDir = Path.Combine(Global.SharedLibrary.Agents.FilePathBudget.TemporaryWorkingRoot(CA_TempPrefix), CA_TempPrefix & Guid.NewGuid().ToString("N"))
                 Directory.CreateDirectory(_chatAgentTempDir)
             End If
 
             Dim preparedFiles As New List(Of AutoPilotAttachmentInfo)()
+            Dim preparedNames As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
             Dim inputFileNames As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
 
             If Not String.IsNullOrWhiteSpace(task.AttachmentDir) Then
@@ -2311,8 +2339,8 @@ Partial Public Class ThisAddIn
                     For Each filePath In Directory.GetFiles(fullAttDir)
                         Dim att = CopyScheduledTaskFileToChatAgentSession(
                             filePath,
-                            Path.GetFileName(filePath),
-                            "OK (scheduled input)")
+                            ScheduledLogicalName(filePath, task.AttachmentFileNames),
+                            "OK (scheduled input)", preparedNames)
                         If att IsNot Nothing Then
                             preparedFiles.Add(att)
                             inputFileNames.Add(att.OriginalFileName)
@@ -2324,7 +2352,7 @@ Partial Public Class ThisAddIn
             Dim wsDir = GetTaskWorkspaceDir(task.Id)
             If Directory.Exists(wsDir) Then
                 For Each filePath In Directory.GetFiles(wsDir)
-                    Dim fileName = Path.GetFileName(filePath)
+                    Dim fileName = ScheduledLogicalName(filePath, task.WorkspaceFileNames)
                     Dim desiredName = fileName
 
                     If inputFileNames.Contains(desiredName) Then
@@ -2334,7 +2362,7 @@ Partial Public Class ThisAddIn
                     Dim att = CopyScheduledTaskFileToChatAgentSession(
                         filePath,
                         desiredName,
-                        "OK (scheduled workspace)")
+                        "OK (scheduled workspace)", preparedNames)
                     If att IsNot Nothing Then
                         preparedFiles.Add(att)
                     End If
@@ -2422,7 +2450,8 @@ Partial Public Class ThisAddIn
 
     Private Function CopyScheduledTaskFileToChatAgentSession(sourceFilePath As String,
                                                              desiredFileName As String,
-                                                             statusMessage As String) As AutoPilotAttachmentInfo
+                                                             statusMessage As String,
+                                                             occupied As System.Collections.Generic.ISet(Of System.String)) As AutoPilotAttachmentInfo
         If String.IsNullOrWhiteSpace(sourceFilePath) OrElse Not File.Exists(sourceFilePath) Then Return Nothing
 
         Dim destName = desiredFileName
@@ -2430,21 +2459,13 @@ Partial Public Class ThisAddIn
             destName = Path.GetFileName(sourceFilePath)
         End If
 
-        Dim destPath = Path.Combine(_chatAgentTempDir, destName)
-        Dim counter = 1
-
-        While File.Exists(destPath)
-            destPath = Path.Combine(
-                _chatAgentTempDir,
-                Path.GetFileNameWithoutExtension(destName) & $"_{counter}" & Path.GetExtension(destName))
-            counter += 1
-        End While
-
-        File.Copy(sourceFilePath, destPath, overwrite:=True)
+        Dim logicalName As System.String = destName
+        Dim destPath As System.String = AllocateAttachmentCopyPath(_chatAgentTempDir, logicalName, occupied)
+        System.IO.File.Copy(sourceFilePath, destPath, overwrite:=False)
 
         Dim fi = New FileInfo(destPath)
         Return New AutoPilotAttachmentInfo() With {
-            .OriginalFileName = Path.GetFileName(destPath),
+            .OriginalFileName = logicalName,
             .TempFilePath = destPath,
             .SourcePath = sourceFilePath,
             .Extension = fi.Extension.ToLowerInvariant(),

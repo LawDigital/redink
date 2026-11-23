@@ -387,7 +387,7 @@ Namespace ScanInbox
         End Function
 
         Public Shared Sub AtomicWrite(path As System.String, json As System.String)
-            Dim temp = path & "." & System.Guid.NewGuid().ToString("N") & ".tmp"
+            Dim temp = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path)), System.IO.Path.GetFileName(path) & "." & System.Guid.NewGuid().ToString("N") & ".tmp", reservedSuffixLength:=0)
             Try
                 Using stream As New System.IO.FileStream(temp, System.IO.FileMode.CreateNew, System.IO.FileAccess.Write, System.IO.FileShare.None)
                     Dim bytes = New System.Text.UTF8Encoding(False).GetBytes(json)

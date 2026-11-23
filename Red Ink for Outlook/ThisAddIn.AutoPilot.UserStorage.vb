@@ -420,18 +420,14 @@ Partial Public Class ThisAddIn
             If safePath Is Nothing OrElse Not File.Exists(safePath) Then Return Nothing
             If _apCurrentTempDir Is Nothing OrElse Not Directory.Exists(_apCurrentTempDir) Then Return Nothing
 
-            Dim destPath = Path.Combine(_apCurrentTempDir, Path.GetFileName(safePath))
-            Dim counter = 1
-            While File.Exists(destPath)
-                destPath = Path.Combine(_apCurrentTempDir,
-                    Path.GetFileNameWithoutExtension(fileName) & $"_{counter}" & Path.GetExtension(fileName))
-                counter += 1
-            End While
+            Dim logicalName As System.String = System.IO.Path.GetFileName(safePath)
+            Dim occupied As New System.Collections.Generic.HashSet(Of System.String)(GetAllAvailableFileNames(), System.StringComparer.OrdinalIgnoreCase)
+            Dim destPath As System.String = AllocateAttachmentCopyPath(_apCurrentTempDir, logicalName, occupied)
 
             File.Copy(safePath, destPath)
 
             Dim info As New AutoPilotAttachmentInfo() With {
-                .OriginalFileName = Path.GetFileName(destPath),
+                .OriginalFileName = logicalName,
                 .TempFilePath = destPath,
                 .Extension = Path.GetExtension(destPath).ToLowerInvariant(),
                 .SizeBytes = New FileInfo(destPath).Length,

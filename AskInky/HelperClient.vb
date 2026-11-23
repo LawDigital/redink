@@ -1,5 +1,5 @@
 ' Part of "Red Ink" (Ask Inky)
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' Copyright (c) LawDigital AG, Switzerland. All rights reserved. For license to use see https://redink.ai.
 ' =============================================================================
 ' File: HelperClient.vb
 ' Purpose: Helper transport, authentication and AI model selection.
@@ -32,8 +32,8 @@ Public NotInheritable Class HelperModelOption
 End Class
 
 Public NotInheritable Class HelperClient
-    Private Shared ReadOnly Http As New System.Net.Http.HttpClient(New System.Net.Http.HttpClientHandler With {.AllowAutoRedirect = False, .UseCookies = False}) With {.Timeout = System.TimeSpan.FromSeconds(120)}
-    Private Shared ReadOnly SessionId As String = System.Guid.NewGuid().ToString("N")
+    Friend Shared ReadOnly Http As New System.Net.Http.HttpClient(New System.Net.Http.HttpClientHandler With {.AllowAutoRedirect = False, .UseCookies = False}) With {.Timeout = System.TimeSpan.FromSeconds(120)}
+    Friend Shared ReadOnly SessionId As String = System.Guid.NewGuid().ToString("N")
     Friend Shared Property LastRequest As String = ""
     Friend Shared Property LastResponse As String = ""
 
@@ -56,7 +56,7 @@ Public NotInheritable Class HelperClient
         Return New System.Uri(NormalizeHelperUrl(value)).GetLeftPart(System.UriPartial.Authority)
     End Function
 
-    Private Shared Function CreateRequest(config As ClientConfig, method As System.Net.Http.HttpMethod, path As String) As System.Net.Http.HttpRequestMessage
+    Friend Shared Function CreateRequest(config As ClientConfig, method As System.Net.Http.HttpMethod, path As String) As System.Net.Http.HttpRequestMessage
         Dim root As String = NormalizeHelperUrl(config.HelperUrl)
         Dim req As New System.Net.Http.HttpRequestMessage(method, New System.Uri(New System.Uri(root & "/"), path))
         Try
@@ -111,7 +111,7 @@ Public NotInheritable Class HelperClient
         Return ""
     End Function
 
-    Private Shared Function IsTrue(root As System.Text.Json.JsonElement, name As String) As Boolean
+    Friend Shared Function IsTrue(root As System.Text.Json.JsonElement, name As String) As Boolean
         Dim value As System.Text.Json.JsonElement
         Return root.ValueKind = System.Text.Json.JsonValueKind.Object AndAlso root.TryGetProperty(name, value) AndAlso value.ValueKind = System.Text.Json.JsonValueKind.True
     End Function
@@ -120,7 +120,7 @@ Public NotInheritable Class HelperClient
         Return New System.Uri(NormalizeHelperUrl(config.HelperUrl)).IsLoopback
     End Function
 
-    Private Shared Function StatusFailure(status As System.Net.HttpStatusCode, config As ClientConfig) As HelperFailure
+    Friend Shared Function StatusFailure(status As System.Net.HttpStatusCode, config As ClientConfig) As HelperFailure
         Dim key As String = "desktop.httpError"
         Select Case CInt(status)
             Case 401, 403 : key = If(IsLoopbackHelper(config), "desktop.localServerDenied", "desktop.authRequired")

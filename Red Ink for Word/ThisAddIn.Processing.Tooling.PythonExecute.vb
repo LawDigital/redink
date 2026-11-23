@@ -181,6 +181,7 @@ Partial Public Class ThisAddIn
 
         Try
             Dim targetRoot As String = ""
+            Dim sessionTarget As System.Boolean = False
 
             Try
                 Dim workspace As SharedLibrary.Agents.WorkspaceState = SharedLibrary.Agents.WorkspaceTools.Active
@@ -200,6 +201,7 @@ Partial Public Class ThisAddIn
                    System.IO.Directory.Exists(stagingRoot) Then
 
                     targetRoot = System.IO.Path.GetFullPath(stagingRoot)
+                    sessionTarget = True
                 End If
             End If
 
@@ -212,7 +214,16 @@ Partial Public Class ThisAddIn
             ' selected writable root. Without a workspace this is the per-run staging area;
             ' WordCollectAndCopyOutputs later publishes user deliverables atomically to
             ' Desktop\Inky\<timestamp> before staging cleanup.
-            Dim targetPath As String = System.IO.Path.GetFullPath(System.IO.Path.Combine(targetRoot, subPath))
+            Dim targetPath As System.String
+            If sessionTarget Then
+                ' PublishedSubPath has already passed the core component/containment checks.
+                Dim parent As System.String = System.IO.Path.GetFullPath(System.IO.Path.Combine(targetRoot, If(System.IO.Path.GetDirectoryName(subPath), "")))
+                If Not parent.Equals(targetRoot, System.StringComparison.OrdinalIgnoreCase) AndAlso
+                   Not parent.StartsWith(targetRoot.TrimEnd(System.IO.Path.DirectorySeparatorChar) & System.IO.Path.DirectorySeparatorChar, System.StringComparison.OrdinalIgnoreCase) Then Throw New System.IO.InvalidDataException("Invalid published output directory.")
+                targetPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(parent, System.IO.Path.GetFileName(subPath))
+            Else
+                targetPath = System.IO.Path.GetFullPath(System.IO.Path.Combine(targetRoot, subPath))
+            End If
             Dim containmentPrefix As String = targetRoot.TrimEnd(System.IO.Path.DirectorySeparatorChar) & System.IO.Path.DirectorySeparatorChar
             If Not targetPath.Equals(targetRoot, StringComparison.OrdinalIgnoreCase) AndAlso
                Not targetPath.StartsWith(containmentPrefix, StringComparison.OrdinalIgnoreCase) Then

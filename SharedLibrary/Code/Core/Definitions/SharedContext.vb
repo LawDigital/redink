@@ -184,6 +184,16 @@ Namespace SharedLibrary
 
             Property SP_Translate_Multi_Source As String
             Property SP_Translate_Document As String
+            Property SP_Translate_Style_Close As String
+            Property SP_Translate_Style_Natural As String
+            Property SP_Translate_Style_Adapt As String
+            Property SP_Translate_Length_Flexible As String
+            Property SP_Translate_Length_Similar As String
+            Property SP_Translate_Length_Fit As String
+            Property SP_Translate_Pdf_Line As String
+            Property SP_Translate_Pdf_Group As String
+            Property SP_Translate_Pdf_Retry As String
+            Property SP_Translate_Office_Retry As String
             Property SP_Correct As String
 
             Property SP_Correct_Document As String
@@ -614,6 +624,16 @@ Namespace SharedLibrary
         Public Property SP_Translate_Multi As String Implements ISharedContext.SP_Translate_Multi
         Public Property SP_Translate_Multi_Source As String Implements ISharedContext.SP_Translate_Multi_Source
         Public Property SP_Translate_Document As String Implements ISharedContext.SP_Translate_Document
+        Public Property SP_Translate_Style_Close As String Implements ISharedContext.SP_Translate_Style_Close
+        Public Property SP_Translate_Style_Natural As String Implements ISharedContext.SP_Translate_Style_Natural
+        Public Property SP_Translate_Style_Adapt As String Implements ISharedContext.SP_Translate_Style_Adapt
+        Public Property SP_Translate_Length_Flexible As String Implements ISharedContext.SP_Translate_Length_Flexible
+        Public Property SP_Translate_Length_Similar As String Implements ISharedContext.SP_Translate_Length_Similar
+        Public Property SP_Translate_Length_Fit As String Implements ISharedContext.SP_Translate_Length_Fit
+        Public Property SP_Translate_Pdf_Line As String Implements ISharedContext.SP_Translate_Pdf_Line
+        Public Property SP_Translate_Pdf_Group As String Implements ISharedContext.SP_Translate_Pdf_Group
+        Public Property SP_Translate_Pdf_Retry As String Implements ISharedContext.SP_Translate_Pdf_Retry
+        Public Property SP_Translate_Office_Retry As String Implements ISharedContext.SP_Translate_Office_Retry
         Public Property SP_Correct As String Implements ISharedContext.SP_Correct
         Public Property SP_Correct_Document As String Implements ISharedContext.SP_Correct_Document
         Public Property SP_Improve As String Implements ISharedContext.SP_Improve

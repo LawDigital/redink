@@ -1,5 +1,5 @@
 ' Part of "Red Ink" (Ask Inky)
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' Copyright (c) LawDigital AG, Switzerland. All rights reserved. For license to use see https://redink.ai.
 ' =============================================================================
 ' File: ScreenRegionPicker.vb
 ' Purpose: One-shot, user-initiated multi-monitor screenshot rectangle selection.

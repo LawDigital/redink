@@ -1209,13 +1209,14 @@ Partial Public Class ThisAddIn
                 outputFilename = Path.GetFileNameWithoutExtension(outputFilename) & ".mp3"
             End If
 
-            Dim outputPath = Path.Combine(_apCurrentTempDir, outputFilename)
+            Dim outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputFilename)
             Dim counter = 1
             While File.Exists(outputPath)
                 Dim baseName = Path.GetFileNameWithoutExtension(outputFilename)
-                outputPath = Path.Combine(_apCurrentTempDir, baseName & $"_{counter}.mp3")
+                outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, baseName & $"_{counter}.mp3")
                 counter += 1
             End While
+            outputFilename = System.IO.Path.GetFileName(outputPath)
 
             ' Select the best engine for this request (considers language + preference).
             AB_SelectBestEngine(enginePref, language)

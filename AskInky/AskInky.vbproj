@@ -1,8 +1,15 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
+    <!-- P18 W367: UI Automation (System.Windows.Automation) for selection capture. -->
+    <UseWPF>true</UseWPF>
+    <Version>2.0.4</Version>
+    <FileVersion>2.0.4.0</FileVersion>
+    <Company>LawDigital AG</Company>
+    <Product>Ask Inky (Red Ink)</Product>
+    <Copyright>Copyright (c) LawDigital AG, Switzerland</Copyright>
     <RootNamespace>AskInky</RootNamespace>
     <StartupObject>AskInky.Program</StartupObject>
     <OptionStrict>On</OptionStrict>
@@ -15,7 +22,12 @@
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <PublishTrimmed>false</PublishTrimmed>
     <DebugType>embedded</DebugType>
+    <!-- W382: build scripts, installer source and build outputs live in this folder; never compiled or published. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);dist\**;.tools\**;.wix\**;build\**;Setup\**</DefaultItemExcludes>
   </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="AskInky.SelfTest" />
+  </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
     <PackageReference Include="Markdig" Version="0.41.3" />
@@ -23,6 +35,8 @@
   <ItemGroup>
     <EmbeddedResource Include="LICENSE.txt" LogicalName="AskInky.LICENSE.txt" />
     <EmbeddedResource Include="Assets\Red_Ink_Logo.png" LogicalName="AskInky.Assets.Red_Ink_Logo.png" />
+    <EmbeddedResource Include="Assets\Red_Ink_Logo_Large.png" LogicalName="AskInky.Assets.Red_Ink_Logo_Large.png" />
+    <EmbeddedResource Include="Web\redink-logo.png" LogicalName="AskInky.Web.redink-logo.png" WithCulture="false" />
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="Web\I18n\de.json" LogicalName="AskInky.Web.I18n.de.json" WithCulture="false" />
@@ -38,32 +52,7 @@
     <EmbeddedResource Include="Web\settings.html" LogicalName="AskInky.Web.settings.html" WithCulture="false" />
     <EmbeddedResource Include="Web\settings.js" LogicalName="AskInky.Web.settings.js" WithCulture="false" />
   </ItemGroup>
-    <!-- Authenticode signing of the published portable EXE -->
-    <PropertyGroup>
-        <AskInkySignTool>C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe</AskInkySignTool>
-        <AskInkyCertificateThumbprint>1EF41035D3AC9F8A9A678B845DA2F69C765D00E0</AskInkyCertificateThumbprint>
-    </PropertyGroup>
-
-    <Target Name="SignAskInky"
-            AfterTargets="Publish"
-            Condition="'$(Configuration)' == 'Release' and '$(PublishSingleFile)' == 'true' and '$(RuntimeIdentifier)' == 'win-x64'">
-
-        <PropertyGroup>
-            <AskInkyPublishedExe>$(PublishDir)AskInky.exe</AskInkyPublishedExe>
-        </PropertyGroup>
-
-        <Error Condition="!Exists('$(AskInkySignTool)')"
-               Text="Ask Inky: SignTool.exe not found." />
-
-        <Error Condition="!Exists('$(AskInkyPublishedExe)')"
-               Text="Ask Inky: Published EXE not found." />
-
-        <Exec Command="&quot;$(AskInkySignTool)&quot; sign /sha1 $(AskInkyCertificateThumbprint) /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /d &quot;Ask Inky&quot; /du &quot;https://redink.ai&quot; &quot;$(AskInkyPublishedExe)&quot;" />
-
-        <Exec Command="&quot;$(AskInkySignTool)&quot; verify /pa /tw /v &quot;$(AskInkyPublishedExe)&quot;" />
-
-        <Message Importance="high"
-                 Text="Ask Inky: Authenticode signature verified successfully." />
-
-    </Target>
+    <!-- P18 W367: no certificate thumbprint in the project. Signing is done after publish by
+         build\sign-askinky.ps1 (or Alles-signieren on the release mirror), which selects the
+         VISCHER AG code-signing certificate automatically. Unsigned builds are TEST builds. -->
 </Project>

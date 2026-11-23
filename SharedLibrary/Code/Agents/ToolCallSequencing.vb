@@ -451,6 +451,7 @@ Namespace Agents
             Public Property RegisteredUtc As DateTime
             Public Property VerifiedContentSha256 As System.String = System.String.Empty
             Public Property PreservedRevisionPath As System.String = System.String.Empty
+            Public Property CachedOriginalFileName As System.String = System.String.Empty
             Public Property VerifiedAfterFailureSequence As System.Int64
             ' Trusted host/tool evidence about what happened to this physical artifact.
             ' "materialized" is added when an existing file is registered. Additional
@@ -1693,6 +1694,78 @@ Namespace Agents
                 ' Keep the original expected_artifacts, including all effect requirements, intact.
                 Return True
             End Function
+
+            ' Called by producers with a known single output. Resolve only an unambiguous
+            ' slot and check the source and output format before assigning an identity.
+            Public Sub BindSingleFileProducerToExpectedSlot(
+                arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+                toolCallId As System.String, sourceName As System.String, outputExtension As System.String,
+                allowUnnamedSlot As System.Boolean)
+
+                If arguments Is Nothing Then Return
+                Dim state As System.String = GetArgumentText(arguments, "artifact_state")
+                Dim intent As System.String = GetArgumentText(arguments, "artifact_delivery_intent")
+                If state <> "" AndAlso Not System.String.Equals(state, "final", System.StringComparison.OrdinalIgnoreCase) Then Return
+                If intent <> "" AndAlso Not System.String.Equals(intent, "deliver_to_user", System.StringComparison.OrdinalIgnoreCase) AndAlso
+                    Not System.String.Equals(intent, "deliver_and_persist", System.StringComparison.OrdinalIgnoreCase) Then Return
+
+                If Not ExpectedDeliverableContractLocked AndAlso Not OutputContractPinned Then Return
+                If ExpectedDeliverableSlots Is Nothing Then Return
+
+                If ArtifactDelivery.HasExplicitArtifactIdentityArguments(arguments) Then
+                    Dim supplied As ExpectedDeliverableSlot = ResolveLockedProducerArtifactSlot(arguments)
+                    ' Catch a transposed pair for two known original inputs. Explicit revisions
+                    ' based on an intermediate file can still name their original final slot.
+                    If supplied IsNot Nothing AndAlso Not System.String.IsNullOrEmpty(supplied.SourceInputName) AndAlso
+                        Not System.String.Equals(supplied.SourceInputName, sourceName, System.StringComparison.OrdinalIgnoreCase) AndAlso
+                        ExpectedDeliverableSlots.Any(Function(item) item IsNot Nothing AndAlso Not System.String.IsNullOrEmpty(item.SourceInputName) AndAlso
+                            System.String.Equals(item.SourceInputName, sourceName, System.StringComparison.OrdinalIgnoreCase)) Then
+                        Throw New System.ArgumentException("The selected output slot belongs to '" & supplied.SourceInputName & "'. Select the output slot for '" & sourceName & "'.")
+                    End If
+                    Return
+                End If
+
+                ' all_inputs and selected_inputs carry the host's exact staged leaf on each slot.
+                ' Search the whole contract, including satisfied siblings, so a retry cannot
+                ' accidentally become another source's result or resolve an ambiguous pair.
+                Dim slot As ExpectedDeliverableSlot = Nothing
+                If Not System.String.IsNullOrWhiteSpace(sourceName) Then
+                    For Each candidate As ExpectedDeliverableSlot In ExpectedDeliverableSlots
+                        If candidate Is Nothing OrElse Not System.String.Equals(candidate.SourceInputName, sourceName, System.StringComparison.OrdinalIgnoreCase) Then Continue For
+                        If Not System.String.IsNullOrEmpty(candidate.RequiredFileExtension) AndAlso
+                           Not System.String.Equals(candidate.RequiredFileExtension, outputExtension, System.StringComparison.OrdinalIgnoreCase) Then Continue For
+                        If slot IsNot Nothing Then
+                            ' Preserve the existing single-call rule for the last remaining named output.
+                            If Not allowUnnamedSlot Then Return
+                            slot = ResolveLockedProducerArtifactSlot(arguments)
+                            If slot Is Nothing OrElse System.String.IsNullOrEmpty(slot.SourceInputName) Then Return
+                            Exit For
+                        End If
+                        slot = candidate
+                    Next
+                End If
+                If slot IsNot Nothing Then
+                    If IsExpectedDeliverableSlotSatisfied(slot.LogicalDeliverableId, slot.OutputSlotId) Then Return
+                ElseIf allowUnnamedSlot Then
+                    slot = ResolveLockedProducerArtifactSlot(arguments)
+                End If
+                If slot Is Nothing Then Return
+                If Not System.String.IsNullOrEmpty(slot.RequiredFileExtension) AndAlso
+                    Not System.String.Equals(slot.RequiredFileExtension, outputExtension, System.StringComparison.OrdinalIgnoreCase) Then Return
+                If Not System.String.IsNullOrEmpty(slot.SourceInputName) AndAlso
+                    Not System.String.Equals(slot.SourceInputName, sourceName, System.StringComparison.OrdinalIgnoreCase) Then Return
+
+                arguments("logical_deliverable_id") = slot.LogicalDeliverableId
+                arguments("output_slot_id") = slot.OutputSlotId
+                NormalizeLockedProducerArtifactArguments(arguments, toolCallId)
+            End Sub
+
+            Public Sub BindSingleFileProducerToExpectedSlot(
+                arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
+                toolCallId As System.String, sourceName As System.String, outputExtension As System.String)
+
+                BindSingleFileProducerToExpectedSlot(arguments, toolCallId, sourceName, outputExtension, allowUnnamedSlot:=True)
+            End Sub
 
             Public Sub NormalizeLockedProducerArtifactArguments(
                 arguments As System.Collections.Generic.IDictionary(Of System.String, System.Object),
@@ -5244,6 +5317,20 @@ Namespace Agents
                         GetMissingExpectedDeliverableSlotKeys(runState)
                     Dim missingSummary As System.String =
                         If(missingSlots.Count > 0, System.String.Join(", ", missingSlots), "one or more declared output slots")
+                    Dim changed As New Newtonsoft.Json.Linq.JArray()
+                    If runState IsNot Nothing AndAlso runState.RegisteredDeliverableArtifacts IsNot Nothing Then
+                        For Each item As DeliverableArtifact In runState.RegisteredDeliverableArtifacts
+                            If item Is Nothing OrElse item.LifecycleState <> ArtifactLifecycleState.Final OrElse Not item.IsFinalDeliverable Then Continue For
+                            Dim key As System.String = item.LogicalDeliverableId & "/" & item.OutputSlotId
+                            If missingSlots.Contains(key) AndAlso ArtifactDelivery.HasDifferentVerifiedContent(item) Then
+                                changed.Add(New Newtonsoft.Json.Linq.JObject From {{"slot", key}, {"file", System.IO.Path.GetFileName(item.SessionPath)}})
+                            End If
+                        Next
+                    End If
+                    If changed.Count > 0 Then
+                        missingSummary &= ". These files changed after verification: " & changed.ToString(Newtonsoft.Json.Formatting.None) &
+                            ". Inspect the current content, verify the requested work, then register the current revision for the same logical deliverable and output slot using an authorized producer. Preserve completed edits"
+                    End If
                     Return "REPAIR: The final response was rejected because these expected output slots are not yet satisfied: " &
                            missingSummary & ". Keep the COMPLETE expected_artifacts contract unchanged. Create or correctly bind only the missing final artifacts, then finalize again. Do not shrink, replace, or invent slot identifiers merely to pass finalization."
                 Case RequestedDeliverableNotCreatedCode

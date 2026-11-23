@@ -1,5 +1,5 @@
 ' Part of "Red Ink" (Ask Inky)
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' Copyright (c) LawDigital AG, Switzerland. All rights reserved. For license to use see https://redink.ai.
 ' =============================================================================
 ' File: SettingsForm.vb
 ' Purpose: Ask Inky desktop functionality in the modular Windows client.
@@ -17,11 +17,13 @@ Friend NotInheritable Class SettingsForm
     Private showRegistrationHelp As Boolean
     Private ReadOnly registryManaged As Boolean
     Private ReadOnly initialFeedback As String
+    ' 2.0.4 (DARO UID 577): guided first-run sign-in (only the sign-in steps, then straight to the question window).
+    Private ReadOnly welcomeMode As Boolean
     Private Shared ReadOnly UsedInvites As New System.Collections.Generic.HashSet(Of String)(System.StringComparer.Ordinal)
     Public Property IsRecordingHotkey As Boolean
     Public Property RecordingOcrHotkey As Boolean
 
-    Public Sub New(parent As AssistantContext, config As ClientConfig, Optional needsRegistration As Boolean = False, Optional startupFeedback As String = "", Optional mustSaveCredentials As Boolean = False)
+    Public Sub New(parent As AssistantContext, config As ClientConfig, Optional needsRegistration As Boolean = False, Optional startupFeedback As String = "", Optional mustSaveCredentials As Boolean = False, Optional welcome As Boolean = False)
         MyBase.New("settings.html", "Ask Inky – " & UiStrings.GetText("settings", config.UiLanguage), New System.Drawing.Size(480, 620))
         context = parent
         draft = ConfigStore.Clone(config)
@@ -32,6 +34,7 @@ Friend NotInheritable Class SettingsForm
         ' The link has already been consumed: never let a window close discard
         ' protected credentials that could not yet be saved to config.json.
         pendingCredentialSave = mustSaveCredentials
+        welcomeMode = welcome
         MinimizeBox = False
     End Sub
 
@@ -60,18 +63,18 @@ Friend NotInheritable Class SettingsForm
             ClientLog.Write("settings.apikey.decrypt.failed", ex)
         End Try
         previewLanguage = UiStrings.NormalizeLanguage(draft.UiLanguage)
-        Text = "Ask Inky – " & UiStrings.GetText("settings", previewLanguage)
+        Text = "Ask Inky – " & UiStrings.GetText(If(welcomeMode, "welcome.windowTitle", "settings"), previewLanguage)
         SendView(New With {.[type] = "settings", .strings = UiStrings.GetBundle(previewLanguage), .bundles = UiStrings.GetAllBundles(),
                            .language = previewLanguage, .darkMode = draft.DarkMode, .fontSize = draft.FontSize,
                            .values = New With {.helperUrl = draft.HelperUrl, .apiKey = key, .apiKeyReadable = keyReadable,
                                .licenseUser = draft.LicenseUser, .language = previewLanguage, .darkMode = draft.DarkMode,
                                .fontSize = draft.FontSize, .temperature = draft.Temperature, .model = draft.Model, .systemPrompt = draft.SystemPrompt,
-                               .showLlmDebug = draft.ShowLlmDebug, .ignoreRegistryHelperLink = draft.IgnoreRegistryHelperLink,
+                               .showLlmDebug = draft.ShowLlmDebug, .enableReplace = draft.EnableReplace, .startWithWindows = If(draft.StartWithWindows.HasValue, draft.StartWithWindows.Value, Autostart.IsEnabled()), .ignoreRegistryHelperLink = draft.IgnoreRegistryHelperLink,
                                .registryManaged = registryManaged, .hotkeyModifiers = draft.HotkeyModifiers, .hotkeyKey = draft.HotkeyKey,
                                .ocrHotkeyModifiers = draft.OcrHotkeyModifiers, .ocrHotkeyKey = draft.OcrHotkeyKey,
                                .registered = Not String.IsNullOrEmpty(draft.UserId) AndAlso Not String.IsNullOrEmpty(draft.DeviceTokenProtected), .userId = draft.UserId},
                            .debugSent = HelperClient.LastRequest, .debugReceived = HelperClient.LastResponse, .feedback = feedback, .failure = failure,
-                           .needsRegistration = showRegistrationHelp})
+                           .needsRegistration = showRegistrationHelp AndAlso Not welcomeMode, .welcome = welcomeMode})
     End Sub
 
     Private Function ReadCandidate(message As System.Text.Json.JsonElement) As ClientConfig
@@ -123,6 +126,8 @@ Friend NotInheritable Class SettingsForm
         result.Model = input.Model.Trim()
         result.SystemPrompt = input.SystemPrompt
         result.ShowLlmDebug = input.ShowLlmDebug
+        result.EnableReplace = input.EnableReplace
+        result.StartWithWindows = input.StartWithWindows
         result.HotkeyModifiers = input.HotkeyModifiers
         result.HotkeyKey = input.HotkeyKey
         result.OcrHotkeyModifiers = input.OcrHotkeyModifiers
@@ -137,7 +142,7 @@ Friend NotInheritable Class SettingsForm
             Dim value As String = HelperClient.TextValue(message, "language")
             If UiStrings.IsSupported(value) Then
                 previewLanguage = UiStrings.NormalizeLanguage(value)
-                Text = "Ask Inky – " & UiStrings.GetText("settings", previewLanguage)
+                Text = "Ask Inky – " & UiStrings.GetText(If(welcomeMode, "welcome.windowTitle", "settings"), previewLanguage)
             End If
             Return
         End If
@@ -172,9 +177,54 @@ Friend NotInheritable Class SettingsForm
             RecordingOcrHotkey = IsRecordingHotkey AndAlso HelperClient.TextValue(message, "target") = "ocr"
             Return
         End If
+        If action = "pairCancel" Then
+            pairing?.Cancel()
+            Return
+        End If
+        If action = "signInOffer" Then
+            Try
+                Dim url As String = HelperClient.NormalizeHelperUrl(HelperClient.TextValue(message, "helperUrl"))
+                ' P18 W367: nothing configured yet -> offer the e-mail sign-in; the e-mail domain finds the server.
+                If HelperModern.IsUnconfigured(url) Then
+                    SendView(New With {.[type] = "signInOffer", .mailPairing = True, .microsoft = False, .discover = True})
+                    Return
+                End If
+                Dim offer As SignInOffer = Await HelperModern.GetSignInOfferAsync(url, Lifetime.Token)
+                SendView(New With {.[type] = "signInOffer", .mailPairing = offer.MailPairing, .microsoft = offer.Microsoft})
+            Catch ex As System.Exception
+                SendView(New With {.[type] = "signInOffer", .mailPairing = False, .microsoft = False})
+            End Try
+            Return
+        End If
         If working Then Return
+        ' P18 W367 2.0.3 (DARO UID 572): find the server from the e-mail address first, then offer Microsoft sign-in
+        ' (if the server supports desktop SSO) before the confirmation mail.
+        If action = "discover" Then
+            working = True
+            SendView(New With {.[type] = "busy", .busy = True})
+            Try
+                Dim email As String = HelperClient.TextValue(message, "email").Trim()
+                If email.Length < 3 OrElse email.Length > 320 OrElse Not email.Contains("@"c) Then Throw New HelperFailure("desktop.emailInvalid")
+                Dim found As String = Await HelperModern.DiscoverHelperAsync(email, Lifetime.Token)
+                If found.Length = 0 Then Throw New HelperFailure("desktop.helperNotFound")
+                SendView(New With {.[type] = "helperDiscovered", .helperUrl = found})
+                Dim offer As SignInOffer = Await HelperModern.GetSignInOfferAsync(found, Lifetime.Token)
+                SendView(New With {.[type] = "signInOffer", .mailPairing = offer.MailPairing, .microsoft = offer.Microsoft})
+            Catch ex As System.Exception
+                ClientLog.Write("settings.discover.failed", ex)
+                SendView(New With {.[type] = "error", .message = HelperClient.Describe(ex, previewLanguage)})
+            Finally
+                working = False
+                SendView(New With {.[type] = "busy", .busy = False})
+            End Try
+            Return
+        End If
         If action = "cancel" Then
             Close()
+            Return
+        End If
+        If action = "pairStart" OrElse action = "microsoft" Then
+            Await SignInAsync(action, message)
             Return
         End If
         If action <> "save" AndAlso action <> "test" AndAlso action <> "register" AndAlso action <> "unregister" Then Return
@@ -190,6 +240,7 @@ Friend NotInheritable Class SettingsForm
             Select Case action
                 Case "save"
                     If Not context.TryCommit(candidate) Then Throw New HelperFailure("desktop.hotkeyConflict")
+                    If candidate.StartWithWindows.HasValue AndAlso Not Autostart.Apply(candidate.StartWithWindows.Value) Then ClientLog.Write("settings.autostart.apply.failed")
                     pendingCredentialSave = False
                     draft = candidate
                     working = False
@@ -219,8 +270,13 @@ Friend NotInheritable Class SettingsForm
                     context.CommitCredentials(draft)
                     pendingCredentialSave = False
                     showRegistrationHelp = False
-                    PublishSettings(UiStrings.GetText(If(isInvite, "settings.registrationSuccess", "settings.configurationLinkApplied"), draft.UiLanguage))
                     SendView(New With {.[type] = "clearInvite"})
+                    If isInvite AndAlso Not String.IsNullOrEmpty(draft.DeviceTokenProtected) Then
+                        CompleteSignIn(draft)
+                    Else
+                        PublishSettings(UiStrings.GetText(If(isInvite, "settings.registrationSuccess", "settings.configurationLinkApplied"), draft.UiLanguage))
+                        SendView(New With {.[type] = "requestOffer"})
+                    End If
                 Case "unregister"
                     candidate.UserId = ""
                     candidate.DeviceTokenProtected = ""
@@ -240,6 +296,101 @@ Friend NotInheritable Class SettingsForm
             End If
             SendView(New With {.[type] = "error", .message = feedback})
         Finally
+            working = False
+            SendView(New With {.[type] = "busy", .busy = False})
+        End Try
+    End Function
+
+    ' P18 W367 2.0.4 (DARO UID 577): after a successful sign-in everything is saved at once (no "Speichern" needed),
+    ' the window shows a clear success state and then closes; the question window opens ready to use.
+    Private finishing As Boolean
+    Private Sub CompleteSignIn(signedIn As ClientConfig)
+        Dim saved As Boolean = False
+        Try
+            saved = context.TryCommit(signedIn)
+            If saved AndAlso signedIn.StartWithWindows.HasValue Then Autostart.Apply(signedIn.StartWithWindows.Value)
+        Catch ex As System.Exception
+            ClientLog.Write("settings.signin.autosave.failed", ex)
+        End Try
+        If Not saved Then
+            ' Credentials are stored already; other changed settings still need "Speichern" (e.g. a shortcut conflict).
+            PublishSettings(UiStrings.GetText("desktop.signedIn", previewLanguage))
+            Return
+        End If
+        draft = signedIn
+        finishing = True
+        SendView(New With {.[type] = "signInSucceeded", .user = If(String.IsNullOrEmpty(signedIn.UserId), signedIn.LicenseUser, signedIn.UserId)})
+        FinishAfterDelayAsync()
+    End Sub
+
+    Private Async Sub FinishAfterDelayAsync()
+        Try
+            Await System.Threading.Tasks.Task.Delay(1800)
+            If IsDisposed Then Return
+            working = False
+            pendingCredentialSave = False
+            Close()
+            context.ShowAfterSignIn()
+        Catch ex As System.Exception
+            ClientLog.Write("settings.signin.finish.failed", ex)
+        End Try
+    End Sub
+    ' P18 W367: "Anmelden ohne Link" (mail confirmation, like Office Web) and Microsoft sign-in.
+    Private pairing As System.Threading.CancellationTokenSource
+
+    Private Async Function SignInAsync(action As String, message As System.Text.Json.JsonElement) As System.Threading.Tasks.Task
+        working = True
+        IsRecordingHotkey = False
+        SendView(New With {.[type] = "busy", .busy = True})
+        Dim receivedCredentials As Boolean = False
+        pairing = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(Lifetime.Token)
+        Try
+            Dim candidate As ClientConfig = ReadCandidate(message)
+            If registryManaged AndAlso Not candidate.IgnoreRegistryHelperLink Then Throw New HelperFailure("settings.registryManagedHint")
+            Dim signedIn As ClientConfig
+            If action = "pairStart" Then
+                Dim email As String = HelperClient.TextValue(message, "email").Trim()
+                If email.Length < 3 OrElse email.Length > 320 OrElse Not email.Contains("@"c) Then Throw New HelperFailure("desktop.emailInvalid")
+                If HelperModern.IsUnconfigured(candidate.HelperUrl) Then
+                    SendView(New With {.[type] = "status", .message = UiStrings.GetText("desktop.helperSearching", previewLanguage)})
+                    Dim found As String = Await HelperModern.DiscoverHelperAsync(email, pairing.Token)
+                    If found.Length = 0 Then Throw New HelperFailure("desktop.helperNotFound")
+                    candidate.HelperUrl = found
+                    candidate.CredentialOrigin = HelperClient.GetOrigin(found)
+                    candidate.UserId = "" : candidate.DeviceTokenProtected = "" : candidate.ApiKeyProtected = ""
+                    SendView(New With {.[type] = "helperDiscovered", .helperUrl = found})
+                End If
+                Dim started As PairingStart = Await HelperModern.StartPairingAsync(candidate.HelperUrl, email, previewLanguage, pairing.Token)
+                SendView(New With {.[type] = "pairingCode", .code = started.Code})
+                signedIn = Await HelperModern.CompletePairingAsync(candidate.HelperUrl, started, candidate, pairing.Token)
+            Else
+                SendView(New With {.[type] = "status", .message = UiStrings.GetText("desktop.microsoftWaiting", previewLanguage)})
+                signedIn = Await HelperModern.SignInWithMicrosoftAsync(candidate.HelperUrl, candidate, pairing.Token)
+            End If
+            receivedCredentials = True
+            pendingCredentialSave = True
+            signedIn.AppliedRegistryLinkFingerprint = ""
+            context.CommitCredentials(signedIn)
+            draft = signedIn
+            pendingCredentialSave = False
+            showRegistrationHelp = False
+            SendView(New With {.[type] = "pairingDone"})
+            CompleteSignIn(signedIn)
+        Catch ex As System.OperationCanceledException When Not Lifetime.IsCancellationRequested
+            SendView(New With {.[type] = "pairingDone"})
+            SendView(New With {.[type] = "error", .message = UiStrings.GetText("desktop.signInCancelled", previewLanguage)})
+        Catch ex As System.Exception
+            ClientLog.Write("settings." & action & ".failed", ex)
+            Dim feedback As String = HelperClient.Describe(ex, previewLanguage)
+            If receivedCredentials Then
+                feedback &= " " & UiStrings.GetText("desktop.registrationPendingSave", previewLanguage)
+                PublishSettings(feedback, True)
+            End If
+            SendView(New With {.[type] = "pairingDone"})
+            SendView(New With {.[type] = "error", .message = feedback})
+        Finally
+            pairing.Dispose()
+            pairing = Nothing
             working = False
             SendView(New With {.[type] = "busy", .busy = False})
         End Try
@@ -274,6 +425,8 @@ Friend NotInheritable Class SettingsForm
         Public Property Model As String = ""
         Public Property SystemPrompt As String = ""
         Public Property ShowLlmDebug As Boolean
+        Public Property EnableReplace As Boolean
+        Public Property StartWithWindows As Boolean = True
         Public Property IgnoreRegistryHelperLink As Boolean
         Public Property HotkeyModifiers As UInteger = 3UI
         Public Property HotkeyKey As Integer = 75

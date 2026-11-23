@@ -119,6 +119,7 @@ These binary-safe tools operate across the PathPolicy-governed roots (the agent 
 | `workspace_rename` | Renames a file or folder within the workspace. | Yes | Yes | Yes |
 | `workspace_delete` | Deletes a file or folder from the workspace. | Yes | Yes | Yes |
 | `workspace_make_dir` | Creates a folder in the workspace. | Yes | Yes | Yes |
+| `workspace_translate_pdf` | Creates a translated PDF copy in a writable workspace while retaining native page layout. | Yes | Yes | Yes |
 | `workspace_extract_text` | Extracts readable text from a supported workspace file such as PDF, Word, or Excel. | Yes | Yes | Yes |
 | `workspace_extract_text_many` | Extracts readable text from multiple supported workspace files. | Yes | Yes | Yes |
 
@@ -126,7 +127,7 @@ These binary-safe tools operate across the PathPolicy-governed roots (the agent 
 
 | Tool | Description | Word | Outlook | AutoPilot |
 |---|---|---:|---:|---:|
-| `process_word_document` | Transforms an existing DOCX, PPTX or XLSX while preserving native formatting and structure; preferred for translating, correcting, shortening or applying one textual instruction across a whole presentation. | No | Yes | Yes |
+| `process_word_document` | Translates editable PDF page text directly into a PDF copy. Transforms an existing DOCX, PPTX or XLSX while preserving native formatting and structure; preferred for translating, correcting, shortening or applying one textual instruction across a whole presentation. | No | Yes | Yes |
 | `comment_word_document` | Adds comment bubbles to a Word document. | No | Yes | Yes |
 | `extract_pdf_text` | Extracts readable text from a PDF file. | No | Yes | Yes |
 | `merge_pdfs` | Merges multiple PDFs into one output PDF. | No | Yes | Yes |

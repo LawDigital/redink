@@ -1,5 +1,5 @@
 ' Part of "Red Ink" (Ask Inky)
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' Copyright (c) LawDigital AG, Switzerland. All rights reserved. For license to use see https://redink.ai.
 ' =============================================================================
 ' File: ConfigStore.vb
 ' Purpose: Ask Inky desktop functionality in the modular Windows client.
@@ -24,6 +24,16 @@ Public NotInheritable Class ClientConfig
     Public Property Temperature As Double = 0.7
     Public Property Model As String = ""
     Public Property ShowLlmDebug As Boolean = False
+    ' P18 W367: Ask Inky 2 options (sent only to Helpers that announce them).
+    Public Property AgentMode As Boolean = False
+    Public Property ThinkingLevel As String = ""
+    Public Property WebSearch As Boolean = False
+    ' Optional 'Ersetzen' button (answer pasted back into the source application), off by default.
+    Public Property EnableReplace As Boolean = False
+    ' P18 W367 (DARO UID 569): start with Windows; Nothing = not chosen yet (installer default, else on).
+    Public Property StartWithWindows As Boolean? = Nothing
+    Public Property LastUpdateCheckUtc As System.DateTime = System.DateTime.MinValue
+    Public Property SkippedUpdateVersion As String = ""
     Public Property SystemPrompt As String = "Antworte direkt, sachlich und knapp auf die Frage. Keine Begrüssung, Selbstvorstellung, Höflichkeitsfloskeln oder einleitende Ankündigung. Nur auf ausdrücklichen Wunsch ausführlich antworten. Verwende Markdown, wenn es der Lesbarkeit dient."
     Public Property ApiKeyProtected As String = ""
     Public Property DeviceTokenProtected As String = ""

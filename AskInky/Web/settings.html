@@ -1,22 +1,28 @@
 <!doctype html>
-<!-- Part of Red Ink (Ask Inky). Copyright (c) LawDigital Ltd., Switzerland.
+<!-- Part of Red Ink (Ask Inky). Copyright (c) LawDigital AG, Switzerland.
      File: settings.html; Purpose: offline WebView2 user interface.
      License: Red Ink License; notices in bundled LICENSE.txt. -->
 <html lang="de">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'none'; connect-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'">
 <title>Red Ink</title><link rel="stylesheet" href="office-web.css"><link rel="stylesheet" href="desktop.css">
 <script src="common.js" defer></script><script src="settings.js" defer></script>
 </head>
 <body>
 <main class="desktop-settings" aria-busy="false">
 <div class="settings-scroll">
+    <section class="settings-group welcome-intro" id="welcome-intro"><div class="welcome-brand"><img src="redink-logo.png" alt="" id="welcome-logo"><span>Ask Inky</span></div>
+        <h1 class="welcome-title" data-text="welcome.title"></h1><p class="ms-font-s" data-text="welcome.text"></p></section>
     <section class="settings-group settings-grid">
         <div><label for="language-select" class="ms-font-s section-label" data-text="settings.language"></label>
             <select id="language-select" class="dropdown"><option value="en">E – English</option><option value="de">D – Deutsch</option><option value="fr">F – Français</option><option value="it">IT – Italiano</option></select></div>
         <div><span class="ms-font-s section-label" data-text="settings.appearance"></span>
             <label class="settings-toggle-row" for="dark-mode-toggle"><span class="settings-toggle-label" data-text="settings.darkMode"></span><span class="settings-toggle-switch"><input type="checkbox" id="dark-mode-toggle"><span class="settings-toggle-slider" aria-hidden="true"></span></span></label></div>
+    </section>
+    <section class="settings-group">
+        <div class="settings-control"><label class="settings-toggle-row" for="settings-start-with-windows"><span class="settings-toggle-label" data-text="settings.startWithWindows"></span><span class="settings-toggle-switch"><input type="checkbox" id="settings-start-with-windows"><span class="settings-toggle-slider" aria-hidden="true"></span></span></label>
+        <p class="ms-font-xs status-text" data-text="settings.startWithWindowsHint"></p></div>
     </section>
     <section class="settings-group">
         <label for="hotkey-display" class="ms-font-s section-label" data-text="desktop.shortcut"></label>
@@ -36,7 +42,19 @@
     <section class="settings-group">
             <div class="settings-control"><label for="settings-model" class="ms-font-s section-label" data-text="desktop.model"></label><select id="settings-model" class="dropdown" aria-describedby="model-status"><option value="" data-text="desktop.defaultModel"></option></select><input id="settings-model-custom" class="text-input" type="text" maxlength="256" autocomplete="off" spellcheck="false" data-placeholder="desktop.customModelHint" hidden><p id="model-status" class="ms-font-xs status-text" aria-live="polite"></p><p class="ms-font-xs status-text" data-text="desktop.modelDescription"></p></div>
     </section>
-    <section class="settings-group">
+    <section class="settings-group" id="signin-section" hidden>
+        <label for="signin-email" class="ms-font-s section-label" data-text="settings.signInTitle"></label>
+        <p class="ms-font-xs status-text signin-hint" data-text="settings.signInHint"></p>
+        <div id="signin-mail" hidden><input type="email" id="signin-email" class="text-input" maxlength="320" autocomplete="email" spellcheck="false" data-placeholder="settings.signInEmail">
+            <div class="registration-actions signin-actions"><button id="btn-signin-discover" class="action-btn-primary" type="button" data-text="settings.signInContinue" hidden></button>
+                <button id="btn-signin-microsoft" class="action-btn-primary" type="button" data-text="settings.signInMicrosoft" hidden></button>
+                <button id="btn-signin-mail" class="action-btn-link" type="button" data-text="settings.signInWithoutLink"></button></div></div>
+        <div id="signin-code" class="signin-wait" role="alert" hidden></div>
+        <div id="signin-success" class="signin-success" role="status" hidden></div>
+        <p class="signin-link-row"><button id="btn-signin-link" class="action-btn-link" type="button" data-text="welcome.haveLink"></button></p>
+        <div class="registration-actions"><button id="btn-signin-cancel" class="action-btn-link" type="button" data-text="settings.signInCancel" hidden></button></div>
+    </section>
+    <section class="settings-group" id="registration-section">
         <label for="settings-registration-link" class="ms-font-s section-label" data-text="settings.deviceRegistration"></label>
         <p id="registration-state" class="ms-font-xs status-text"></p>
         <p id="registration-setup-help" class="ms-font-s status-text registration-setup-help" data-text="settings.initialSetupInstruction" hidden></p>
@@ -54,6 +72,8 @@
             <div class="settings-control"><label class="settings-toggle-row" for="settings-ignore-registry-link"><span class="settings-toggle-label" data-text="settings.ignoreRegistryHelperLink"></span><span class="settings-toggle-switch"><input type="checkbox" id="settings-ignore-registry-link"><span class="settings-toggle-slider" aria-hidden="true"></span></span></label>
             <p class="ms-font-xs status-text" data-text="settings.ignoreRegistryHelperLinkHint"></p>
             <p id="settings-registry-managed-hint" class="ms-font-xs status-text" data-text="settings.registryManagedHint" hidden></p></div>
+            <div class="settings-control"><label class="settings-toggle-row" for="settings-enable-replace"><span class="settings-toggle-label" data-text="settings.enableReplace"></span><span class="settings-toggle-switch"><input type="checkbox" id="settings-enable-replace"><span class="settings-toggle-slider" aria-hidden="true"></span></span></label>
+            <p class="ms-font-xs status-text" data-text="settings.enableReplaceHint"></p></div>
             <div class="settings-control"><label for="font-size" class="ms-font-s section-label" data-text="settings.fontSize"></label><div class="slider-row"><input type="range" id="font-size" min="6" max="16" value="12"><span id="font-size-value">12 px</span></div></div>
 
             <div class="settings-control"><label for="temperature" class="ms-font-s section-label" data-text="settings.temperature"></label><div class="slider-row"><input type="range" id="temperature" min="0" max="100" value="70"><span id="temperature-value">0.7</span></div></div>

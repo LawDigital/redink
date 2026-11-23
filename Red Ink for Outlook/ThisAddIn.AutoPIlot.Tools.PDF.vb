@@ -148,15 +148,16 @@ Partial Public Class ThisAddIn
                 End If
 
                 Dim outputName = Path.GetFileNameWithoutExtension(att.OriginalFileName) & "_commented.pdf"
-                Dim outputPath = Path.Combine(_apCurrentTempDir, outputName)
+                Dim outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName)
 
                 ' Prevent filename collision
                 Dim counter = 1
                 While File.Exists(outputPath)
                     outputName = Path.GetFileNameWithoutExtension(att.OriginalFileName) & $"_commented_{counter}.pdf"
-                    outputPath = Path.Combine(_apCurrentTempDir, outputName)
+                    outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName)
                     counter += 1
                 End While
+                outputName = System.IO.Path.GetFileName(outputPath)
 
                 Dim commentReport As New PdfCommentProcessingReport()
                 Dim commentRunId As System.String = System.Guid.NewGuid().ToString("N")
@@ -252,7 +253,7 @@ Partial Public Class ThisAddIn
                 Return response
             End If
 
-            Dim outputPath = Path.Combine(_apCurrentTempDir, fileName)
+            Dim outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, fileName)
 
             ' Prevent filename collision
             Dim counter = 1
@@ -260,9 +261,10 @@ Partial Public Class ThisAddIn
                 Dim baseName = Path.GetFileNameWithoutExtension(fileName)
                 Dim extension = Path.GetExtension(fileName)
                 fileName = baseName & $"_{counter}{extension}"
-                outputPath = Path.Combine(_apCurrentTempDir, fileName)
+                outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, fileName)
                 counter += 1
             End While
+            fileName = System.IO.Path.GetFileName(outputPath)
 
             context.Log($"Creating code file: {fileName}")
             ApDashboardLog($"💻 Creating code file: {fileName}", "step")
@@ -606,7 +608,8 @@ Partial Public Class ThisAddIn
             End If
 
             context.Log($"Merging {toMerge.Count} PDFs into {outputName}")
-            Dim outputPath = Path.Combine(_apCurrentTempDir, outputName)
+            Dim outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName)
+            outputName = System.IO.Path.GetFileName(outputPath)
 
             Using outputDoc As New PdfSharp.Pdf.PdfDocument()
                 For Each att In toMerge
@@ -654,7 +657,8 @@ Partial Public Class ThisAddIn
 
             Dim outputName = If(GetArgString(toolCall.Arguments, "output_filename"), "output.pdf")
             Dim title = GetArgString(toolCall.Arguments, "title")
-            Dim outputPath = Path.Combine(_apCurrentTempDir, outputName)
+            Dim outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName)
+            outputName = System.IO.Path.GetFileName(outputPath)
 
             context.Log($"Creating PDF: {outputName}")
             ApDashboardLog($"📝 Creating PDF: {outputName}", "step")
@@ -1237,7 +1241,8 @@ Partial Public Class ThisAddIn
             Dim att = FindAttachment(fileName)
             If att Is Nothing Then response.Success = False : response.Response = $"Attachment '{fileName}' not found." : Return response
 
-            Dim outputPath = Path.Combine(_apCurrentTempDir, outputName)
+            Dim outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName)
+            outputName = System.IO.Path.GetFileName(outputPath)
 
             context.Log($"Splitting PDF: {fileName} pages {startPage}-{endPage}")
 
@@ -1293,7 +1298,8 @@ Partial Public Class ThisAddIn
             Dim att = FindAttachment(fileName)
             If att Is Nothing Then response.Success = False : response.Response = $"Attachment '{fileName}' not found." : Return response
 
-            Dim outputPath = Path.Combine(_apCurrentTempDir, outputName)
+            Dim outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName, 41)
+            outputName = System.IO.Path.GetFileName(outputPath)
 
             context.Log($"Adding watermark to: {fileName}")
             ApDashboardLog($"💧 Adding watermark to: {fileName}", "step")
@@ -1485,15 +1491,16 @@ Partial Public Class ThisAddIn
                 outputName &= ".pdf"
             End If
 
-            Dim outputPath = Path.Combine(_apCurrentTempDir, outputName)
+            Dim outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName)
 
             ' Prevent filename collision
             Dim counter = 1
             While File.Exists(outputPath)
                 outputName = baseName & suffix & $"_{counter}.pdf"
-                outputPath = Path.Combine(_apCurrentTempDir, outputName)
+                outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName)
                 counter += 1
             End While
+            outputName = System.IO.Path.GetFileName(outputPath)
 
             context.Log($"PDF redaction ({mode}): {fileName}" &
                         If(Not String.IsNullOrWhiteSpace(instruction), $" — {instruction}", ""))
@@ -1562,170 +1569,9 @@ Partial Public Class ThisAddIn
     '  HELPER: Ensure PdfSharp font resolver is configured
     ' ═══════════════════════════════════════════════════════════════════════════
 
-    Private Shared _apFontResolverConfigured As Boolean = False
-
-    ''' <summary>
-    ''' Ensures a PdfSharp IFontResolver is registered so that font-by-name lookups work.
-    ''' Must be called before creating any XFont. Safe to call multiple times.
-    ''' </summary>
     Private Shared Sub EnsureApPdfSharpFontResolver()
-        If _apFontResolverConfigured Then Return
-        Try
-            If PdfSharp.Fonts.GlobalFontSettings.FontResolver Is Nothing Then
-                PdfSharp.Fonts.GlobalFontSettings.FontResolver = New ApFontResolver()
-            End If
-            _apFontResolverConfigured = True
-        Catch
-            ' Already set or locked — ignore
-            _apFontResolverConfigured = True
-        End Try
+        Global.SharedLibrary.Agents.WindowsPdfFontResolver.EnsureAvailable()
     End Sub
-
-    ''' <summary>
-    ''' Minimal font resolver for PdfSharp that loads system fonts by reading .ttf files from the Windows Fonts folder.
-    ''' </summary>
-    Private Class ApFontResolver
-        Implements PdfSharp.Fonts.IFontResolver
-
-        Private Shared ReadOnly _fontCache As New Dictionary(Of String, Byte())(StringComparer.OrdinalIgnoreCase)
-
-        ''' <summary>
-        ''' Resolves a requested font family/style combination to a concrete font face key.
-        ''' </summary>
-        Public Function ResolveTypeface(familyName As String, bold As Boolean, italic As Boolean) As PdfSharp.Fonts.FontResolverInfo _
-                Implements PdfSharp.Fonts.IFontResolver.ResolveTypeface
-
-            ' Map common family names to Windows font filenames
-            Dim key As String = "arial.ttf"
-            Select Case familyName.ToLowerInvariant()
-                Case "arial", "helvetica"
-                    If bold AndAlso italic Then
-                        key = "arialbi.ttf"
-                    ElseIf bold Then
-                        key = "arialbd.ttf"
-                    ElseIf italic Then
-                        key = "ariali.ttf"
-                    Else
-                        key = "arial.ttf"
-                    End If
-                Case "times new roman", "times"
-                    If bold AndAlso italic Then
-                        key = "timesbi.ttf"
-                    ElseIf bold Then
-                        key = "timesbd.ttf"
-                    ElseIf italic Then
-                        key = "timesi.ttf"
-                    Else
-                        key = "times.ttf"
-                    End If
-                Case "courier new", "courier"
-                    If bold AndAlso italic Then
-                        key = "courbi.ttf"
-                    ElseIf bold Then
-                        key = "courbd.ttf"
-                    ElseIf italic Then
-                        key = "couri.ttf"
-                    Else
-                        key = "cour.ttf"
-                    End If
-                Case "segoe ui"
-                    If bold AndAlso italic Then
-                        key = "segoeuiz.ttf"
-                    ElseIf bold Then
-                        key = "segoeuib.ttf"
-                    ElseIf italic Then
-                        key = "segoeuii.ttf"
-                    Else
-                        key = "segoeui.ttf"
-                    End If
-                Case "calibri"
-                    If bold AndAlso italic Then
-                        key = "calibriz.ttf"
-                    ElseIf bold Then
-                        key = "calibrib.ttf"
-                    ElseIf italic Then
-                        key = "calibrii.ttf"
-                    Else
-                        key = "calibri.ttf"
-                    End If
-                Case "verdana"
-                    If bold AndAlso italic Then
-                        key = "verdanaz.ttf"
-                    ElseIf bold Then
-                        key = "verdanab.ttf"
-                    ElseIf italic Then
-                        key = "verdanai.ttf"
-                    Else
-                        key = "verdana.ttf"
-                    End If
-                Case "tahoma"
-                    If bold Then
-                        key = "tahomabd.ttf"
-                    Else
-                        key = "tahoma.ttf"
-                    End If
-                Case "georgia"
-                    If bold AndAlso italic Then
-                        key = "georgiaz.ttf"
-                    ElseIf bold Then
-                        key = "georgiab.ttf"
-                    ElseIf italic Then
-                        key = "georgiai.ttf"
-                    Else
-                        key = "georgia.ttf"
-                    End If
-                Case "trebuchet ms"
-                    If bold AndAlso italic Then
-                        key = "trebucbi.ttf"
-                    ElseIf bold Then
-                        key = "trebucbd.ttf"
-                    ElseIf italic Then
-                        key = "trebucit.ttf"
-                    Else
-                        key = "trebuc.ttf"
-                    End If
-                Case Else
-                    ' Fallback to Arial
-                    If bold Then
-                        key = "arialbd.ttf"
-                    Else
-                        key = "arial.ttf"
-                    End If
-            End Select
-
-            Return New PdfSharp.Fonts.FontResolverInfo(key)
-        End Function
-
-        ''' <summary>
-        ''' Loads raw font bytes for a resolved face name from Windows font locations.
-        ''' </summary>
-        Public Function GetFont(faceName As String) As Byte() _
-                Implements PdfSharp.Fonts.IFontResolver.GetFont
-
-            SyncLock _fontCache
-                If _fontCache.ContainsKey(faceName) Then Return _fontCache(faceName)
-            End SyncLock
-
-            Dim fontsDir = Environment.GetFolderPath(Environment.SpecialFolder.Fonts)
-            Dim fontPath = Path.Combine(fontsDir, faceName)
-
-            ' Also check Windows\Fonts directly (SpecialFolder.Fonts may return user fonts folder on some systems)
-            If Not File.Exists(fontPath) Then
-                fontPath = Path.Combine(Environment.GetEnvironmentVariable("SystemRoot"), "Fonts", faceName)
-            End If
-
-            If File.Exists(fontPath) Then
-                Dim data = File.ReadAllBytes(fontPath)
-                SyncLock _fontCache
-                    _fontCache(faceName) = data
-                End SyncLock
-                Return data
-            End If
-
-            ' Last resort: return Nothing — PdfSharp will throw a descriptive error
-            Return Nothing
-        End Function
-    End Class
 
 
 
@@ -1785,15 +1631,16 @@ Partial Public Class ThisAddIn
                 outputName &= ".pdf"
             End If
 
-            Dim outputPath = Path.Combine(_apCurrentTempDir, outputName)
+            Dim outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName, 41)
 
             ' Prevent filename collision
             Dim counter = 1
             While File.Exists(outputPath)
                 outputName = Path.GetFileNameWithoutExtension(att.OriginalFileName) & $"_overlay_{counter}.pdf"
-                outputPath = Path.Combine(_apCurrentTempDir, outputName)
+                outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName, 41)
                 counter += 1
             End While
+            outputName = System.IO.Path.GetFileName(outputPath)
 
             context.Log($"Overlaying {elementsArray.Count} element(s) on: {fileName}")
             ApDashboardLog($"🖌 Overlaying {elementsArray.Count} element(s) on: {fileName}", "step")

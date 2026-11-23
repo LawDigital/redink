@@ -535,14 +535,15 @@ Partial Public Class ThisAddIn
             Next
             If Not fileName.EndsWith(".pptx", StringComparison.OrdinalIgnoreCase) Then fileName &= ".pptx"
 
-            Dim outputPath As String = Path.Combine(_apCurrentTempDir, fileName)
+            Dim outputPath As String = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, fileName)
             Dim counter As Integer = 1
             While File.Exists(outputPath)
                 Dim baseName As String = Path.GetFileNameWithoutExtension(fileName)
                 fileName = baseName & $"_{counter}.pptx"
-                outputPath = Path.Combine(_apCurrentTempDir, fileName)
+                outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, fileName)
                 counter += 1
             End While
+            fileName = System.IO.Path.GetFileName(outputPath)
 
             Dim presTitle As String = GetArgString(toolCall.Arguments, "title")
             If String.IsNullOrWhiteSpace(presTitle) Then
@@ -6267,14 +6268,15 @@ Partial Public Class ThisAddIn
                 fileName &= fileExt
             End If
 
-            Dim outputPath = Path.Combine(_apCurrentTempDir, fileName)
+            Dim outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, fileName)
             Dim counter = 1
             While File.Exists(outputPath)
                 Dim baseName = Path.GetFileNameWithoutExtension(fileName)
                 fileName = baseName & $"_{counter}{fileExt}"
-                outputPath = Path.Combine(_apCurrentTempDir, fileName)
+                outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, fileName)
                 counter += 1
             End While
+            fileName = System.IO.Path.GetFileName(outputPath)
 
             ' ── Parse shared parameters ──
             Dim columnWidths As Dictionary(Of String, Double) = ParseColumnWidths(toolCall.Arguments)
@@ -11818,15 +11820,16 @@ Partial Public Class ThisAddIn
                 fileName &= ".docx"
             End If
 
-            Dim outputPath = Path.Combine(_apCurrentTempDir, fileName)
+            Dim outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, fileName)
 
             Dim counter = 1
             While File.Exists(outputPath)
                 Dim baseName = Path.GetFileNameWithoutExtension(fileName)
                 fileName = baseName & $"_{counter}.docx"
-                outputPath = Path.Combine(_apCurrentTempDir, fileName)
+                outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, fileName)
                 counter += 1
             End While
+            fileName = System.IO.Path.GetFileName(outputPath)
 
             context.Log($"Creating Word document: {fileName}")
             ApDashboardLog($"📝 Creating Word document: {fileName}", "step")
@@ -12240,7 +12243,8 @@ Partial Public Class ThisAddIn
                 End If
 
                 Dim outputName = Path.GetFileNameWithoutExtension(att.OriginalFileName) & "_commented.docx"
-                Dim outputPath = Path.Combine(_apCurrentTempDir, outputName)
+                Dim outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName)
+                outputName = System.IO.Path.GetFileName(outputPath)
 
                 Dim success = Await CommentDocxForAutoPilot(att.TempFilePath, outputPath, instruction, ct, author)
 
@@ -12332,8 +12336,9 @@ Partial Public Class ThisAddIn
                 Return response
             End If
 
-            Dim compareName = $"Comparison_{Path.GetFileNameWithoutExtension(originalFilename)}_vs_{Path.GetFileNameWithoutExtension(revisedFilename)}.docx"
-            Dim comparePath = Path.Combine(_apCurrentTempDir, compareName)
+            Dim compareName = $"Comparison_{Path.GetFileNameWithoutExtension(originalAtt.OriginalFileName)}_vs_{Path.GetFileNameWithoutExtension(revisedAtt.OriginalFileName)}.docx"
+            Dim comparePath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, compareName)
+            compareName = System.IO.Path.GetFileName(comparePath)
 
             context.Log($"Comparing: {originalFilename} (original) vs {revisedFilename} (revised)")
             ApDashboardLog($"📊 Comparing: {originalFilename} vs {revisedFilename}", "step")
@@ -12429,6 +12434,20 @@ Partial Public Class ThisAddIn
     '  TOOL EXECUTION: process_word_document
     ' ═══════════════════════════════════════════════════════════════════════════
 
+    Private Function CreateAutoPilotPdfProgress(context As ToolExecutionContext, fileName As System.String) As System.Action(Of System.String)
+        Dim interval As New System.Diagnostics.Stopwatch()
+        Return Sub(message As System.String)
+                   context.Log(message)
+                   If Not _apActive Then Return
+                   Dim frequent As System.Boolean = message.StartsWith("Checking PDF layout:", System.StringComparison.Ordinal) OrElse
+                       (message.StartsWith("Page ", System.StringComparison.Ordinal) AndAlso
+                        message.IndexOf(", passage 1/", System.StringComparison.Ordinal) < 0)
+                   If frequent AndAlso interval.IsRunning AndAlso interval.ElapsedMilliseconds < 8000 Then Return
+                   ApDashboardLog(fileName & " — " & message, "step")
+                   interval.Restart()
+               End Sub
+    End Function
+
     Private Async Function ExecuteProcessWordDocTool(
             toolCall As ToolCall,
             context As ToolExecutionContext,
@@ -12463,8 +12482,10 @@ Partial Public Class ThisAddIn
             Dim taskType = If(GetArgString(toolCall.Arguments, "task_type"), "other").Trim().ToLowerInvariant()
             Dim useOfflineDocs As Boolean = (taskType = "translate" OrElse taskType = "correct")
 
-            If taskType.Equals("translate", System.StringComparison.OrdinalIgnoreCase) Then
-                Dim targetLanguage As System.String = If(GetArgString(toolCall.Arguments, "target_language"), System.String.Empty).Trim()
+            Dim translatePdf As System.Boolean = (taskType = "translate")
+            Dim targetLanguage As System.String = System.String.Empty
+            If translatePdf Then
+                targetLanguage = If(GetArgString(toolCall.Arguments, "target_language"), System.String.Empty).Trim()
                 If System.String.IsNullOrWhiteSpace(targetLanguage) Then
                     response.Success = False
                     response.ErrorMessage = "Missing required parameter for translation: target_language"
@@ -12479,12 +12500,15 @@ Partial Public Class ThisAddIn
                     Dim n As System.String = segmentName.Trim()
                     selectedKeys.Add(If(n.IndexOf(":"c) >= 0, n, targetLanguage & ":" & n))
                 Next
+                processorInstruction &= Global.SharedLibrary.SharedLibrary.SharedMethods.TranslationPreferencePrompt(_context, GetArgString(toolCall.Arguments, "translation_style"), GetArgString(toolCall.Arguments, "translation_length"))
                 Dim translationDictionary As System.String = Global.SharedLibrary.SharedLibrary.SharedMethods.GetTranslationDictionaryText(_context, targetLanguage, selectedKeys)
                 If Not System.String.IsNullOrWhiteSpace(translationDictionary) Then
                     processorInstruction &= vbCrLf & vbCrLf & "[TRANSLATION DICTIONARY - authoritative for " & targetLanguage & "]" & vbCrLf & translationDictionary & vbCrLf & "[/TRANSLATION DICTIONARY]"
                 End If
             End If
 
+            Dim resultMessages As New System.Collections.Generic.List(Of System.String)()
+            Dim pdfFailed As System.Boolean = False
             Dim toProcess As List(Of AutoPilotAttachmentInfo)
             If targetNames.Count > 0 Then
                 ' Resolve each requested name via FindAttachment (supports output files)
@@ -12493,29 +12517,75 @@ Partial Public Class ThisAddIn
                     Dim att = FindAttachment(name)
                     If att IsNot Nothing AndAlso Not att.IsOverSizeLimit AndAlso att.TempFilePath IsNot Nothing Then
                         toProcess.Add(att)
+                    ElseIf translatePdf AndAlso System.String.Equals(System.IO.Path.GetExtension(name), ".pdf", System.StringComparison.OrdinalIgnoreCase) Then
+                        pdfFailed = True
+                        resultMessages.Add($"✗ {name}: PDF attachment is unavailable or exceeds the size limit.")
                     End If
                 Next
             Else
                 toProcess = _apCurrentAttachments?.Where(
                     Function(a) (a.Extension = ".docx" OrElse a.Extension = ".doc" OrElse
-                                 a.Extension = ".pptx" OrElse a.Extension = ".xlsx") AndAlso
+                                 a.Extension = ".pptx" OrElse a.Extension = ".xlsx" OrElse
+                                 (translatePdf AndAlso System.String.Equals(a.Extension, ".pdf", System.StringComparison.OrdinalIgnoreCase))) AndAlso
                                 Not a.IsOverSizeLimit AndAlso a.TempFilePath IsNot Nothing
                 ).ToList()
             End If
 
             If toProcess Is Nothing OrElse toProcess.Count = 0 Then
                 response.Success = False
-                response.Response = "No processable Word, PowerPoint, or Excel attachments found."
+                response.Response = If(translatePdf, "No processable Word, PowerPoint, Excel or PDF attachments found.", "No processable Word, PowerPoint, or Excel attachments found.")
+                If pdfFailed Then response.Response = System.String.Join(vbCrLf, resultMessages)
                 Return response
             End If
+
+            Dim pdfTranslationOnly = translatePdf AndAlso toProcess.All(Function(item) System.String.Equals(item.Extension, ".pdf", System.StringComparison.OrdinalIgnoreCase))
+            If pdfTranslationOnly Then
+                Dim seen As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+                toProcess = toProcess.Where(Function(item) seen.Add(item.TempFilePath)).ToList()
+            End If
+            Dim singlePdfTranslation = pdfTranslationOnly AndAlso toProcess.Count = 1
+            If Not singlePdfTranslation AndAlso Global.SharedLibrary.Agents.ArtifactDelivery.HasExplicitArtifactIdentityArguments(toolCall.Arguments) Then
+                response.Success = False
+                response.ErrorCode = "explicit_artifact_not_supported_for_tool_cardinality"
+                response.ErrorMessage = "To bind this call to one output slot, select exactly one PDF attachment and set task_type to translate."
+                response.Response = response.ErrorMessage
+                Return response
+            End If
+            Dim pdfMetadata As New System.Collections.Generic.Dictionary(Of System.String, Global.SharedLibrary.Agents.OptionalToolArtifactMetadata)(System.StringComparer.OrdinalIgnoreCase)
+            Dim pdfArtifact As Global.SharedLibrary.Agents.OptionalToolArtifactMetadata = Nothing
+            Dim translatedPdfPath As System.String = Nothing
+            If pdfTranslationOnly Then
+                For Each item As AutoPilotAttachmentInfo In toProcess
+                    Dim artifactArguments As New System.Collections.Generic.Dictionary(Of System.String, System.Object)(toolCall.Arguments, System.StringComparer.OrdinalIgnoreCase)
+                    If context.SequencingState IsNot Nothing Then
+                        context.SequencingState.BindSingleFileProducerToExpectedSlot(artifactArguments, toolCall.CallId,
+                            System.IO.Path.GetFileName(item.TempFilePath), ".pdf", allowUnnamedSlot:=singlePdfTranslation)
+                    End If
+                    Dim metadata As Global.SharedLibrary.Agents.OptionalToolArtifactMetadata = Nothing
+                    Dim failureCode As System.String = Nothing
+                    Dim failureMessage As System.String = Nothing
+                    If Not Global.SharedLibrary.Agents.ArtifactDelivery.TryPrepareOptionalToolArtifactMetadata(
+                        artifactArguments, Global.SharedLibrary.Agents.ArtifactStorageKind.SessionStaging, metadata, failureCode, failureMessage) Then
+                        response.Success = False
+                        response.ErrorCode = failureCode
+                        response.ErrorMessage = failureMessage
+                        response.Response = failureMessage
+                        Return response
+                    End If
+                    If singlePdfTranslation Then
+                        pdfArtifact = metadata
+                    ElseIf metadata IsNot Nothing Then
+                        pdfMetadata.Add(item.TempFilePath, metadata)
+                    End If
+                Next
+            End If
+            Dim pdfArtifacts As New Newtonsoft.Json.Linq.JArray()
 
             ' Guard against recursive re-processing: warn if all targets are tool outputs
             Dim allAreOutputs = toProcess.All(Function(a) a.IsToolOutput)
             If allAreOutputs Then
                 ApDashboardLog($"⚠ process_word_document called on tool output file(s) — proceeding with caution", "warn")
             End If
-
-            Dim resultMessages As New List(Of String)()
 
             For Each att In toProcess
                 Dim truncatedInstruction = If(instruction.Length > 120, instruction.Substring(0, 117) & "...", instruction)
@@ -12525,21 +12595,55 @@ Partial Public Class ThisAddIn
                 Dim ext = att.Extension.ToLowerInvariant()
                 Dim isPptx As Boolean = ext.Equals(".pptx", StringComparison.OrdinalIgnoreCase)
                 Dim isXlsx As Boolean = ext.Equals(".xlsx", StringComparison.OrdinalIgnoreCase)
-                Dim outputExt As String = If(isPptx, ".pptx", If(isXlsx, ".xlsx", ".docx"))
+                Dim isPdf As System.Boolean = (ext = ".pdf")
+                If isPdf AndAlso Not translatePdf Then
+                    pdfFailed = True
+                    resultMessages.Add($"✗ {att.OriginalFileName}: PDF input supports task_type='translate'.")
+                    Continue For
+                End If
+                Dim outputExt As String = If(isPdf, ".pdf", If(isPptx, ".pptx", If(isXlsx, ".xlsx", ".docx")))
                 Dim outputName = Path.GetFileNameWithoutExtension(att.OriginalFileName) & "_processed" & outputExt
-                Dim outputPath = Path.Combine(_apCurrentTempDir, outputName)
+                Dim outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName)
 
                 ' Prevent filename collision when re-processing
                 Dim counter = 1
                 While File.Exists(outputPath)
                     outputName = Path.GetFileNameWithoutExtension(att.OriginalFileName) & $"_processed_{counter}" & outputExt
-                    outputPath = Path.Combine(_apCurrentTempDir, outputName)
+                    outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName)
                     counter += 1
                 End While
+                outputName = System.IO.Path.GetFileName(outputPath)
 
                 ' Pass sheet filter only for Excel files
                 Dim sheetFilter As List(Of String) = If(isXlsx AndAlso sheetNames.Count > 0, sheetNames, Nothing)
-                Dim success = Await ProcessDocumentForAutoPilot(inputPath, outputPath, processorInstruction, ct, sheetFilter, useOfflineDocs)
+                Dim success As System.Boolean
+                Dim pdfDetail As System.String = System.String.Empty
+                Try
+                    If isPdf Then
+                        If _apActive Then ApDashboardLog($"Translating {att.OriginalFileName} to {targetLanguage}", "step")
+                        pdfDetail = Await Global.SharedLibrary.Agents.PdfFileTranslation.TranslateWithModelAsync(inputPath, outputPath,
+                            "Translate to " & targetLanguage & ". " & processorInstruction, _context, _apUseSecondApi,
+                            Sub() ct.ThrowIfCancellationRequested(), CreateAutoPilotPdfProgress(context, att.OriginalFileName), ct, preferWording:=System.String.Equals(GetArgString(toolCall.Arguments, "translation_style"), "close", System.StringComparison.OrdinalIgnoreCase), targetLanguage:=targetLanguage)
+                        If Not System.IO.File.Exists(outputPath) Then Throw New System.IO.IOException("The translated PDF could not be found.")
+                        If _apActive Then ApDashboardLog($"Saved {outputName}", "info")
+                        success = True
+                    Else
+                        success = Await ProcessDocumentForAutoPilot(inputPath, outputPath, processorInstruction, ct, sheetFilter, useOfflineDocs)
+                    End If
+                Catch ex As System.Exception When isPdf AndAlso Not TypeOf ex Is System.OperationCanceledException
+                    pdfFailed = True
+                    context.Log("PDF translation: " & ex.Message)
+                    If _apActive Then ApDashboardLog($"PDF translation failed for {att.OriginalFileName}: {ex.Message}", "warn")
+                    resultMessages.Add($"✗ {att.OriginalFileName}: {ex.Message}")
+                    Continue For
+                End Try
+
+                If success AndAlso translatePdf AndAlso Not isPdf AndAlso Not isXlsx AndAlso
+                    System.String.Equals(GetArgString(toolCall.Arguments, "translation_length"), "fit", System.StringComparison.OrdinalIgnoreCase) Then
+                    Dim fitDetail = Await Global.SharedLibrary.SharedLibrary.SharedMethods.CheckTranslationFit(outputPath, _context, processorInstruction, _apUseSecondApi, ct)
+                    context.Log(fitDetail)
+                    resultMessages.Add(outputName & " — " & fitDetail)
+                End If
 
                 If success Then
                     ' Register output on the original attachment (not on a transient object)
@@ -12550,16 +12654,20 @@ Partial Public Class ThisAddIn
                     If registrationTarget Is Nothing Then registrationTarget = _apCurrentAttachments(0)
 
                     registrationTarget.OutputFiles.Add(outputPath)
+                    If singlePdfTranslation Then
+                        translatedPdfPath = outputPath
+                    Else
+                        Dim batchMetadata As Global.SharedLibrary.Agents.OptionalToolArtifactMetadata = Nothing
+                        If pdfMetadata.TryGetValue(inputPath, batchMetadata) Then pdfArtifacts.Add(batchMetadata.BuildArtifact(outputPath))
+                    End If
 
                     ' Compare document only for Word files (not PPTX or XLSX)
-                    If Not isPptx AndAlso Not isXlsx Then
-                        Dim comparePath = Path.Combine(_apCurrentTempDir,
-                            Path.GetFileNameWithoutExtension(att.OriginalFileName) & "_compare.docx")
+                    If Not isPdf AndAlso Not isPptx AndAlso Not isXlsx Then
+                        Dim comparePath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, Path.GetFileNameWithoutExtension(att.OriginalFileName) & "_compare.docx")
                         ' Prevent compare filename collision too
                         Dim cmpCounter = 1
                         While File.Exists(comparePath)
-                            comparePath = Path.Combine(_apCurrentTempDir,
-                                Path.GetFileNameWithoutExtension(att.OriginalFileName) & $"_compare_{cmpCounter}.docx")
+                            comparePath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, Path.GetFileNameWithoutExtension(att.OriginalFileName) & $"_compare_{cmpCounter}.docx")
                             cmpCounter += 1
                         End While
 
@@ -12571,15 +12679,29 @@ Partial Public Class ThisAddIn
                             resultMessages.Add($"✓ {att.OriginalFileName}: Processed successfully. Output: {outputName} (compare document creation failed).")
                         End If
                     Else
-                        resultMessages.Add($"✓ {att.OriginalFileName}: Processed successfully. Output: {outputName}")
+                        resultMessages.Add($"✓ {att.OriginalFileName}: Processed successfully. Output: {outputName}" & If(isPdf AndAlso Not System.String.IsNullOrWhiteSpace(pdfDetail), ". " & pdfDetail, ""))
                     End If
                 Else
                     resultMessages.Add($"✗ {att.OriginalFileName}: Processing failed.")
                 End If
             Next
 
-            response.Success = True
+            response.Success = Not pdfFailed
             response.Response = String.Join(vbCrLf, resultMessages)
+            If pdfFailed Then
+                response.ErrorMessage = response.Response
+            ElseIf pdfArtifact IsNot Nothing AndAlso translatedPdfPath IsNot Nothing Then
+                response.Response = Global.SharedLibrary.Agents.ArtifactDelivery.AttachOptionalSingleFileArtifactToResult(
+                    response.Response, pdfArtifact, translatedPdfPath)
+            ElseIf pdfArtifacts.Count > 0 Then
+                Dim payload As New Newtonsoft.Json.Linq.JObject From {
+                    {"summary", response.Response},
+                    {"artifacts", pdfArtifacts},
+                    {"produces_user_deliverable", pdfMetadata.Values.Any(Function(item) item.ProducesUserDeliverable)},
+                    {"produces_intermediate_data", pdfMetadata.Values.Any(Function(item) item.ProducesIntermediateData)}
+                }
+                response.Response = payload.ToString(Newtonsoft.Json.Formatting.None)
+            End If
 
         Catch ex As System.Exception
             response.Success = False
@@ -13410,7 +13532,8 @@ Partial Public Class ThisAddIn
             If extension <> ".doc" AndAlso extension <> ".docx" Then Throw New System.ArgumentException("The attachment is not a Word document: " & fileName)
             ct.ThrowIfCancellationRequested()
             Dim outputName As System.String = System.IO.Path.GetFileNameWithoutExtension(att.OriginalFileName) & ".pdf"
-            Dim outputPath As System.String = System.IO.Path.Combine(_apCurrentTempDir, outputName)
+            Dim outputPath As System.String = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName, 37)
+            outputName = System.IO.Path.GetFileName(outputPath)
             attempt = New WordPdfConversionAttempt With {
                 .TemporaryPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "RedInkPdf-" & System.Guid.NewGuid().ToString("N") & ".pdf")
             }
@@ -13531,7 +13654,8 @@ Partial Public Class ThisAddIn
 
             Dim defaultOutput = Path.GetFileNameWithoutExtension(att.OriginalFileName) & ".docx"
             Dim outputName = If(GetArgString(toolCall.Arguments, "output_filename"), defaultOutput)
-            Dim outputPath = Path.Combine(_apCurrentTempDir, outputName)
+            Dim outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName)
+            outputName = System.IO.Path.GetFileName(outputPath)
             Dim conversionMode As System.String = NormalizePdfWordConversionMode(GetArgString(toolCall.Arguments, "conversion_mode"))
             Dim requestedLayoutAdapterId As System.String = If(GetArgString(toolCall.Arguments, "layout_adapter_id"), System.String.Empty)
 

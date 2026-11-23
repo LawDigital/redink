@@ -589,6 +589,13 @@ Partial Public Class ThisAddIn
                     If IsScanInlineDecoration(mail, attachment) Then Continue For
                     Dim originalName = System.IO.Path.GetFileName(attachment.FileName)
                     Dim name = i.ToString("D4", System.Globalization.CultureInfo.InvariantCulture) & "_" & originalName
+                    Dim budget As System.Int32 = Global.SharedLibrary.Agents.FilePathBudget.FileNameBudget(root, Global.SharedLibrary.Agents.FilePathBudget.ToolWorkingReserve)
+                    If name.Length > budget Then
+                        ' Stable across a retried capture. Ordinary names always have an underscore after the index.
+                        name = i.ToString("D4", System.Globalization.CultureInfo.InvariantCulture) & System.IO.Path.GetExtension(originalName)
+                        If name.Length > budget Then Throw New System.IO.PathTooLongException("The scan directory leaves insufficient space for an indexed capture.")
+                        System.Diagnostics.Trace.TraceInformation("Bounded scan capture: " & originalName & " -> " & name)
+                    End If
                     Dim path = ScanOperationFile(root, name)
                     attachment.SaveAsFile(path)
                     Dim hash As System.String
