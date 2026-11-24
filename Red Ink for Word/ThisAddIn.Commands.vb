@@ -471,14 +471,9 @@ Partial Public Class ThisAddIn
     End Sub
 
     ''' <summary>
-    ''' Sends clipboard content to the SP_InsertClipboard prompt (requires INI_APICall_Object) and inserts the LLM response beneath the caret.
+    ''' Extracts clipboard content and inserts the result beneath the caret.
     ''' </summary>
     Public Async Sub InsertClipboard()
-
-        If String.IsNullOrWhiteSpace(INI_APICall_Object) Then
-            ShowCustomMessageBox($"Your model ({INI_Model}) is not configured to process clipboard data (i.e. binary objects).")
-            Return
-        End If
 
         With Globals.ThisAddIn.Application.Selection
             If .Start <> .End Then
@@ -488,7 +483,22 @@ Partial Public Class ThisAddIn
 
         If INILoadFail() OrElse Not IsDocumentEditable() Then Return
 
-        Dim result As String = Await ProcessSelectedText(InterpolateAtRuntime(SP_InsertClipboard), False, False, False, False, False, 0, False, False, False, False, 0, False, "", False, "clipboard")
+        Dim result As System.String
+        Try
+            result = Await Global.SharedLibrary.SharedLibrary.SharedMethods.TryReadOcrClipboardAsync(_context)
+        Catch ex As System.OperationCanceledException
+            Return
+        Catch ex As System.Exception
+            ShowCustomMessageBox("Clipboard OCR failed: " & ex.Message)
+            Return
+        End Try
+        If result Is Nothing Then
+            If String.IsNullOrWhiteSpace(INI_APICall_Object) Then
+                ShowCustomMessageBox($"Your model ({INI_Model}) is not configured to process clipboard data (i.e. binary objects).")
+                Return
+            End If
+            result = Await ProcessSelectedText(InterpolateAtRuntime(SP_InsertClipboard), False, False, False, False, False, 0, False, False, False, False, 0, False, "", False, "clipboard")
+        End If
 
         If result <> "" Then
             Globals.ThisAddIn.Application.Selection.TypeParagraph()

@@ -3341,24 +3341,27 @@ SkipPromptWin:
     Private Async Function InsertClipboard() As System.Threading.Tasks.Task
         Try
             Await EnsureUIThread()
-            If System.String.IsNullOrWhiteSpace(INI_APICall_Object) Then
-                SLib.ShowCustomMessageBox($"Your model ({INI_Model}) is not configured to process clipboard data (binary/object).")
-                Return
-            End If
+            Dim result As System.String = Await Global.SharedLibrary.SharedLibrary.SharedMethods.TryReadOcrClipboardAsync(_context)
+            If result Is Nothing Then
+                If System.String.IsNullOrWhiteSpace(INI_APICall_Object) Then
+                    SLib.ShowCustomMessageBox($"Your model ({INI_Model}) is not configured to process clipboard data (binary/object).")
+                    Return
+                End If
 
-            ' Acquire result — do NOT use ConfigureAwait(False) here,
-            ' because all subsequent COM calls (Inspector, WordEditor, Selection)
-            ' MUST run on the original Outlook UI/STA thread.
-            Dim result As String = Await LLM(
-                InterpolateAtRuntime(SP_InsertClipboard),
-                "", "", "", 0,
-                UseSecondAPI:=False,
-                HideSplash:=False,
-                AddUserPrompt:="",
-                FileObject:="clipboard",
-                cancellationToken:=Nothing,
-                EnsureUI:=False
-            )
+                ' Acquire result — do NOT use ConfigureAwait(False) here,
+                ' because all subsequent COM calls (Inspector, WordEditor, Selection)
+                ' MUST run on the original Outlook UI/STA thread.
+                result = Await LLM(
+                    InterpolateAtRuntime(SP_InsertClipboard),
+                    "", "", "", 0,
+                    UseSecondAPI:=False,
+                    HideSplash:=False,
+                    AddUserPrompt:="",
+                    FileObject:="clipboard",
+                    cancellationToken:=Nothing,
+                    EnsureUI:=False
+                )
+            End If
             Await EnsureUIThread()
 
             If String.IsNullOrWhiteSpace(result) Then Return

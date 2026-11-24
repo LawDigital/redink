@@ -79,19 +79,31 @@
     <DebugType>pdbonly</DebugType>
     <PlatformTarget>x64</PlatformTarget>
   </PropertyGroup>
-  <PropertyGroup Condition="Exists('$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.26100.0\Windows.winmd')">
+  <PropertyGroup>
+    <RedInkWindowsMetadata Condition="'$(RedInkWindowsMetadata)' == '' and Exists('$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.26100.0\Windows.winmd')">$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.26100.0\Windows.winmd</RedInkWindowsMetadata>
+    <RedInkWindowsMetadata Condition="'$(RedInkWindowsMetadata)' == '' and Exists('$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.22621.0\Windows.winmd')">$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.22621.0\Windows.winmd</RedInkWindowsMetadata>
+    <RedInkWindowsMetadata Condition="'$(RedInkWindowsMetadata)' == '' and Exists('$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.22000.0\Windows.winmd')">$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.22000.0\Windows.winmd</RedInkWindowsMetadata>
+    <RedInkWindowsMetadata Condition="'$(RedInkWindowsMetadata)' == '' and Exists('$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.20348.0\Windows.winmd')">$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.20348.0\Windows.winmd</RedInkWindowsMetadata>
+    <RedInkWindowsMetadata Condition="'$(RedInkWindowsMetadata)' == '' and Exists('$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.19041.0\Windows.winmd')">$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.19041.0\Windows.winmd</RedInkWindowsMetadata>
+    <RedInkWindowsMetadata Condition="'$(RedInkWindowsMetadata)' == '' and Exists('$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.18362.0\Windows.winmd')">$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.18362.0\Windows.winmd</RedInkWindowsMetadata>
+    <RedInkWindowsMetadata Condition="'$(RedInkWindowsMetadata)' == '' and Exists('$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.17763.0\Windows.winmd')">$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.17763.0\Windows.winmd</RedInkWindowsMetadata>
+  </PropertyGroup>
+  <Target Name="ReportUnavailableWindowsOcrBuild" BeforeTargets="CoreCompile" Condition="!Exists('$(RedInkWindowsMetadata)')">
+    <Warning Text="Windows OCR is disabled in this build. Install the Windows SDK or set RedInkWindowsMetadata to the SDK Windows.winmd path to enable it." />
+  </Target>
+  <PropertyGroup Condition="Exists('$(RedInkWindowsMetadata)')">
     <DefineConstants>$(DefineConstants),PDF_LAYOUT_WINRT</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
-    <Reference Include="Windows" Condition="Exists('$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.26100.0\Windows.winmd')">
-      <HintPath>$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.26100.0\Windows.winmd</HintPath>
+    <Reference Include="Windows" Condition="Exists('$(RedInkWindowsMetadata)')">
+      <HintPath>$(RedInkWindowsMetadata)</HintPath>
       <Private>False</Private>
     </Reference>
-    <Reference Include="System.Runtime.WindowsRuntime, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089" Condition="Exists('$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.26100.0\Windows.winmd')">
+    <Reference Include="System.Runtime.WindowsRuntime, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089" Condition="Exists('$(RedInkWindowsMetadata)')">
       <HintPath>$(MSBuildProgramFiles32)\Reference Assemblies\Microsoft\Framework\.NETCore\v4.5\System.Runtime.WindowsRuntime.dll</HintPath>
       <Private>False</Private>
     </Reference>
-    <Reference Include="System.Runtime.InteropServices.WindowsRuntime, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a" Condition="Exists('$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.26100.0\Windows.winmd')">
+    <Reference Include="System.Runtime.InteropServices.WindowsRuntime, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a" Condition="Exists('$(RedInkWindowsMetadata)')">
       <Private>False</Private>
     </Reference>
 
@@ -659,6 +671,8 @@
     <Compile Include="Code\CommonFeatures\Transcription\GeminiTranscribeEngine.vb" />
     <Compile Include="Code\CommonFeatures\Transcription\GeminiTranscribeLiveEngine.vb" />
     <Compile Include="Code\CommonFeatures\Transcription\ITranscriptionEngine.vb" />
+    <Compile Include="Code\CommonFeatures\Transcription\LiveAudioBuffer.vb" />
+    <Compile Include="Code\CommonFeatures\Transcription\LiveTranscriptionSession.vb" />
     <Compile Include="Code\CommonFeatures\Transcription\OpenAiRealtimeEngine.vb" />
     <Compile Include="Code\CommonFeatures\Transcription\OpenAiRestEngine.vb" />
     <Compile Include="Code\CommonFeatures\Transcription\TeamsAcsRealtimeEngine.vb" />
@@ -773,6 +787,7 @@
     <Compile Include="Code\Core\Various\OfficeWindowWatchdog.vb" />
     <Compile Include="Code\Core\Various\SharedLogger.vb" />
     <Compile Include="Code\Core\Various\SharedMethods.FileImporter.vb" />
+    <Compile Include="Code\Core\Various\SharedMethods.WindowsOcr.vb" />
     <Compile Include="Code\Core\Various\SharedMethods.InkyMemory.vb" />
     <Compile Include="Code\Core\Various\SharedMethods.PdfMarkdownExtractor.vb" />
     <Compile Include="Code\Core\Various\SharedMethods.OcrMarkdownCleaner.vb" />

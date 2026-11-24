@@ -5769,6 +5769,32 @@ Partial Public Class ThisAddIn
             End Try
         Next
 
+        ' A producer-declared companion travels only with the exact final revision
+        ' that created it. It has no slot and cannot satisfy the completion gate.
+        If originalAttachments IsNot Nothing AndAlso registryDeliveryPathSet.Count > 0 AndAlso Not System.String.IsNullOrWhiteSpace(tempDir) Then
+            Dim primaryPaths As New System.Collections.Generic.HashSet(Of System.String)(registryDeliveryPathSet, System.StringComparer.OrdinalIgnoreCase)
+            Dim root = System.IO.Path.GetFullPath(tempDir).TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar) & System.IO.Path.DirectorySeparatorChar
+            For Each attachment In originalAttachments
+                If attachment Is Nothing OrElse attachment.OutputCompanions Is Nothing Then Continue For
+                For Each companion In attachment.OutputCompanions
+                    If companion Is Nothing OrElse Not primaryPaths.Contains(companion.PrimaryPath) Then Continue For
+                    Dim path = System.IO.Path.GetFullPath(companion.CompanionPath)
+                    If Not path.StartsWith(root, System.StringComparison.OrdinalIgnoreCase) OrElse registryDeliveryPathSet.Contains(path) Then Continue For
+                    If runState IsNot Nothing AndAlso runState.ExplicitArtifactProtocolOwnedPaths IsNot Nothing AndAlso
+                       runState.ExplicitArtifactProtocolOwnedPaths.Contains(path) Then Continue For
+                    If Not If(companion.PrimaryFingerprint, System.String.Empty).StartsWith("sha256:", System.StringComparison.Ordinal) OrElse
+                       Not If(companion.CompanionFingerprint, System.String.Empty).StartsWith("sha256:", System.StringComparison.Ordinal) OrElse
+                       ComputeAutoPilotOutputFingerprint(companion.PrimaryPath) <> companion.PrimaryFingerprint OrElse
+                       ComputeAutoPilotOutputFingerprint(path) <> companion.CompanionFingerprint Then
+                        ToolingFileLogger.LogWarn("Skipped a changed or unavailable producer-declared companion for a final output.")
+                        Continue For
+                    End If
+                    registryDeliveryPathSet.Add(path)
+                    deliveryPaths.Add(path)
+                Next
+            Next
+        End If
+
         If deliveryErrors.Count > 0 Then
             Throw New System.IO.IOException(
                 "One or more registered final deliverables could not be prepared for delivery: " &
@@ -9628,6 +9654,13 @@ Partial Public Class ThisAddIn
         Public Property ConversationID As String
     End Class
 
+    Friend Class AutoPilotOutputCompanion
+        Public Property PrimaryPath As System.String
+        Public Property PrimaryFingerprint As System.String
+        Public Property CompanionPath As System.String
+        Public Property CompanionFingerprint As System.String
+    End Class
+
     ''' <summary>Describes an attachment and its per-mail processing data.</summary>
     Friend Class AutoPilotAttachmentInfo
         Public Property OriginalFileName As String
@@ -9640,6 +9673,7 @@ Partial Public Class ThisAddIn
         Public Property CreatedTime As DateTime?
         Public Property LastModifiedTime As DateTime?
         Public Property OutputFiles As New List(Of String)()
+        Public Property OutputCompanions As New System.Collections.Generic.List(Of AutoPilotOutputCompanion)()
         Property CachedText As String
         Property CachedMarkdownText As String
         Property CachedDocxHint As String

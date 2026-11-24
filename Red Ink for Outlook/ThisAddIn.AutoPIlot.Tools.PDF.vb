@@ -472,6 +472,15 @@ Partial Public Class ThisAddIn
                 response.Response = selectionFailure
                 Return response
             End If
+            Dim policy As SharedMethods.AgentPdfOcrPolicy
+            Try
+                policy = SharedMethods.AgentPdfOcrPolicy.Parse(toolCall.Arguments)
+            Catch ex As System.ArgumentException
+                response.ErrorCode = "invalid_ocr_policy"
+                response.ErrorMessage = ex.Message
+                response.Response = ex.Message
+                Return response
+            End Try
             Dim outputFormatRaw As String = If(GetArgString(toolCall.Arguments, "output_format"), "text").Trim()
             Dim returnMarkdown As Boolean = False
             Dim ocrMarkdownInstruction As String = String.Empty
@@ -508,60 +517,31 @@ Partial Public Class ThisAddIn
                 ApDashboardLog($"📄 Extracting text from: {att.OriginalFileName}", "step")
 
                 Dim pdfResult As PdfReadResult = Await SharedMethods.ReadPdfAsTextEx(
-                    att.TempFilePath,
-                    ReturnErrorInsteadOfEmpty:=True,
-                    DoOCR:=False,
-                    AskUser:=False,
-                    context:=_context,
-                    ReturnMarkdown:=returnMarkdown)
-
-                Dim text As String = If(pdfResult IsNot Nothing, pdfResult.Content, "")
-                Dim usedOcr As Boolean = False
-
-                Dim ocrAvailable As Boolean = SharedMethods.IsOcrAvailable(_context)
-                Dim needsOcr As Boolean = String.IsNullOrWhiteSpace(text) OrElse
-                    (pdfResult IsNot Nothing AndAlso pdfResult.OcrWasSkippedDueToHeuristics)
-
-                If needsOcr AndAlso ocrAvailable Then
-                    ApDashboardLog($"🔍 Running OCR on: {att.OriginalFileName}", "step")
-                    context.Log($"OCR: {att.OriginalFileName}")
-                    Dim ocrResult As PdfReadResult = Await SharedMethods.ReadPdfAsTextEx(
-                        att.TempFilePath,
-                        ReturnErrorInsteadOfEmpty:=True,
-                        DoOCR:=True,
-                        AskUser:=False,
-                        context:=_context,
-                        ocrAdditionalInstruction:=If(returnMarkdown, ocrMarkdownInstruction, Nothing),
-                        ReturnMarkdown:=returnMarkdown)
-                    Dim ocrText As String = If(ocrResult IsNot Nothing, ocrResult.Content, "")
-                    If Not String.IsNullOrWhiteSpace(ocrText) Then
-                        text = ocrText
-                        usedOcr = True
-                        ApDashboardLog($"✓ OCR completed for: {att.OriginalFileName} ({ocrText.Length:N0} chars)", "info")
-                    Else
-                        ApDashboardLog($"⚠ OCR returned no content for: {att.OriginalFileName}, using standard extraction", "warn")
-                    End If
+                    att.TempFilePath, ReturnErrorInsteadOfEmpty:=False, DoOCR:=True, AskUser:=False,
+                    context:=_context, ocrAdditionalInstruction:=If(returnMarkdown, ocrMarkdownInstruction, Nothing),
+                    ReturnMarkdown:=returnMarkdown, OcrBatchPages:=policy.BatchPages.GetValueOrDefault(-1),
+                    CancellationToken:=ct, agentPolicy:=policy)
+                If Not System.String.IsNullOrWhiteSpace(pdfResult.ErrorCode) Then
+                    If System.String.IsNullOrEmpty(response.ErrorCode) Then response.ErrorCode = pdfResult.ErrorCode
+                    response.ErrorMessage = att.OriginalFileName & ": " & pdfResult.ErrorMessage
+                    sb.AppendLine(response.ErrorMessage)
+                    Continue For
                 End If
-
                 sb.AppendLine($"[{att.OriginalFileName}]")
-                If String.IsNullOrWhiteSpace(text) Then
-                    sb.AppendLine(If(Not ocrAvailable,
-                        "(no extractable text; OCR is not available in the current configuration)",
-                        "(no extractable text)"))
-                    ApDashboardLog($"⚠ No text extracted from: {att.OriginalFileName}", "warn")
-                Else
-                    If Not usedOcr AndAlso pdfResult IsNot Nothing AndAlso pdfResult.OcrWasSkippedDueToHeuristics AndAlso Not ocrAvailable Then
-                        sb.AppendLine("(Note: This PDF may contain scanned images. Some content may be missing because OCR is not available.)")
-                    End If
-                    sb.AppendLine(text)
+                If pdfResult.OcrAttempted Then
+                    context.Log($"OCR {att.OriginalFileName}: " & System.String.Join(" | ", pdfResult.ExtractionWarnings))
+                    If Not pdfResult.ExtractionComplete.GetValueOrDefault() Then sb.AppendLine("(OCR coverage incomplete.)")
                 End If
+                sb.AppendLine(If(System.String.IsNullOrWhiteSpace(pdfResult.Content), "(no extractable text)", pdfResult.Content))
                 sb.AppendLine()
             Next
 
-            response.Success = True
+            response.Success = System.String.IsNullOrEmpty(response.ErrorCode)
             response.Response = sb.ToString().TrimEnd()
 
-        Catch ex As Exception
+        Catch ex As System.OperationCanceledException
+            Throw
+        Catch ex As System.Exception
             response.Success = False
             response.ErrorMessage = ex.Message
             response.Response = $"Error extracting PDF text: {ex.Message}"

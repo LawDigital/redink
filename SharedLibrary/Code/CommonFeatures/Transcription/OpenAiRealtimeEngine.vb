@@ -42,6 +42,7 @@ Namespace Transcription
         Private Const InputSampleRate As Integer = 16000
         Private Const RealtimeSampleRate As Integer = 24000
 
+        Private _supervised As System.Boolean
         Private _stopStarted As Integer = 0
 
         Private Const SpeechRmsThreshold As Double = 350.0R
@@ -192,6 +193,7 @@ Namespace Transcription
         End Function
 
         Public Async Function StartLiveAsync(opts As TranscriptionOptions, ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task Implements ITranscriptionEngine.StartLiveAsync
+            _supervised = opts IsNot Nothing AndAlso opts.SessionOwnsAudioQueue
             EnsureTls12()
 
             System.Threading.Interlocked.Exchange(_stopStarted, 0)
@@ -286,7 +288,7 @@ Namespace Transcription
         End Function
 
         Public Async Function PushAudioAsync(pcm As Byte(), bytesValid As Integer, ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task Implements ITranscriptionEngine.PushAudioAsync
-            If _ws Is Nothing OrElse _ws.State <> System.Net.WebSockets.WebSocketState.Open OrElse pcm Is Nothing OrElse bytesValid <= 0 Then
+            If pcm Is Nothing OrElse bytesValid <= 0 Then
                 Return
             End If
 
@@ -336,7 +338,8 @@ Namespace Transcription
             End If
 
             If _ws Is Nothing OrElse _ws.State <> System.Net.WebSockets.WebSocketState.Open Then
-                Return
+                If IsStoppingOrCanceled(ct) Then Return
+                Throw New System.IO.IOException("OpenAI Realtime connection is closed.")
             End If
 
             Dim b64 As String = System.Convert.ToBase64String(audio24k)
@@ -380,7 +383,8 @@ Namespace Transcription
             End If
 
             If _utteranceStartedUtc <> System.DateTime.MinValue AndAlso
-       (System.DateTime.UtcNow - _utteranceStartedUtc).TotalMilliseconds >= MaximumUtteranceMilliseconds Then
+       ((System.DateTime.UtcNow - _utteranceStartedUtc).TotalMilliseconds >= MaximumUtteranceMilliseconds OrElse
+        _bytesSinceCommit >= RealtimeSampleRate * 2 * MaximumUtteranceMilliseconds \ 1000) Then
                 Return True
             End If
 
@@ -436,9 +440,11 @@ Namespace Transcription
                     Await CommitBufferAsync().ConfigureAwait(False)
 
                     Try
-                        Await System.Threading.Tasks.Task.WhenAny(
-                    finalTranscriptTask,
-                    System.Threading.Tasks.Task.Delay(2500)).ConfigureAwait(False)
+                        Dim completed = Await System.Threading.Tasks.Task.WhenAny(
+                            finalTranscriptTask, System.Threading.Tasks.Task.Delay(2500)).ConfigureAwait(False)
+                        If _supervised AndAlso completed IsNot finalTranscriptTask Then
+                            RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs("The final audio commit was not confirmed.", Nothing, True))
+                        End If
                     Catch
                     End Try
                 End If
@@ -585,7 +591,8 @@ Namespace Transcription
 
         Private Async Function SendJsonAsync(json As String, ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task
             If _ws Is Nothing OrElse _ws.State <> System.Net.WebSockets.WebSocketState.Open Then
-                Return
+                If IsStoppingOrCanceled(ct) Then Return
+                Throw New System.IO.IOException("OpenAI Realtime connection is closed.")
             End If
 
             Try
@@ -613,7 +620,8 @@ Namespace Transcription
                 lockTaken = True
 
                 If _ws Is Nothing OrElse _ws.State <> System.Net.WebSockets.WebSocketState.Open Then
-                    Return
+                    If IsStoppingOrCanceled(ct) Then Return
+                    Throw New System.IO.IOException("OpenAI Realtime connection is closed.")
                 End If
 
                 Dim bytes As Byte() = System.Text.Encoding.UTF8.GetBytes(json)
@@ -643,12 +651,7 @@ Namespace Transcription
                 Throw New System.InvalidOperationException(detail, ex)
 
             Catch ex As System.Exception
-                If IsStoppingOrCanceled(sendCt) OrElse
-           _ws Is Nothing OrElse
-           _ws.State = System.Net.WebSockets.WebSocketState.Aborted OrElse
-           _ws.State = System.Net.WebSockets.WebSocketState.CloseReceived OrElse
-           _ws.State = System.Net.WebSockets.WebSocketState.CloseSent OrElse
-           _ws.State = System.Net.WebSockets.WebSocketState.Closed Then
+                If IsStoppingOrCanceled(sendCt) Then
                     Return
                 End If
 
@@ -727,7 +730,7 @@ Namespace Transcription
                         r = Await _ws.ReceiveAsync(New System.ArraySegment(Of Byte)(buf), ct).ConfigureAwait(False)
 
                         If r.MessageType = System.Net.WebSockets.WebSocketMessageType.Close Then
-                            Return
+                            Exit While
                         End If
 
                         sb.Append(System.Text.Encoding.UTF8.GetString(buf, 0, r.Count))
@@ -735,9 +738,14 @@ Namespace Transcription
 
                     HandleServerMessage(sb.ToString())
                 End While
-            Catch ex As System.OperationCanceledException
+                If Not ct.IsCancellationRequested AndAlso System.Threading.Volatile.Read(_stopStarted) = 0 Then
+                    RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs("OpenAI Realtime connection closed.", Nothing, True))
+                End If
+            Catch ex As System.OperationCanceledException When ct.IsCancellationRequested
             Catch ex As System.Exception
-                RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs("OpenAI Realtime WS read failed: " & GetDetailedExceptionMessage(ex), ex, False))
+                If Not ct.IsCancellationRequested AndAlso System.Threading.Volatile.Read(_stopStarted) = 0 Then
+                    RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs("OpenAI Realtime WS read failed: " & GetDetailedExceptionMessage(ex), ex, True))
+                End If
             End Try
         End Function
 
@@ -848,7 +856,7 @@ Namespace Transcription
                             Return
                         End If
 
-                        RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs("OpenAI Realtime transcription failed: " & detail, Nothing, False))
+                        RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs("OpenAI Realtime transcription failed: " & detail, Nothing, True))
 
                     Case "session.created", "session.updated"
                         Dim sessionObject As Newtonsoft.Json.Linq.JObject = TryCast(jo("session"), Newtonsoft.Json.Linq.JObject)
@@ -910,7 +918,7 @@ Namespace Transcription
                             Return
                         End If
 
-                        RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs("OpenAI Realtime error: " & detail, Nothing, False))
+                        RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs("OpenAI Realtime error: " & detail, Nothing, True))
 
                     Case Else
                         System.Diagnostics.Debug.WriteLine("[OpenAI Realtime] Unhandled event type: " & eventType)

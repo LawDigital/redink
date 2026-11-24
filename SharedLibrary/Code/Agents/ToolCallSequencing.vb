@@ -2558,7 +2558,8 @@ Namespace Agents
                                Optional rejectedBeforeExecution As System.Boolean = False,
                                Optional serviceErrorDetails As ToolServiceErrorInfo = Nothing,
                                Optional retryCorrelationRequiredArgumentNames As System.Collections.Generic.IEnumerable(Of System.String) = Nothing,
-                               Optional retryCorrelationDisallowsAdditionalArguments As System.Boolean = True)
+                               Optional retryCorrelationDisallowsAdditionalArguments As System.Boolean = True,
+                               Optional boundOutputTarget As OptionalToolArtifactMetadata = Nothing)
                 Dim normalizedToolName As String = If(toolName, "").Trim()
                 Dim normalizedHandling As String = If(toolErrorHandling, "").Trim()
                 Dim normalizedRecoveryScopeKey As String = If(recoveryScopeKey, "").Trim()
@@ -2589,6 +2590,19 @@ Namespace Agents
                     TryBuildDeliverableTargetCorrelation(
                         retryCorrelationArguments,
                         deliverableTargetCorrelationSignature)
+                End If
+
+                ' A host producer may have bound a single source after preflight. Retain the
+                ' locked slot even on failure. Keep replay keys and retry arguments unchanged.
+                If deliverableTargetCorrelationSignature.Length = 0 AndAlso Not rejectedBeforeExecution AndAlso
+                   boundOutputTarget IsNot Nothing AndAlso boundOutputTarget.ProducesUserDeliverable AndAlso
+                   IsDeliverableCapableTool(normalizedToolName) AndAlso (ExpectedDeliverableContractLocked OrElse OutputContractPinned) Then
+                    Dim expected = GetExpectedDeliverableSlot(boundOutputTarget.LogicalDeliverableId, boundOutputTarget.OutputSlotId)
+                    If expected IsNot Nothing AndAlso Not IsExpectedDeliverableSlotSatisfied(expected.LogicalDeliverableId, expected.OutputSlotId) Then
+                        Dim identity As New System.Collections.Generic.Dictionary(Of System.String, System.Object) From {
+                            {"logical_deliverable_id", expected.LogicalDeliverableId}, {"output_slot_id", expected.OutputSlotId}}
+                        TryBuildDeliverableTargetCorrelation(identity, deliverableTargetCorrelationSignature)
+                    End If
                 End If
 
                 If (normalizedRecoveryScopeKey = System.String.Empty OrElse allowRetryScopeRebinding) AndAlso

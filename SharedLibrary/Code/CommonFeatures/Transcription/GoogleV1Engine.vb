@@ -117,6 +117,8 @@ Namespace Transcription
         Private _writerTask As Task
         Private _readerTask As Task
         Private _readerCts As CancellationTokenSource
+        Private _finishingSupervised As System.Boolean
+        Private _liveToken As System.Threading.CancellationToken
         Private _streamStarted As DateTime
         Private _completed As Boolean
         Private _lastPartial As String = String.Empty
@@ -143,6 +145,7 @@ Namespace Transcription
         End Sub
 
         Public Async Function StartLiveAsync(opts As TranscriptionOptions, ct As CancellationToken) As Task Implements ITranscriptionEngine.StartLiveAsync
+            _liveToken = ct
             _opts = opts
             _audioQueue = New BlockingCollection(Of ByteString)()
             _readerCts = New CancellationTokenSource()
@@ -150,11 +153,19 @@ Namespace Transcription
             _nextSpeaker = 1
 
             Await BuildClientAndStream()
-            StartWriter()
+            If Not _opts.SessionOwnsAudioQueue Then StartWriter()
             _readerTask = StartReader()
         End Function
 
         Public Function PushAudioAsync(pcm As Byte(), bytesValid As Integer, ct As CancellationToken) As Task Implements ITranscriptionEngine.PushAudioAsync
+            If _opts IsNot Nothing AndAlso _opts.SessionOwnsAudioQueue Then
+                ct.ThrowIfCancellationRequested()
+                If (System.DateTime.UtcNow - _streamStarted).TotalMilliseconds >= STREAMING_LIMIT_MS Then
+                    Throw New LiveStreamRotationException()
+                End If
+                Return _stream.WriteAsync(New StreamingRecognizeRequest With {.AudioContent = Google.Protobuf.ByteString.CopyFrom(pcm, 0, bytesValid)})
+            End If
+
             If _completed OrElse _audioQueue Is Nothing OrElse _audioQueue.IsAddingCompleted Then
                 Return Task.CompletedTask
             End If
@@ -182,6 +193,23 @@ Namespace Transcription
         End Function
 
         Public Async Function StopLiveAsync() As Task Implements ITranscriptionEngine.StopLiveAsync
+            If _opts IsNot Nothing AndAlso _opts.SessionOwnsAudioQueue Then
+                If _finishingSupervised Then Return
+                _finishingSupervised = True
+                Try
+                    If _stream IsNot Nothing AndAlso Not _liveToken.IsCancellationRequested Then
+                        Await _stream.WriteCompleteAsync().ConfigureAwait(False)
+                        If _readerTask IsNot Nothing Then Await _readerTask.ConfigureAwait(False)
+                    End If
+                Finally
+                    If _readerCts IsNot Nothing Then _readerCts.Cancel()
+                    If _stream IsNot Nothing Then _stream.Dispose()
+                    If _readerCts IsNot Nothing Then _readerCts.Dispose()
+                    If _audioQueue IsNot Nothing Then _audioQueue.Dispose()
+                End Try
+                Return
+            End If
+
             Try
                 If _readerCts IsNot Nothing Then
                     _readerCts.Cancel()
@@ -298,7 +326,8 @@ Namespace Transcription
 
             _streamStarted = DateTime.UtcNow
             _completed = False
-            _stream = _client.StreamingRecognize()
+            _stream = If(_opts IsNot Nothing AndAlso _opts.SessionOwnsAudioQueue,
+                _client.StreamingRecognize(callSettings:=Google.Api.Gax.Grpc.CallSettings.FromCancellationToken(_liveToken)), _client.StreamingRecognize())
 
             Dim primaryConfig As New StreamingRecognitionConfig With {
                 .Config = BuildConfig(_opts),
@@ -315,6 +344,8 @@ Namespace Transcription
             End Try
 
             If fallbackNeeded Then
+                _stream.Dispose()
+                _liveToken.ThrowIfCancellationRequested()
                 Dim cfg2 As New RecognitionConfig With {
                     .Encoding = RecognitionConfig.Types.AudioEncoding.Linear16,
                     .SampleRateHertz = 16000,
@@ -326,7 +357,8 @@ Namespace Transcription
                     .InterimResults = True
                 }
 
-                _stream = _client.StreamingRecognize()
+                _stream = If(_opts IsNot Nothing AndAlso _opts.SessionOwnsAudioQueue,
+                _client.StreamingRecognize(callSettings:=Google.Api.Gax.Grpc.CallSettings.FromCancellationToken(_liveToken)), _client.StreamingRecognize())
                 Await _stream.WriteAsync(New StreamingRecognizeRequest With {.StreamingConfig = sc})
             End If
 
@@ -406,8 +438,18 @@ Namespace Transcription
                                 End If
                             Next
                         End While
-                    Catch ocex As OperationCanceledException
+                        If _opts.SessionOwnsAudioQueue AndAlso Not token.IsCancellationRequested AndAlso Not _finishingSupervised Then
+                            RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs("Google speech stream ended.", Nothing, True))
+                        End If
+                    Catch ocex As System.OperationCanceledException When token.IsCancellationRequested OrElse _liveToken.IsCancellationRequested
                     Catch rex As RpcException
+                        If _opts.SessionOwnsAudioQueue Then
+                            If _finishingSupervised AndAlso Not _liveToken.IsCancellationRequested Then Throw
+                            If Not token.IsCancellationRequested AndAlso Not _liveToken.IsCancellationRequested AndAlso Not _finishingSupervised Then
+                                RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs("Google speech stream interrupted: " & rex.Message, rex, True))
+                            End If
+                            Return
+                        End If
                         If Not token.IsCancellationRequested AndAlso rex.StatusCode <> StatusCode.Cancelled Then
                             If Not String.IsNullOrWhiteSpace(_lastPartial) Then
                                 RaiseEvent FinalResult(Me, New TranscriptionEventArgs(_lastPartial.Trim(), True))
@@ -416,7 +458,14 @@ Namespace Transcription
 
                             RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs("Google V1 stream interrupted.", rex, False))
                         End If
-                    Catch ex As Exception
+                    Catch ex As System.Exception
+                        If _opts.SessionOwnsAudioQueue Then
+                            If _finishingSupervised AndAlso Not _liveToken.IsCancellationRequested Then Throw
+                            If Not token.IsCancellationRequested AndAlso Not _liveToken.IsCancellationRequested AndAlso Not _finishingSupervised Then
+                                RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs("Google speech stream interrupted: " & ex.Message, ex, True))
+                            End If
+                            Return
+                        End If
                         RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs("Reader: " & ex.Message, ex, False))
                     End Try
                 End Function)

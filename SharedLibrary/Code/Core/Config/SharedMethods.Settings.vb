@@ -122,8 +122,17 @@ Namespace SharedLibrary
             Dim labelControls As New Dictionary(Of String, System.Windows.Forms.Label)
             Dim settingControls As New Dictionary(Of String, System.Windows.Forms.Control)
 
+            ' Display local preferences with the same labels, measurements and controls as context settings.
+            Dim rows As New System.Collections.Generic.List(Of System.Collections.Generic.KeyValuePair(Of System.String, System.String))(Settings)
+            Dim anchor As System.String = If(Settings.ContainsKey("ChunkOCR"), "ChunkOCR", "DictionarySegmentPrompt")
+            Dim position As System.Int32 = rows.FindIndex(Function(row) row.Key = anchor)
+            rows.Insert(If(position < 0, rows.Count, position + 1),
+                New System.Collections.Generic.KeyValuePair(Of System.String, System.String)(WindowsOcrPreference, "Always use Windows OCR when available (local preference)"))
+            Dim originalOcrPreference As System.Boolean = PreferWindowsOcr()
+            Dim windowsOcrCheck As System.Windows.Forms.CheckBox = Nothing
+
             Dim maxLabelWidth As Integer = 0
-            For Each setting In Settings
+            For Each setting In rows
                 Dim textSize As System.Drawing.Size
                 If context.INI_SecondAPI Then
                     textSize = TextRenderer.MeasureText(setting.Value.Replace("{model}", context.INI_Model).Replace("{model2}", context.INI_Model_2) & ":", standardFont)
@@ -151,7 +160,8 @@ Namespace SharedLibrary
 
             Dim yPos As Integer = 0
 
-            For Each setting In Settings
+            For Each setting In rows
+                Dim isLocalOcr As System.Boolean = (setting.Key = WindowsOcrPreference)
                 Dim label As New System.Windows.Forms.Label()
                 Dim ToolTip As New System.Windows.Forms.ToolTip()
                 If context.INI_SecondAPI Then
@@ -164,16 +174,23 @@ Namespace SharedLibrary
                 label.Location = New System.Drawing.Point(0, yPos)
                 scrollPanel.Controls.Add(label)
                 labelControls.Add(setting.Key, label)
-                Dim ToolTipText As String = SettingsTips(setting.Key)
+                Dim ToolTipText As String = If(isLocalOcr,
+                    "Use Windows OCR whenever available, including in unattended runs. Saved for this Windows user.",
+                    SettingsTips(setting.Key))
                 ToolTip.SetToolTip(label, ToolTipText)
 
-                If IsBooleanSetting(setting.Key) Then
+                If isLocalOcr OrElse IsBooleanSetting(setting.Key) Then
                     Dim checkBox As New System.Windows.Forms.CheckBox()
-                    checkBox.Checked = Boolean.Parse(GetSettingValue(setting.Key, context))
+                    If isLocalOcr Then
+                        windowsOcrCheck = checkBox
+                        checkBox.Checked = originalOcrPreference
+                    Else
+                        checkBox.Checked = Boolean.Parse(GetSettingValue(setting.Key, context))
+                        settingControls.Add(setting.Key, checkBox)
+                    End If
                     checkBox.Location = New System.Drawing.Point(controlXOffset, yPos - 2)
                     checkBox.Enabled = Not (setting.Key.Contains("_2") AndAlso Not context.INI_SecondAPI)
                     scrollPanel.Controls.Add(checkBox)
-                    settingControls.Add(setting.Key, checkBox)
                     ToolTip.SetToolTip(checkBox, ToolTipText)
                 Else
                     Dim textBox As New System.Windows.Forms.TextBox()
@@ -188,6 +205,21 @@ Namespace SharedLibrary
 
                 yPos += lineSpacing
             Next
+
+            Dim saveOcrPreference As System.Func(Of System.Boolean) =
+                Function()
+                    If windowsOcrCheck.Checked = originalOcrPreference Then Return True
+                    Try
+                        SaveWindowsOcrPreference(windowsOcrCheck.Checked)
+                        originalOcrPreference = windowsOcrCheck.Checked
+                        Return True
+                    Catch ex As System.Exception
+                        Using SharedMethods.PushDialogOwner(settingsForm)
+                            ShowCustomMessageBox("The local Windows OCR preference could not be saved: " & ex.Message)
+                        End Using
+                        Return False
+                    End Try
+                End Function
 
             ' After populating:
             Dim contentHeight As Integer = yPos
@@ -585,6 +617,7 @@ Namespace SharedLibrary
                                                  End Sub
 
             AddHandler saveConfigButton.Click, Sub(sender, e)
+                                                   If Not saveOcrPreference() Then Return
                                                    For Each settingKey In settingControls.Keys
                                                        Dim control = settingControls(settingKey)
                                                        If TypeOf control Is System.Windows.Forms.TextBox Then
@@ -695,6 +728,7 @@ Namespace SharedLibrary
             End If
 
             AddHandler okButton.Click, Sub(sender, e)
+                                           If Not saveOcrPreference() Then Return
 
                                            Dim SaveToMySettings As New Dictionary(Of String, String) From {
                                                      {"DefaultPrefix", "DefaultPrefix"},

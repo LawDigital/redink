@@ -195,7 +195,8 @@ Namespace Agents
                         """output_format"":{""type"":""string"",""enum"":[""text"",""markdown""],""description"":""Default text. Markdown for PDF/DOCX/DOCM/MD; other formats retain text outputs. PDF Markdown does not support OCR.""}," &
                         """recursive"":{""type"":""boolean"",""description"":""For directory input, include subdirectories. Default true.""}," &
                         """overwrite"":{""type"":""boolean"",""description"":""Overwrite existing outputs only when true. Default false.""}," &
-                        """ocr_pdf"":{""type"":""boolean"",""description"":""Enable silent OCR heuristics for PDFs when a suitable model is configured. Default false.""}}," &
+                        SharedMethods.AgentPdfOcrSchema & "," &
+                        """ocr_pdf"":{""type"":""boolean"",""description"":""Enable silent OCR heuristics for PDFs when an engine is available. Default false, or true if ocr_engine or ocr_batch_pages or ocr_language is supplied.""}}," &
                         """required"":[""input_path""]}",
                     923,
                     "Text (export to text)",
@@ -830,7 +831,15 @@ Namespace Agents
             Dim inputPath As String = PathPolicy.Resolve(requestedPath, PathAccess.Read)
             Dim recursive As Boolean = GetBool(args, "recursive", True)
             Dim overwrite As Boolean = GetBool(args, "overwrite", False)
-            Dim ocrPdf As Boolean = GetBool(args, "ocr_pdf", False)
+            Dim policy As SharedMethods.AgentPdfOcrPolicy
+            Try
+                policy = SharedMethods.AgentPdfOcrPolicy.Parse(args)
+            Catch ex As System.ArgumentException
+                Return BuildError("invalid_ocr_policy", ex.Message)
+            End Try
+            Dim hasOcrOptions As System.Boolean = args.ContainsKey("ocr_engine") OrElse args.ContainsKey("ocr_batch_pages") OrElse args.ContainsKey("ocr_language")
+            Dim ocrPdf As Boolean = GetBool(args, "ocr_pdf", hasOcrOptions)
+            If Not ocrPdf AndAlso hasOcrOptions Then Return BuildError("invalid_ocr_policy", "Explicit OCR options conflict with ocr_pdf=false.")
             Dim outputDirectoryArg As String = GetStr(args, "output_directory")
             Dim outputFormat As System.String = GetStr(args, "output_format").Trim().ToLowerInvariant()
             If outputFormat = "" Then outputFormat = "text"
@@ -854,7 +863,7 @@ Namespace Agents
                 cancellationToken.ThrowIfCancellationRequested()
                 Dim outputPath As System.String = ResolveSingleFileTextOutputPath(inputPath, outputDirectoryArg, outputFormat)
                 Dim item As Newtonsoft.Json.Linq.JObject = Await ExportSingleTextFileAsync(
-                    inputPath, outputPath, overwrite, ocrPdf, context, cancellationToken, outputFormat).ConfigureAwait(False)
+                    inputPath, outputPath, overwrite, ocrPdf, context, cancellationToken, outputFormat, policy).ConfigureAwait(False)
                 items.Add(item)
                 CountTextExportItem(item, convertedCount, skippedCount, failedCount)
                 Return JsonConvert.SerializeObject(New With {
@@ -892,7 +901,7 @@ Namespace Agents
                 Dim outputPath As System.String = DefaultTextExportPath(outputParent, sourcePath, outputFormat)
 
                 Dim item As Newtonsoft.Json.Linq.JObject = Await ExportSingleTextFileAsync(
-                    sourcePath, outputPath, overwrite, ocrPdf, context, cancellationToken, outputFormat).ConfigureAwait(False)
+                    sourcePath, outputPath, overwrite, ocrPdf, context, cancellationToken, outputFormat, policy).ConfigureAwait(False)
                 items.Add(item)
                 CountTextExportItem(item, convertedCount, skippedCount, failedCount)
             Next
@@ -925,10 +934,14 @@ Namespace Agents
                                                                  ocrPdf As System.Boolean,
                                                                  context As ISharedContext,
                                                                  cancellationToken As System.Threading.CancellationToken,
-                                                                 Optional outputFormat As System.String = "text") As System.Threading.Tasks.Task(Of Newtonsoft.Json.Linq.JObject)
+                                                                 outputFormat As System.String, policy As SharedMethods.AgentPdfOcrPolicy) As System.Threading.Tasks.Task(Of Newtonsoft.Json.Linq.JObject)
+            Dim options As New TextExportOptions With {.Overwrite = overwrite, .OcrPdf = ocrPdf, .OutputFormat = outputFormat}
+            If ocrPdf AndAlso System.String.Equals(System.IO.Path.GetExtension(sourcePath), ".pdf", System.StringComparison.OrdinalIgnoreCase) Then
+                options.OcrBatchPages = policy.BatchPages.GetValueOrDefault(options.OcrBatchPages)
+                If policy.Mode <> "settings" OrElse policy.LanguageTag.Length > 0 Then options.PdfOcrPolicy = policy
+            End If
             Dim result As TextExportResult = Await TextExportService.ExportFileAsync(
-                context, sourcePath, outputPath, New TextExportOptions With {.Overwrite = overwrite, .OcrPdf = ocrPdf, .OutputFormat = outputFormat},
-                cancellationToken).ConfigureAwait(False)
+                context, sourcePath, outputPath, options, cancellationToken).ConfigureAwait(False)
             Return result.LegacyItem
         End Function
 
@@ -942,6 +955,8 @@ Namespace Agents
             If context Is Nothing Then Return Nothing
             Dim isolated As ISharedContext = SharedMethods.CreateIsolatedModelCallContext(context)
             Dim extension As System.String = System.IO.Path.GetExtension(sourcePath).ToLowerInvariant()
+            If options.PdfOcrPolicy IsNot Nothing Then Return isolated
+            If SharedMethods.UseWindowsOcrForBackground(isolated, extension, options.OcrPdf) Then Return Nothing
             Dim taskName As System.String = System.String.Empty
             If extension = ".pdf" AndAlso options.OcrPdf Then taskName = "OCR"
             If SharedMethods.IsBinaryMediaExtension(extension) Then taskName = SharedMethods.TaskFlagForExtension(extension)
@@ -955,7 +970,7 @@ Namespace Agents
                                                                  options As TextExportOptions) As System.String
             Dim isolatedContext As ISharedContext = CreateTextExportCallContext(sourcePath, context, options)
             Return BuildTextExportProcessingSignature(GetExtractionAdapterId(sourcePath), TextExportAdapterVersion,
-                GetExtractionConfigurationFingerprint(sourcePath, isolatedContext, options.OcrPdf),
+                GetExtractionConfigurationFingerprint(sourcePath, isolatedContext, options.OcrPdf, options),
                 TextExportOptionsFingerprint(options, options.OcrPdf))
         End Function
 
@@ -1007,7 +1022,7 @@ Namespace Agents
                             Dim currentSourceHash As System.String = TextFileSnapshot.ComputeFileHash(sourcePath)
                             Dim knownAdapterId As System.String = GetExtractionAdapterId(sourcePath)
                             Dim knownAdapterVersion As System.String = TextExportAdapterVersion
-                            Dim knownConfigurationFingerprint As System.String = GetExtractionConfigurationFingerprint(sourcePath, context, ocrPdf)
+                            Dim knownConfigurationFingerprint As System.String = GetExtractionConfigurationFingerprint(sourcePath, context, ocrPdf, executionOptions)
                             Dim knownOptionsFingerprint As System.String = TextExportOptionsFingerprint(executionOptions, ocrPdf)
                             If TextExtractionResourceRegistry.TryGetVerifiedPublishedOutput(
                                 outputPath, currentSourceHash, knownAdapterId, knownAdapterVersion,
@@ -1060,7 +1075,7 @@ Namespace Agents
                 context = CreateTextExportCallContext(sourcePath, context, If(executionOptions, New TextExportOptions With {.OcrPdf = ocrPdf}))
                 Dim adapterId As System.String = GetExtractionAdapterId(sourcePath)
                 Dim adapterVersion As System.String = TextExportAdapterVersion
-                Dim configurationFingerprint As System.String = GetExtractionConfigurationFingerprint(sourcePath, context, ocrPdf)
+                Dim configurationFingerprint As System.String = GetExtractionConfigurationFingerprint(sourcePath, context, ocrPdf, executionOptions)
                 Dim optionsFingerprint As System.String = TextExportOptionsFingerprint(executionOptions, ocrPdf)
 
                 Dim timer As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
@@ -1220,22 +1235,36 @@ Namespace Agents
 
         Private Shared Function GetExtractionConfigurationFingerprint(sourcePath As System.String,
                                                                       context As ISharedContext,
-                                                                      ocrPdf As System.Boolean) As System.String
+                                                                      ocrPdf As System.Boolean, options As TextExportOptions) As System.String
             Dim extension As System.String = System.IO.Path.GetExtension(sourcePath).ToLowerInvariant()
+            If options IsNot Nothing AndAlso options.PdfOcrPolicy IsNot Nothing Then
+                If options.PdfOcrPolicy.LanguageTag.Length > 0 AndAlso options.PdfOcrPolicy.Mode <> "llm" Then
+                    Dim config As System.String = If(options.PdfOcrPolicy.Mode = "windows", SharedMethods.GetLocalOcrFingerprint(), SharedMethods.GetOcrConfigurationFingerprint(context))
+                    Return TextExtractionResourceRegistry.HashString(config & "|installed_ocr_languages=" & System.String.Join(",", SharedMethods.InstalledWindowsOcrLanguages()))
+                End If
+                If options.PdfOcrPolicy.Mode = "windows" Then Return TextExtractionResourceRegistry.HashString(SharedMethods.GetLocalOcrFingerprint())
+                Return SharedMethods.GetOcrConfigurationFingerprint(context)
+            End If
+            If SharedMethods.UseWindowsOcrForBackground(context, extension, ocrPdf) Then
+                Return TextExtractionResourceRegistry.HashString(extension & "|" & SharedMethods.GetLocalOcrFingerprint())
+            End If
             If extension = ".pdf" Then
                 ' Version the PDF extraction contract only. Existing non-PDF extracts
                 ' do not become stale merely because PDF reading/OCR was corrected.
                 Dim ocrFingerprint As System.String = "disabled"
                 If ocrPdf Then
-                    If context IsNot Nothing Then SharedMethods.ResolveIsolatedSpecialTaskModel(context, "OCR")
                     ocrFingerprint = SharedMethods.GetOcrConfigurationFingerprint(context)
                 End If
                 Return TextExtractionResourceRegistry.HashString("pdf-layout-and-page-ocr-v1|" & ocrFingerprint)
             End If
+            If SharedMethods.TaskFlagForExtension(extension) = "ImageExtraction" AndAlso context Is Nothing Then
+                Return TextExtractionResourceRegistry.HashString("media-no-model|" & SharedMethods.GetLocalOcrFingerprint())
+            End If
             If SharedMethods.IsBinaryMediaExtension(extension) AndAlso context IsNot Nothing Then
                 Dim resolved As SharedMethods.IsolatedSpecialTaskModel = SharedMethods.ResolveIsolatedSpecialTaskModel(
                     context, SharedMethods.TaskFlagForExtension(extension))
-                Return TextExtractionResourceRegistry.HashString("media-adapter-v1|" & resolved.Signature & "|" & If(context.SP_InsertClipboard, System.String.Empty))
+                Dim localFingerprint As System.String = If(SharedMethods.TaskFlagForExtension(extension) = "ImageExtraction", SharedMethods.GetLocalOcrFingerprint(), System.String.Empty)
+                Return TextExtractionResourceRegistry.HashString("media-adapter-v1|" & localFingerprint & resolved.Signature & "|" & If(context.SP_InsertClipboard, System.String.Empty))
             End If
             If extension = ".doc" Then
                 Return TextExtractionResourceRegistry.HashString("legacy-word|enabled=" &
@@ -1375,10 +1404,11 @@ Namespace Agents
                     Dim pdf As SharedMethods.PdfReadResult = Await SharedMethods.ReadPdfAsTextEx(
                         pdfPath:=filePath,
                         ReturnErrorInsteadOfEmpty:=False,
-                        DoOCR:=ocrPdf AndAlso context IsNot Nothing,
+                        DoOCR:=ocrPdf,
                         AskUser:=False,
                         context:=context,
                         ShowOcrProgressWindow:=False,
+                        agentPolicy:=If(executionOptions, New TextExportOptions()).PdfOcrPolicy,
                         OcrBatchPages:=If(executionOptions, New TextExportOptions()).OcrBatchPages,
                         CancellationToken:=cancellationToken).ConfigureAwait(False)
                     Dim succeeded As System.Boolean = System.String.IsNullOrWhiteSpace(pdf.ErrorCode) AndAlso
@@ -1396,7 +1426,7 @@ Namespace Agents
                         .ExtractionComplete = If(Not succeeded, CType(False, System.Nullable(Of System.Boolean)), pdf.ExtractionComplete),
                         .ExtractionCoverageBasis = pdf.ExtractionCoverageBasis,
                         .ExtractionWarnings = TextExtractionDiagnostics.CopyWarnings(pdf.ExtractionWarnings),
-                        .ContentFormat = If(pdf.OcrUsed, "ocr_model_text", "plain_text"),
+                        .ContentFormat = If(pdf.OcrUsed AndAlso pdf.UsedWindowsOcr, "plain_text", If(pdf.OcrUsed, "ocr_model_text", "plain_text")),
                         .ProcessedRanges = BuildPdfProcessedRanges(pdf)
                     }
 
@@ -1412,7 +1442,7 @@ Namespace Agents
 
                 Case Else
                     If SharedMethods.IsBinaryMediaExtension(ext) Then
-                        If context Is Nothing OrElse Not SharedMethods.IsModelCapableForExtension(context, ext) Then
+                        If Not SharedMethods.IsModelCapableForExtension(context, ext) Then
                             Return New TextExtractionOutcome() With {
                                 .Success = False,
                                 .ErrorCode = "unsupported_binary_media",
@@ -1737,6 +1767,10 @@ Namespace Agents
             ' representations are not invalidated by adding an opt-in output format.
             Dim value As System.String = "ocr_pdf=" & ocrPdf.ToString(System.Globalization.CultureInfo.InvariantCulture) &
                 "|ocr_batch_pages=" & effective.OcrBatchPages.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            If effective.PdfOcrPolicy IsNot Nothing Then
+                value &= "|ocr_engine=" & effective.PdfOcrPolicy.Mode & "|min_pages=" & effective.PdfOcrPolicy.MinimumPages.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                If effective.PdfOcrPolicy.LanguageTag.Length > 0 Then value &= "|ocr_language=" & effective.PdfOcrPolicy.LanguageTag.ToLowerInvariant()
+            End If
             If NormalizeTextExportFormat(effective.OutputFormat) = "markdown" Then value &= "|output_format=markdown"
             Return TextExtractionResourceRegistry.HashString(value)
         End Function

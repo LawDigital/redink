@@ -2671,7 +2671,8 @@ Partial Public Class ThisAddIn
                                                     recoveryScopeKey:=recoveryScopeKey,
                                                     retryCorrelationArguments:=tc.Arguments,
                                                     rejectedBeforeExecution:=toolResponse.RejectedBeforeExecution,
-                                                    serviceErrorDetails:=toolResponse.ServiceErrorDetails)
+                                                    serviceErrorDetails:=toolResponse.ServiceErrorDetails,
+                                                    boundOutputTarget:=toolResponse.BoundOutputTarget)
 
                                     Dim repairHint As System.String = context.SequencingState.BuildRepairReferenceHint(tc.ToolName, recoveryScopeKey)
                                     If repairHint.Length > 0 Then

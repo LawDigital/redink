@@ -242,6 +242,7 @@ Partial Public Class ThisAddIn
             "For PowerPoint and Excel, produces the processed file only. " &
             "The processor works chunk-by-chunk and does not see the full document in one model call or retain hidden memory between chunks. The calling model is responsible for document-wide consistency: " &
             "when stable terminology, names, translation choices, tone, abbreviations, recurring replacements, or other cross-document facts matter, provide a compact reusable global_context. " &
+            "A single attachment can bind its primary processed file to one host-issued output slot. For a batch, omit per-call identity or make one call per source with its matching slot. " &
             "For successful Word processing, surface both returned files (clean processed document and compare document) to the user. " &
             "IMPORTANT: Apply only ONE operation per call. For multi-step requests (e.g. 'correct and translate'), " &
             "make separate sequential calls — first correct, then translate the corrected output file. " &
@@ -281,7 +282,7 @@ Partial Public Class ThisAddIn
             "Omit all selectors or pass attachment_names=[] only when all eligible PDFs are intended. Invalid, missing, ambiguous or non-PDF explicit targets fail before any extraction; they never select all files. " &
             "By default it returns plain text. If the user wants Markdown, pass output_format='markdown'. " &
             "For text-based PDFs, Markdown uses the direct PDF-to-Markdown extractor without OCR. " &
-            "If OCR is needed and available, the OCR path is retained and should return Markdown when Markdown was requested.",
+            "Honor user or skill OCR engine requests using ocr_engine. Windows OCR requires text output when OCR is needed.",
         .ToolDefinition =
             "{""name"":""" & AP_Tool_ExtractPdfText & """," &
             """description"":""Extracts content from PDF file attachments. " &
@@ -290,6 +291,7 @@ Partial Public Class ThisAddIn
             """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Exact PDF session filenames to read. Omit or use [] only to process all eligible PDFs. Explicit targets must all exist and be available; invalid targets never expand to all files.""}," &
             """attachment_name"":{""type"":""string"",""description"":""Compatibility alias for one exact PDF session filename. Prefer attachment_names.""}," &
             """filename"":{""type"":""string"",""description"":""Compatibility alias for one exact PDF session filename. Prefer attachment_names.""}," &
+            SharedMethods.AgentPdfOcrSchema & "," &
             """output_format"":{""type"":""string"",""enum"":[""text"",""markdown""],""description"":""Optional output format. Default is 'text'. Use 'markdown' to request Markdown output.""}" &
             "},""required"":[]}}"
     })
@@ -1408,7 +1410,8 @@ Partial Public Class ThisAddIn
         For Each tool As ModelConfig In tools
             If tool Is Nothing Then Continue For
             tool.ModelDescription = StripSelectorOwnedToolSuffixes(tool.ModelDescription)
-            If IsOptionalSingleFileAutoPilotArtifactTool(tool.ToolName) Then
+            If IsOptionalSingleFileAutoPilotArtifactTool(tool.ToolName) OrElse
+               System.String.Equals(tool.ToolName, AP_Tool_ProcessWordDoc, System.StringComparison.OrdinalIgnoreCase) Then
                 SharedLibrary.Agents.ArtifactDelivery.EnableOptionalSingleFileArtifactProtocol(tool)
             End If
         Next
