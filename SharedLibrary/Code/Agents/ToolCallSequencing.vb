@@ -4145,6 +4145,7 @@ Namespace Agents
             End If
 
             Dim obj As New JObject(
+                New JProperty("resultKind", "error"),
                 New JProperty("status", "blocked"),
                 New JProperty("error", errorObject))
 

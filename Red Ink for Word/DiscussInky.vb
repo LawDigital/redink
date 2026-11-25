@@ -740,7 +740,7 @@ Public Class DiscussInky
         _toolTip.SetToolTip(_btnAlternateModel, "Switch between the primary model and an alternate or secondary model.")
         _toolTip.SetToolTip(_btnClear, "Clear the current discussion and start a new one.")
         _toolTip.SetToolTip(_btnSendToDoc, "Export the full discussion to a new Word document.")
-        _toolTip.SetToolTip(_btnInsertSelectionToDoc, "Insert the selected chat text into the active Word document at the current selection or cursor.")
+        _toolTip.SetToolTip(_btnInsertSelectionToDoc, "Insert selected chat text into Word. Selecting any part of a recognized text diagram inserts its full block.")
         _toolTip.SetToolTip(_btnClose, "Close this discussion window.")
         _toolTip.SetToolTip(_btnAutoRespond, "Start an automated back-and-forth discussion.")
         _toolTip.SetToolTip(_btnSortOut, "Run a structured Advocate versus Challenger discussion.")
@@ -751,30 +751,250 @@ Public Class DiscussInky
     ''' <summary>
     ''' Gets the currently selected text from the discussion thread.
     ''' </summary>
-    Private Function GetSelectedChatText() As String
-        Try
-            If _chat.Document Is Nothing Then
-                Return ""
+    Private Function GetSelectedChatText(diagrams As System.Collections.Generic.Dictionary(Of System.String, System.String)) As System.String
+        If _chat.Document Is Nothing Then Return System.String.Empty
+        Dim payload As System.String = System.Convert.ToString(_chat.Document.InvokeScript("getSelectedParts"))
+        If System.String.IsNullOrEmpty(payload) Then Return System.String.Empty
+
+        Dim output As New System.Text.StringBuilder()
+        Dim selection As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(payload)
+        For Each part As Newtonsoft.Json.Linq.JToken In selection("parts")
+            Dim selectedText As System.String = CStr(part("text"))
+            Dim blockText As System.String = CStr(part("block"))
+            Dim language As System.String = CStr(part("language"))
+            If IsTextDiagram(blockText, language) Then
+                If output.Length > 0 AndAlso output(output.Length - 1) <> ChrW(10) Then output.Append(vbCrLf)
+                output.Append(RegisterDiscussionDiagram(diagrams, blockText)).Append(vbCrLf)
+            Else
+                output.Append(selectedText)
             End If
-
-            Dim selectedTextObject As Object = _chat.Document.InvokeScript("getSelectedText")
-            Dim selectedText As String = If(selectedTextObject, "").ToString()
-
-            If String.IsNullOrWhiteSpace(selectedText) Then
-                Return ""
-            End If
-
-            selectedText = selectedText.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf).Replace(vbLf, vbCrLf)
-            Return selectedText.Trim()
-        Catch
-            Return ""
-        End Try
+        Next
+        Dim plainSelection As System.String = CStr(selection("text"))
+        If diagrams.Count = 0 AndAlso IsStandaloneDiscussionDiagram(plainSelection) Then
+            Return RegisterDiscussionDiagram(diagrams, plainSelection)
+        End If
+        Dim text As System.String = If(diagrams.Count > 0, output.ToString(), plainSelection)
+        Return text.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf).Replace(vbLf, vbCrLf).Trim()
     End Function
 
-    ''' <summary>
-    ''' Returns a random adverb used to vary assistant tone.
-    ''' </summary>
     ''' <returns>Randomly selected adverb string.</returns>
+    Private Shared Function RegisterDiscussionDiagram(diagrams As System.Collections.Generic.Dictionary(Of System.String, System.String),
+                                                      source As System.String) As System.String
+        Dim marker As System.String = "RIDiscussionDiagram" & System.Guid.NewGuid().ToString("N")
+        diagrams.Add(marker, source)
+        Return marker
+    End Function
+
+    Private Shared Function IsTextDiagram(source As System.String, language As System.String) As System.Boolean
+        If System.String.IsNullOrWhiteSpace(source) Then Return False
+        Dim lines As System.String() = source.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf).Split(ChrW(10))
+        If lines.Length < 2 Then Return False
+        Select Case If(language, System.String.Empty).Trim().ToLowerInvariant().Replace("language-", "")
+            Case "diagram", "flowchart", "ascii", "unicode"
+                Return True
+            Case "", "text", "plaintext", "txt"
+                ' Require multiple lines of framing or connectors to distinguish charts from snippets.
+                Dim unicodeFrameLines As System.Int32 = 0
+                Dim asciiFrameLines As System.Int32 = 0
+                Dim asciiNodeLines As System.Int32 = 0
+                Dim asciiConnectorLines As System.Int32 = 0
+                For Each line As System.String In lines
+                    If System.Text.RegularExpressions.Regex.IsMatch(line, "[\u2500-\u257F].*[\u2500-\u257F]|^\s*[\u2500-\u257F▼▲▶◀]\s*$") Then unicodeFrameLines += 1
+                    If System.Text.RegularExpressions.Regex.IsMatch(line, "\+[-=]{2,}\+") Then asciiFrameLines += 1
+                    If System.Text.RegularExpressions.Regex.IsMatch(line, "^\s*(?:\[[^\]]+\]|<[^>]+>)") Then asciiNodeLines += 1
+                    If System.Text.RegularExpressions.Regex.IsMatch(line, "^\s*[|vV^]\s*$|--+>|<--+") Then asciiConnectorLines += 1
+                Next
+                Return unicodeFrameLines >= 2 OrElse asciiFrameLines >= 2 OrElse
+                    (asciiNodeLines >= 2 AndAlso asciiConnectorLines >= 2)
+            Case Else
+                Return False
+        End Select
+    End Function
+
+    Private Shared Function IsStandaloneDiscussionDiagram(source As System.String) As System.Boolean
+        If Not IsTextDiagram(source, System.String.Empty) Then Return False
+        Dim first As System.String = source.TrimStart()
+        Return first.StartsWith("┌", System.StringComparison.Ordinal) OrElse
+            first.StartsWith("╔", System.StringComparison.Ordinal) OrElse
+            first.StartsWith("+", System.StringComparison.Ordinal) OrElse
+            first.StartsWith("[", System.StringComparison.Ordinal)
+    End Function
+
+    Private Function PrepareDiscussionDiagramMarkdown(markdown As System.String,
+                                                       diagrams As System.Collections.Generic.Dictionary(Of System.String, System.String)) As System.String
+        If System.String.IsNullOrEmpty(markdown) Then Return markdown
+        Dim document As Markdig.Syntax.MarkdownDocument = Markdig.Markdown.Parse(markdown, _mdPipeline)
+        Dim result As New System.Text.StringBuilder(markdown)
+        ' Replace only complete top-level code blocks. Their contents reach Word directly,
+        ' without Markdown or HTML reinterpreting ASCII arrows or significant whitespace.
+        For index As System.Int32 = document.Count - 1 To 0 Step -1
+            Dim block As Markdig.Syntax.Block = document(index)
+            Dim code As Markdig.Syntax.CodeBlock = TryCast(block, Markdig.Syntax.CodeBlock)
+            Dim source As System.String
+            If code IsNot Nothing Then
+                Dim fence As Markdig.Syntax.FencedCodeBlock = TryCast(code, Markdig.Syntax.FencedCodeBlock)
+                Dim language As System.String = If(fence Is Nothing, System.String.Empty, fence.Info)
+                source = code.Lines.ToString()
+                If Not IsTextDiagram(source, language) Then Continue For
+            ElseIf TypeOf block Is Markdig.Syntax.ParagraphBlock Then
+                Dim start As System.Int32 = markdown.LastIndexOf(ChrW(10), block.Span.Start) + 1
+                source = markdown.Substring(start, block.Span.End - start + 1)
+                If Not IsStandaloneDiscussionDiagram(source) Then Continue For
+            Else
+                Continue For
+            End If
+            Dim marker As System.String = RegisterDiscussionDiagram(diagrams, source)
+            result.Remove(block.Span.Start, block.Span.End - block.Span.Start + 1)
+            result.Insert(block.Span.Start, marker)
+        Next
+        Return result.ToString()
+    End Function
+
+    Private Shared Function DiscussionDiagramLines(source As System.String) As System.String()
+        Dim lines As System.String() = source.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf).Split(ChrW(10))
+        ' HTML PRE and a Markdown fence can end with a separator after the last content row.
+        If lines.Length > 1 AndAlso lines(lines.Length - 1).Length = 0 Then System.Array.Resize(lines, lines.Length - 1)
+        For index As System.Int32 = 0 To lines.Length - 1
+            If lines(index).IndexOf(ChrW(9)) < 0 Then Continue For
+            Dim expanded As New System.Text.StringBuilder()
+            For Each character As System.Char In lines(index)
+                If character = ChrW(9) Then
+                    expanded.Append(" "c, 8 - (expanded.Length Mod 8))
+                Else
+                    expanded.Append(character)
+                End If
+            Next
+            lines(index) = expanded.ToString()
+        Next
+        Return lines
+    End Function
+
+    Private Shared Function DiscussionDiagramWidth(paragraph As Microsoft.Office.Interop.Word.Range) As System.Single
+        Dim page As Microsoft.Office.Interop.Word.PageSetup = paragraph.Sections(1).PageSetup
+        Dim width As System.Single = page.PageWidth - page.LeftMargin - page.RightMargin - page.Gutter
+        Dim columns As Microsoft.Office.Interop.Word.TextColumns = page.TextColumns
+        If columns.Count > 1 Then
+            For index As System.Int32 = 1 To columns.Count
+                width = System.Math.Min(width, columns(index).Width)
+            Next
+        End If
+        If CBool(paragraph.Information(Microsoft.Office.Interop.Word.WdInformation.wdWithInTable)) Then
+            Dim cell As Microsoft.Office.Interop.Word.Cell = paragraph.Cells(1)
+            width = System.Math.Min(width, cell.Width - cell.LeftPadding - cell.RightPadding)
+        End If
+        Return System.Math.Max(1.0F, width - 8.0F)
+    End Function
+
+    ' Resolve the internal diagram slots before any text is handed to Word. A Markdown
+    ' paste may collapse the selection, so its selection cannot identify the pasted blocks.
+    Private Shared Function WriteDiscussionWithDiagrams(selection As Microsoft.Office.Interop.Word.Selection,
+                                                         prepared As System.String,
+                                                         diagrams As System.Collections.Generic.Dictionary(Of System.String, System.String),
+                                                         exportDocument As Microsoft.Office.Interop.Word.Document) As System.Boolean
+        Dim slots As New System.Collections.Generic.SortedDictionary(Of System.Int32, System.String)()
+        For Each key As System.String In diagrams.Keys
+            Dim position As System.Int32 = prepared.IndexOf(key, System.StringComparison.Ordinal)
+            If position < 0 Then Throw New System.InvalidOperationException("The discussion export could not locate a source diagram.")
+            slots.Add(position, key)
+        Next
+
+        Dim sourceOffset As System.Int32 = 0
+        Dim needsMoreWidth As System.Boolean = False
+        For Each slot As System.Collections.Generic.KeyValuePair(Of System.Int32, System.String) In slots
+            WriteDiscussionProse(selection, prepared.Substring(sourceOffset, slot.Key - sourceOffset), exportDocument)
+            Dim lines As System.String() = DiscussionDiagramLines(diagrams(slot.Value))
+            Dim diagram As Microsoft.Office.Interop.Word.Range = selection.Range.Duplicate
+            Dim text As System.String = System.String.Join(ChrW(11).ToString(), lines)
+            ' Create the following paragraph before formatting, so subsequent prose
+            ' does not inherit the diagram font or paragraph alignment.
+            If exportDocument IsNot Nothing AndAlso diagram.Start > diagram.Paragraphs(1).Range.Start Then
+                diagram.InsertBefore(vbCr)
+                diagram.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
+            End If
+            diagram.Text = text & vbCr
+            Dim afterDiagram As Microsoft.Office.Interop.Word.Range = diagram.Duplicate
+            afterDiagram.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
+            diagram.MoveEnd(Microsoft.Office.Interop.Word.WdUnits.wdCharacter, -1)
+            Try
+                needsMoreWidth = FormatDiscussionDiagram(diagram, lines) OrElse needsMoreWidth
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine("Discussion diagram text retained after Word formatting failed: " & ex.Message)
+                needsMoreWidth = True
+            End Try
+            afterDiagram.Select()
+            sourceOffset = slot.Key + slot.Value.Length
+            ' One structural separator was already written with the diagram.
+            If prepared.IndexOf(vbCrLf, sourceOffset, System.StringComparison.Ordinal) = sourceOffset Then sourceOffset += vbCrLf.Length
+        Next
+        WriteDiscussionProse(selection, prepared.Substring(sourceOffset), exportDocument)
+        Return needsMoreWidth
+    End Function
+
+    Private Shared Sub WriteDiscussionProse(selection As Microsoft.Office.Interop.Word.Selection, prose As System.String,
+                                             exportDocument As Microsoft.Office.Interop.Word.Document)
+        If exportDocument Is Nothing Then
+            If prose.Length > 0 Then selection.TypeText(prose.Replace(vbCrLf, vbCr))
+            Return
+        End If
+        If System.String.IsNullOrWhiteSpace(prose) Then Return
+        InsertTextWithMarkdown(selection, prose, True)
+        ' Send to Doc owns this newly created document. Use its actual end after
+        ' Word imports headings, tables or lists, irrespective of the selection.
+        Dim tail As Microsoft.Office.Interop.Word.Range = exportDocument.Content
+        tail.SetRange(tail.End - 1, tail.End - 1)
+        tail.Select()
+    End Sub
+
+    Private Shared Function FormatDiscussionDiagram(location As Microsoft.Office.Interop.Word.Range, lines As System.String()) As System.Boolean
+        location.Font.Reset()
+        location.Font.Name = "Consolas"
+        location.Font.NameAscii = "Consolas"
+        location.Font.NameOther = "Consolas"
+        location.Font.Scaling = 100
+        location.Font.Spacing = 0
+        location.Font.Kerning = 0
+        location.NoProofing = True
+        With location.ParagraphFormat
+            .Alignment = Microsoft.Office.Interop.Word.WdParagraphAlignment.wdAlignParagraphLeft
+            .FirstLineIndent = 0
+            .LeftIndent = 0
+            .RightIndent = 0
+            .SpaceBefore = 0
+            .SpaceAfter = 0
+            .LineSpacingRule = Microsoft.Office.Interop.Word.WdLineSpacing.wdLineSpaceSingle
+            .KeepTogether = False
+            .KeepWithNext = False
+        End With
+
+        Dim longest As System.Single = 0
+        Using surface As New System.Drawing.Bitmap(1, 1),
+              graphics As System.Drawing.Graphics = System.Drawing.Graphics.FromImage(surface),
+              font As New System.Drawing.Font("Consolas", 10.0F, System.Drawing.GraphicsUnit.Point),
+              format As System.Drawing.StringFormat = System.Drawing.StringFormat.GenericTypographic
+            graphics.PageUnit = System.Drawing.GraphicsUnit.Point
+            format.FormatFlags = format.FormatFlags Or System.Drawing.StringFormatFlags.MeasureTrailingSpaces
+            For Each line As System.String In lines
+                longest = System.Math.Max(longest, graphics.MeasureString(line, font, System.Drawing.PointF.Empty, format).Width)
+            Next
+        End Using
+        Dim fitSize As System.Single = CSng(System.Math.Floor(20.0R * DiscussionDiagramWidth(location) / System.Math.Max(1.0F, longest)) / 2.0R)
+        Const minSize As System.Single = 6.0F
+        location.Font.Size = System.Math.Max(minSize, System.Math.Min(10.0F, fitSize))
+        While location.Font.Size > minSize AndAlso
+            location.ComputeStatistics(Microsoft.Office.Interop.Word.WdStatistic.wdStatisticLines) > lines.Length
+            location.Font.Size -= 0.5F
+        End While
+        Return fitSize < minSize OrElse
+            location.ComputeStatistics(Microsoft.Office.Interop.Word.WdStatistic.wdStatisticLines) > lines.Length
+    End Function
+
+    Private Sub ReportDiscussionDiagramWidth(needsMoreWidth As System.Boolean)
+        If needsMoreWidth Then
+            AppendSystemMessage("Word could not fit or fully format one or more diagrams. The source lines are preserved. If lines wrap, try a wider column or a landscape page.")
+        End If
+    End Sub
+
+    ' Returns a random adverb used to vary assistant tone.
     Private Function GetRandomModifier() As String
         Return _randomModifiers(_rng.Next(_randomModifiers.Length))
     End Function
@@ -4984,7 +5204,8 @@ Public Class DiscussInky
     ''' </summary>
     Private Sub OnInsertSelectionToDoc(sender As Object, e As EventArgs)
         Try
-            Dim selectedChatText As String = GetSelectedChatText()
+            Dim diagrams As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.Ordinal)
+            Dim selectedChatText As System.String = GetSelectedChatText(diagrams)
             If String.IsNullOrWhiteSpace(selectedChatText) Then
                 AppendSystemMessage("Select text in the discussion thread first.")
                 Return
@@ -5016,8 +5237,24 @@ Public Class DiscussInky
                 Return
             End If
 
-            sel.TypeText(selectedChatText)
+            If diagrams.Count = 0 Then
+                sel.TypeText(selectedChatText)
+                AppendSystemMessage("Selected chat text inserted into the active document.")
+                Return
+            End If
+            Dim diagramNeedsMoreWidth As System.Boolean
+            Using undo As New ThisAddIn.WordUndoScope(app, "Insert discussion selection")
+                ' Separate a diagram at either selection boundary from existing document text.
+                Dim firstLine As System.String = selectedChatText.Split({vbCrLf}, System.StringSplitOptions.None)(0)
+                Dim lastLine As System.String = selectedChatText.Substring(selectedChatText.LastIndexOf(vbLf, System.StringComparison.Ordinal) + 1)
+                If diagrams.ContainsKey(firstLine) AndAlso sel.Start > sel.Paragraphs(1).Range.Start Then
+                    selectedChatText = vbCrLf & selectedChatText
+                End If
+                If diagrams.ContainsKey(lastLine) Then selectedChatText &= vbCrLf
+                diagramNeedsMoreWidth = WriteDiscussionWithDiagrams(sel, selectedChatText, diagrams, Nothing)
+            End Using
             AppendSystemMessage("Selected chat text inserted into the active document.")
+            ReportDiscussionDiagramWidth(diagramNeedsMoreWidth)
         Catch ex As Exception
             AppendSystemMessage($"Error inserting selected chat text into document: {ex.Message}")
         End Try
@@ -5046,6 +5283,7 @@ Public Class DiscussInky
 
             ' Build markdown content for the conversation
             Dim mdBuilder As New StringBuilder()
+            Dim diagrams As New System.Collections.Generic.Dictionary(Of System.String, System.String)(System.StringComparer.Ordinal)
 
             ' Title
             mdBuilder.AppendLine($"# Discussion with {_currentPersonaName}")
@@ -5070,7 +5308,7 @@ Public Class DiscussInky
                     Case "user"
                         mdBuilder.AppendLine("**You:**")
                         mdBuilder.AppendLine()
-                        mdBuilder.AppendLine(msg.Content)
+                        mdBuilder.AppendLine(PrepareDiscussionDiagramMarkdown(msg.Content, diagrams))
                         mdBuilder.AppendLine()
 
                     Case "assistant"
@@ -5091,7 +5329,7 @@ Public Class DiscussInky
 
                         mdBuilder.AppendLine($"**{displayName}:**")
                         mdBuilder.AppendLine()
-                        mdBuilder.AppendLine(messageText)
+                        mdBuilder.AppendLine(PrepareDiscussionDiagramMarkdown(messageText, diagrams))
                         mdBuilder.AppendLine()
 
                     Case "autoresponder"
@@ -5104,13 +5342,13 @@ Public Class DiscussInky
                             Dim responderMessage = content.Substring(colonIdx + 2)
                             mdBuilder.AppendLine($"**{responderName}:**")
                             mdBuilder.AppendLine()
-                            mdBuilder.AppendLine(responderMessage)
+                            mdBuilder.AppendLine(PrepareDiscussionDiagramMarkdown(responderMessage, diagrams))
                             mdBuilder.AppendLine()
                         Else
                             ' Fallback: just output the content with a generic label
                             mdBuilder.AppendLine("**Autoresponder:**")
                             mdBuilder.AppendLine()
-                            mdBuilder.AppendLine(content)
+                            mdBuilder.AppendLine(PrepareDiscussionDiagramMarkdown(content, diagrams))
                             mdBuilder.AppendLine()
                         End If
 
@@ -5121,13 +5359,19 @@ Public Class DiscussInky
 
             ' Use the shared InsertTextWithMarkdown method which handles HTML/paste properly
             sel.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseStart)
-            InsertTextWithMarkdown(sel, mdBuilder.ToString(), True)
+            Dim diagramNeedsMoreWidth As System.Boolean = False
+            If diagrams.Count = 0 Then
+                InsertTextWithMarkdown(sel, mdBuilder.ToString(), True)
+            Else
+                diagramNeedsMoreWidth = WriteDiscussionWithDiagrams(sel, mdBuilder.ToString(), diagrams, newDoc)
+            End If
 
             ' Move cursor to start
             newDoc.Content.Paragraphs(1).Range.Select()
             app.Selection.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseStart)
 
             AppendSystemMessage($"Chat exported to new document ({_history.Count} messages).")
+            ReportDiscussionDiagramWidth(diagramNeedsMoreWidth)
 
         Catch ex As Exception
             AppendSystemMessage($"Error exporting to document: {ex.Message}")
@@ -5790,7 +6034,7 @@ Public Class DiscussInky
                     <meta charset=""utf-8"">
                     <style>{css}</style>
                     <script>
-                    var lastSelectedText = '';
+                    var lastSelectedParts = '';
                     function appendMessage(html) {{
                       var c=document.getElementById('chat'); if(!c) return;
                       var temp=document.createElement('div'); temp.innerHTML=html;
@@ -5807,29 +6051,79 @@ Public Class DiscussInky
                       if(c && c.length>0){{ c[0].innerText = text; }}
                       window.scrollTo(0, document.body.scrollHeight);
                     }}
-                    function getWindowSelectionText() {{
-                      try {{
-                        if (window.getSelection) {{
-                          return window.getSelection().toString();
-                        }}
-                        if (document.selection) {{
-                          return document.selection.createRange().text;
-                        }}
-                      }} catch (e) {{
-                      }}
-                      return '';
+                    function rangePoint(container, offset) {{
+                      var point = document.createRange();
+                      point.setStart(container, offset);
+                      point.collapse(true);
+                      return point;
                     }}
                     function captureSelection() {{
-                      var text = getWindowSelectionText();
-                      if (text && text.replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, '').length > 0) {{
-                        lastSelectedText = text;
+                      var selection = window.getSelection();
+                      if (!selection || !selection.rangeCount || selection.isCollapsed) return;
+                      lastSelectedParts = JSON.stringify({{ text: selection.toString(), parts: [] }});
+                      var range = selection.getRangeAt(0);
+                      var cursor = rangePoint(range.startContainer, range.startOffset);
+                      var finish = rangePoint(range.endContainer, range.endOffset);
+                      var parts = [];
+                      function between(start, end, preserveParagraphs) {{
+                        var result = document.createRange();
+                        result.setStart(start.startContainer, start.startOffset);
+                        result.setEnd(end.startContainer, end.startOffset);
+                        if (!preserveParagraphs) return result.toString();
+                        // Read detached text nodes only. Never add cloned message HTML to the browser.
+                        var text = '';
+                        function lineBreak() {{
+                          if (text && text.charAt(text.length - 1) !== '\n') text += '\n';
+                        }}
+                        function visit(node) {{
+                          if (node.nodeType === 3) {{
+                            text += node.nodeValue.replace(/[\t\r\n ]+/g, ' ');
+                            return;
+                          }}
+                          var tag = node.nodeName;
+                          if (tag === 'BR') {{ text += '\n'; return; }}
+                          var block = /^(DIV|P|LI|UL|OL|H[1-6]|BLOCKQUOTE|TR)$/.test(tag);
+                          if (block) lineBreak();
+                          for (var child = node.firstChild; child; child = child.nextSibling) visit(child);
+                          if (block) lineBreak();
+                        }}
+                        visit(result.cloneContents());
+                        return text;
                       }}
+                      var blocks = document.getElementById('chat').getElementsByTagName('pre');
+                      for (var i = 0; i < blocks.length; ++i) {{
+                        var pre = blocks[i];
+                        var bounds = document.createRange();
+                        bounds.selectNodeContents(pre);
+                        var left = rangePoint(bounds.startContainer, bounds.startOffset);
+                        var right = rangePoint(bounds.endContainer, bounds.endOffset);
+                        if (right.compareBoundaryPoints(0, cursor) <= 0) continue;
+                        if (left.compareBoundaryPoints(0, finish) >= 0) break;
+                        if (cursor.compareBoundaryPoints(0, left) < 0) {{
+                          parts.push({{ text: between(cursor, left, true) }});
+                          cursor = left;
+                        }}
+                        var end = right.compareBoundaryPoints(0, finish) < 0 ? right : finish;
+                        var code = pre.getElementsByTagName('code')[0];
+                        parts.push({{
+                          text: between(cursor, end),
+                          block: (code || pre).textContent,
+                          language: code ? code.className : ''
+                        }});
+                        cursor = end;
+                      }}
+                      if (!parts.length) {{
+                        parts.push({{ text: selection.toString() }});
+                      }} else if (cursor.compareBoundaryPoints(0, finish) < 0) {{
+                        parts.push({{ text: between(cursor, finish, true) }});
+                      }}
+                      lastSelectedParts = JSON.stringify({{ text: selection.toString(), parts: parts }});
                     }}
                     document.onmouseup = captureSelection;
                     document.onkeyup = captureSelection;
-                    function getSelectedText() {{
+                    function getSelectedParts() {{
                       captureSelection();
-                      return lastSelectedText || '';
+                      return lastSelectedParts;
                     }}
                     </script>
                     </head>
