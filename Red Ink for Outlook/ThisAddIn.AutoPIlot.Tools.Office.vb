@@ -12430,6 +12430,15 @@ Partial Public Class ThisAddIn
         Return response
     End Function
 
+    Private Shared Function ProcessedOutputExtension(extension As System.String) As System.String
+        Select Case If(extension, System.String.Empty).ToLowerInvariant()
+            Case ".pdf", ".pptx", ".xlsx"
+                Return extension.ToLowerInvariant()
+            Case Else
+                Return ".docx"
+        End Select
+    End Function
+
     ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL EXECUTION: process_word_document
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -12508,7 +12517,7 @@ Partial Public Class ThisAddIn
             End If
 
             Dim resultMessages As New System.Collections.Generic.List(Of System.String)()
-            Dim pdfFailed As System.Boolean = False
+            Dim processingFailed As System.Boolean = False
             Dim toProcess As List(Of AutoPilotAttachmentInfo)
             If targetNames.Count > 0 Then
                 ' Resolve each requested name via FindAttachment (supports output files)
@@ -12517,9 +12526,9 @@ Partial Public Class ThisAddIn
                     Dim att = FindAttachment(name)
                     If att IsNot Nothing AndAlso Not att.IsOverSizeLimit AndAlso att.TempFilePath IsNot Nothing Then
                         toProcess.Add(att)
-                    ElseIf translatePdf AndAlso System.String.Equals(System.IO.Path.GetExtension(name), ".pdf", System.StringComparison.OrdinalIgnoreCase) Then
-                        pdfFailed = True
-                        resultMessages.Add($"✗ {name}: PDF attachment is unavailable or exceeds the size limit.")
+                    Else
+                        processingFailed = True
+                        resultMessages.Add($"✗ {name}: Attachment is unavailable or exceeds the size limit.")
                     End If
                 Next
             Else
@@ -12534,52 +12543,42 @@ Partial Public Class ThisAddIn
             If toProcess Is Nothing OrElse toProcess.Count = 0 Then
                 response.Success = False
                 response.Response = If(translatePdf, "No processable Word, PowerPoint, Excel or PDF attachments found.", "No processable Word, PowerPoint, or Excel attachments found.")
-                If pdfFailed Then response.Response = System.String.Join(vbCrLf, resultMessages)
+                If processingFailed Then response.Response = System.String.Join(vbCrLf, resultMessages)
                 Return response
             End If
 
-            Dim pdfTranslationOnly = translatePdf AndAlso toProcess.All(Function(item) System.String.Equals(item.Extension, ".pdf", System.StringComparison.OrdinalIgnoreCase))
-            If pdfTranslationOnly Then
-                Dim seen As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
-                toProcess = toProcess.Where(Function(item) seen.Add(item.TempFilePath)).ToList()
-            End If
-            Dim singlePdfTranslation = pdfTranslationOnly AndAlso toProcess.Count = 1
-            If Not singlePdfTranslation AndAlso Global.SharedLibrary.Agents.ArtifactDelivery.HasExplicitArtifactIdentityArguments(toolCall.Arguments) Then
+            Dim seen As New System.Collections.Generic.HashSet(Of System.String)(System.StringComparer.OrdinalIgnoreCase)
+            toProcess = toProcess.Where(Function(item) seen.Add(item.TempFilePath)).ToList()
+            Dim singleInput As System.Boolean = toProcess.Count = 1
+            If Not singleInput AndAlso Global.SharedLibrary.Agents.ArtifactDelivery.HasExplicitArtifactIdentityArguments(toolCall.Arguments) Then
                 response.Success = False
                 response.ErrorCode = "explicit_artifact_not_supported_for_tool_cardinality"
-                response.ErrorMessage = "To bind this call to one output slot, select exactly one PDF attachment and set task_type to translate."
+                response.ErrorMessage = "Select one source attachment per explicit output slot."
                 response.Response = response.ErrorMessage
                 Return response
             End If
-            Dim pdfMetadata As New System.Collections.Generic.Dictionary(Of System.String, Global.SharedLibrary.Agents.OptionalToolArtifactMetadata)(System.StringComparer.OrdinalIgnoreCase)
-            Dim pdfArtifact As Global.SharedLibrary.Agents.OptionalToolArtifactMetadata = Nothing
-            Dim translatedPdfPath As System.String = Nothing
-            If pdfTranslationOnly Then
-                For Each item As AutoPilotAttachmentInfo In toProcess
-                    Dim artifactArguments As New System.Collections.Generic.Dictionary(Of System.String, System.Object)(toolCall.Arguments, System.StringComparer.OrdinalIgnoreCase)
-                    If context.SequencingState IsNot Nothing Then
-                        context.SequencingState.BindSingleFileProducerToExpectedSlot(artifactArguments, toolCall.CallId,
-                            System.IO.Path.GetFileName(item.TempFilePath), ".pdf", allowUnnamedSlot:=singlePdfTranslation)
-                    End If
-                    Dim metadata As Global.SharedLibrary.Agents.OptionalToolArtifactMetadata = Nothing
-                    Dim failureCode As System.String = Nothing
-                    Dim failureMessage As System.String = Nothing
-                    If Not Global.SharedLibrary.Agents.ArtifactDelivery.TryPrepareOptionalToolArtifactMetadata(
-                        artifactArguments, Global.SharedLibrary.Agents.ArtifactStorageKind.SessionStaging, metadata, failureCode, failureMessage) Then
-                        response.Success = False
-                        response.ErrorCode = failureCode
-                        response.ErrorMessage = failureMessage
-                        response.Response = failureMessage
-                        Return response
-                    End If
-                    If singlePdfTranslation Then
-                        pdfArtifact = metadata
-                    ElseIf metadata IsNot Nothing Then
-                        pdfMetadata.Add(item.TempFilePath, metadata)
-                    End If
-                Next
-            End If
-            Dim pdfArtifacts As New Newtonsoft.Json.Linq.JArray()
+            Dim metadataBySource As New System.Collections.Generic.Dictionary(Of System.String, Global.SharedLibrary.Agents.OptionalToolArtifactMetadata)(System.StringComparer.OrdinalIgnoreCase)
+            For Each item As AutoPilotAttachmentInfo In toProcess
+                Dim arguments As New System.Collections.Generic.Dictionary(Of System.String, System.Object)(toolCall.Arguments, System.StringComparer.OrdinalIgnoreCase)
+                If context.SequencingState IsNot Nothing Then
+                    context.SequencingState.BindSingleFileProducerToExpectedSlot(arguments, toolCall.CallId,
+                        System.IO.Path.GetFileName(item.TempFilePath), ProcessedOutputExtension(item.Extension), allowUnnamedSlot:=singleInput)
+                End If
+                Dim metadata As Global.SharedLibrary.Agents.OptionalToolArtifactMetadata = Nothing
+                Dim failureCode As System.String = Nothing
+                Dim failureMessage As System.String = Nothing
+                If Not Global.SharedLibrary.Agents.ArtifactDelivery.TryPrepareOptionalToolArtifactMetadata(
+                    arguments, Global.SharedLibrary.Agents.ArtifactStorageKind.SessionStaging, metadata, failureCode, failureMessage) Then
+                    response.Success = False
+                    response.ErrorCode = failureCode
+                    response.ErrorMessage = failureMessage
+                    response.Response = failureMessage
+                    Return response
+                End If
+                If metadata IsNot Nothing Then metadataBySource.Add(item.TempFilePath, metadata)
+            Next
+            Dim singleOutputPath As System.String = Nothing
+            Dim artifacts As New Newtonsoft.Json.Linq.JArray()
 
             ' Guard against recursive re-processing: warn if all targets are tool outputs
             Dim allAreOutputs = toProcess.All(Function(a) a.IsToolOutput)
@@ -12597,11 +12596,11 @@ Partial Public Class ThisAddIn
                 Dim isXlsx As Boolean = ext.Equals(".xlsx", StringComparison.OrdinalIgnoreCase)
                 Dim isPdf As System.Boolean = (ext = ".pdf")
                 If isPdf AndAlso Not translatePdf Then
-                    pdfFailed = True
+                    processingFailed = True
                     resultMessages.Add($"✗ {att.OriginalFileName}: PDF input supports task_type='translate'.")
                     Continue For
                 End If
-                Dim outputExt As String = If(isPdf, ".pdf", If(isPptx, ".pptx", If(isXlsx, ".xlsx", ".docx")))
+                Dim outputExt As String = ProcessedOutputExtension(ext)
                 Dim outputName = Path.GetFileNameWithoutExtension(att.OriginalFileName) & "_processed" & outputExt
                 Dim outputPath = Global.SharedLibrary.Agents.FilePathBudget.GeneratedFilePath(_apCurrentTempDir, outputName)
 
@@ -12616,6 +12615,14 @@ Partial Public Class ThisAddIn
 
                 ' Pass sheet filter only for Excel files
                 Dim sheetFilter As List(Of String) = If(isXlsx AndAlso sheetNames.Count > 0, sheetNames, Nothing)
+                ' Only the producer can establish the source/primary-output relationship.
+                ' Preserve it for failure reconciliation even when physical creation fails.
+                If singleInput AndAlso Not processingFailed Then
+                    Dim bound As Global.SharedLibrary.Agents.OptionalToolArtifactMetadata = Nothing
+                    If metadataBySource.TryGetValue(inputPath, bound) AndAlso bound.ProducesUserDeliverable Then
+                        response.BoundOutputTarget = bound
+                    End If
+                End If
                 Dim success As System.Boolean
                 Dim pdfDetail As System.String = System.String.Empty
                 Try
@@ -12631,13 +12638,14 @@ Partial Public Class ThisAddIn
                         success = Await ProcessDocumentForAutoPilot(inputPath, outputPath, processorInstruction, ct, sheetFilter, useOfflineDocs)
                     End If
                 Catch ex As System.Exception When isPdf AndAlso Not TypeOf ex Is System.OperationCanceledException
-                    pdfFailed = True
+                    processingFailed = True
                     context.Log("PDF translation: " & ex.Message)
                     If _apActive Then ApDashboardLog($"PDF translation failed for {att.OriginalFileName}: {ex.Message}", "warn")
                     resultMessages.Add($"✗ {att.OriginalFileName}: {ex.Message}")
                     Continue For
                 End Try
 
+                success = success AndAlso System.IO.File.Exists(outputPath) AndAlso New System.IO.FileInfo(outputPath).Length > 0
                 If success AndAlso translatePdf AndAlso Not isPdf AndAlso Not isXlsx AndAlso
                     System.String.Equals(GetArgString(toolCall.Arguments, "translation_length"), "fit", System.StringComparison.OrdinalIgnoreCase) Then
                     Dim fitDetail = Await Global.SharedLibrary.SharedLibrary.SharedMethods.CheckTranslationFit(outputPath, _context, processorInstruction, _apUseSecondApi, ct)
@@ -12654,11 +12662,13 @@ Partial Public Class ThisAddIn
                     If registrationTarget Is Nothing Then registrationTarget = _apCurrentAttachments(0)
 
                     registrationTarget.OutputFiles.Add(outputPath)
-                    If singlePdfTranslation Then
-                        translatedPdfPath = outputPath
-                    Else
-                        Dim batchMetadata As Global.SharedLibrary.Agents.OptionalToolArtifactMetadata = Nothing
-                        If pdfMetadata.TryGetValue(inputPath, batchMetadata) Then pdfArtifacts.Add(batchMetadata.BuildArtifact(outputPath))
+                    Dim metadata As Global.SharedLibrary.Agents.OptionalToolArtifactMetadata = Nothing
+                    If metadataBySource.TryGetValue(inputPath, metadata) Then
+                        If singleInput Then
+                            singleOutputPath = outputPath
+                        Else
+                            artifacts.Add(metadata.BuildArtifact(outputPath))
+                        End If
                     End If
 
                     ' Compare document only for Word files (not PPTX or XLSX)
@@ -12674,6 +12684,13 @@ Partial Public Class ThisAddIn
                         Dim compareSuccess = Await SwitchToUi(Function() CreateWordCompareDocumentForAutoPilot(inputPath, outputPath, comparePath))
                         If compareSuccess Then
                             registrationTarget.OutputFiles.Add(comparePath)
+                            If metadata IsNot Nothing AndAlso metadata.ProducesUserDeliverable Then
+                                registrationTarget.OutputCompanions.Add(New AutoPilotOutputCompanion With {
+                                    .PrimaryPath = outputPath, .CompanionPath = comparePath,
+                                    .PrimaryFingerprint = ComputeAutoPilotOutputFingerprint(outputPath),
+                                    .CompanionFingerprint = ComputeAutoPilotOutputFingerprint(comparePath)
+                                })
+                            End If
                             resultMessages.Add($"✓ {att.OriginalFileName}: Processed successfully. Created files: {outputName}; {Path.GetFileName(comparePath)} (tracked-changes compare).")
                         Else
                             resultMessages.Add($"✓ {att.OriginalFileName}: Processed successfully. Output: {outputName} (compare document creation failed).")
@@ -12682,23 +12699,24 @@ Partial Public Class ThisAddIn
                         resultMessages.Add($"✓ {att.OriginalFileName}: Processed successfully. Output: {outputName}" & If(isPdf AndAlso Not System.String.IsNullOrWhiteSpace(pdfDetail), ". " & pdfDetail, ""))
                     End If
                 Else
-                    resultMessages.Add($"✗ {att.OriginalFileName}: Processing failed.")
+                    processingFailed = True
+                    resultMessages.Add($"✗ {att.OriginalFileName}: Processing failed or the primary output file is missing or empty.")
                 End If
             Next
 
-            response.Success = Not pdfFailed
+            response.Success = Not processingFailed
             response.Response = String.Join(vbCrLf, resultMessages)
-            If pdfFailed Then
+            If processingFailed Then
                 response.ErrorMessage = response.Response
-            ElseIf pdfArtifact IsNot Nothing AndAlso translatedPdfPath IsNot Nothing Then
+            ElseIf singleOutputPath IsNot Nothing Then
                 response.Response = Global.SharedLibrary.Agents.ArtifactDelivery.AttachOptionalSingleFileArtifactToResult(
-                    response.Response, pdfArtifact, translatedPdfPath)
-            ElseIf pdfArtifacts.Count > 0 Then
+                    response.Response, metadataBySource(toProcess(0).TempFilePath), singleOutputPath)
+            ElseIf artifacts.Count > 0 Then
                 Dim payload As New Newtonsoft.Json.Linq.JObject From {
                     {"summary", response.Response},
-                    {"artifacts", pdfArtifacts},
-                    {"produces_user_deliverable", pdfMetadata.Values.Any(Function(item) item.ProducesUserDeliverable)},
-                    {"produces_intermediate_data", pdfMetadata.Values.Any(Function(item) item.ProducesIntermediateData)}
+                    {"artifacts", artifacts},
+                    {"produces_user_deliverable", metadataBySource.Values.Any(Function(item) item.ProducesUserDeliverable)},
+                    {"produces_intermediate_data", metadataBySource.Values.Any(Function(item) item.ProducesIntermediateData)}
                 }
                 response.Response = payload.ToString(Newtonsoft.Json.Formatting.None)
             End If

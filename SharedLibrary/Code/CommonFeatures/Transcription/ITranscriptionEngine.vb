@@ -51,6 +51,14 @@ Namespace Transcription
         Private _diarization As Boolean = False
         Private _diarizationMaxSpeakers As Integer = 2
 
+        Friend Property SessionOwnsAudioQueue As System.Boolean
+
+        Friend Function ForSupervisedLive() As TranscriptionOptions
+            Dim copy = DirectCast(MemberwiseClone(), TranscriptionOptions)
+            copy.SessionOwnsAudioQueue = True
+            Return copy
+        End Function
+
         Public Property LanguageCode As String = "auto"
 
         Public Property EnableDiarization As Boolean
@@ -131,6 +139,7 @@ Namespace Transcription
         Inherits EventArgs
         Public Property Message As String
         Public Property ProgressPercent As System.Nullable(Of Integer)
+        Public Property IsSessionTransition As System.Boolean
 
         Public Sub New(msg As String, Optional progressPercent As System.Nullable(Of Integer) = Nothing)
             Me.Message = msg

@@ -209,7 +209,7 @@ Namespace Transcription
                 SyncLock _queueStateLock
                     _acceptingAudio = True
                 End SyncLock
-                _senderTask = AudioSenderLoopAsync(_senderCts.Token)
+                If Not _opts.SessionOwnsAudioQueue Then _senderTask = AudioSenderLoopAsync(_senderCts.Token)
             Catch ex As System.Exception
                 SyncLock _queueStateLock
                     _acceptingAudio = False
@@ -231,6 +231,8 @@ Namespace Transcription
 
             Dim audioBytes(bytesValid - 1) As System.Byte
             System.Buffer.BlockCopy(pcm, 0, audioBytes, 0, bytesValid)
+
+            If _opts.SessionOwnsAudioQueue Then Return SendAcceptedAudioFrameAsync(audioBytes, ct)
 
             SyncLock _queueStateLock
                 If Not _acceptingAudio OrElse _stopping Then
@@ -354,6 +356,7 @@ Namespace Transcription
                     Throw
                 Catch ex As System.Exception
                     DebugException("SendAcceptedAudioFrameAsync transport failure", ex)
+                    If _opts.SessionOwnsAudioQueue Then Throw
                     ' Preserve the accepted frame across a reconnect. A transport
                     ' failure can make server receipt ambiguous, so a retry can
                     ' theoretically duplicate a tiny boundary frame, but it
@@ -597,8 +600,11 @@ Namespace Transcription
                     RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs("Gemini 3.5 Transcribe Live receive loop interrupted: " & ex.Message, ex, False))
                 End If
             Finally
-                If Not _stopping AndAlso System.Object.ReferenceEquals(_socket, ws) Then
+                If Not _stopping AndAlso Not ct.IsCancellationRequested AndAlso System.Object.ReferenceEquals(_socket, ws) Then
                     _rotationRequested = True
+                    If _opts.SessionOwnsAudioQueue Then
+                        RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs("Gemini live connection closed.", Nothing, True))
+                    End If
                 End If
             End Try
         End Function

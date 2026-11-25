@@ -451,19 +451,13 @@ Partial Public Class ThisAddIn
         ).ToList()
         Dim pdfCount As Integer = pdfFiles.Count
 
-        ' Detect files that support direct Markdown output
-        Dim markdownEligibleFiles As System.Collections.Generic.List(Of String) = filesToProcess.Where(
-            Function(f)
-                Dim ext As String = IO.Path.GetExtension(f).ToLowerInvariant()
-                Return ext = ".docx" OrElse ext = ".pdf"
-            End Function
-        ).ToList()
-
         ' Determine OCR settings
         Dim doOcr As Boolean = False
+        Dim conversionOcrLanguage As System.String = System.String.Empty
+        Dim chooseLanguagePerPdf As System.Boolean = False
         Dim flattenBeforeOcr As Boolean = False
         Dim useMarkdownOutputWhenSupported As Boolean = False
-        Dim ocrMarkdownInstruction As String = String.Empty
+        Dim formatChosen As System.Boolean = False
         Dim ocrCleanupMode As OcrMarkdownCleanupMode = OcrMarkdownCleanupMode.None
         Dim markdownPreparation As PdfMarkdownPreparationOptions = Nothing
         Dim markdownPreparationSkippedCount As System.Int32 = 0
@@ -499,7 +493,7 @@ Partial Public Class ThisAddIn
 
         ' Per-conversion override: never mutate the user's persistent model configuration.
         Dim conversionOcrBatchPages As System.Int32 = -1
-        If doOcr AndAlso pdfCount > 0 Then
+        If doOcr AndAlso pdfCount > 0 AndAlso SharedMethods.MayUseModelPdfOcr(_context) Then
             Dim chunkChoice As System.Int32 = ShowCustomYesNoBox(
                 "OCR normally uses ChunkOCR=" & _context.INI_ChunkOCR.ToString(System.Globalization.CultureInfo.InvariantCulture) & "." & vbCrLf & vbCrLf &
                 "Choose a temporary page batch size for all PDFs in this conversion? 0 means no chunking; failed batches are automatically reduced.",
@@ -519,40 +513,30 @@ Partial Public Class ThisAddIn
 
         ' Offer PDF flattening before OCR when OCR is enabled
         If doOcr AndAlso pdfCount >= 1 Then
-            Dim flattenChoice As Integer = ShowCustomYesNoBox(
+            Dim flattenPrompt As System.String =
                 "Some scanned PDFs contain layered images or transparency groups that OCR may miss." & vbCrLf & vbCrLf &
-                "Would you like to flatten PDFs to image-only format before OCR? " &
-                "This rasterizes each page (like printing to image), ensuring all visual elements are captured." & vbCrLf & vbCrLf &
-                "⚠ This adds processing time (a few seconds per page) but can significantly improve OCR results for complex PDFs.",
-                "Yes, flatten first (recommended for scans)",
-                "No, OCR directly")
-            If flattenChoice = 0 Then
-                Return ' User aborted
+                "Flattening rasterizes each page before OCR. This adds processing time but can improve results for complex scans."
+            Dim languages = SharedMethods.InstalledWindowsOcrLanguages()
+            If languages.Count > 0 Then
+                Dim menu = WindowsOcrLanguageMenu(languages)
+                Dim labels As New System.Collections.Generic.List(Of System.String)(menu.Keys)
+                Dim defaultLabel As System.String = menu.First(Function(entry) entry.Value.Length = 0).Key
+                Const choosePerPdf As System.String = "Choose for each PDF using Windows OCR"
+                If pdfCount > 1 Then labels.Add(choosePerPdf)
+                Dim settings As Slib.InputParameter() = {
+                    New Slib.InputParameter("Flatten before OCR (recommended for scans)", True),
+                    New Slib.InputParameter("Language for Windows OCR", defaultLabel, labels)}
+                If Not ShowCustomVariableInputForm(flattenPrompt, AN & " PDF OCR", settings) Then Return
+                flattenBeforeOcr = CBool(settings(0).Value)
+                Dim choice As System.String = CStr(settings(1).Value)
+                chooseLanguagePerPdf = (choice = choosePerPdf)
+                If Not chooseLanguagePerPdf Then conversionOcrLanguage = menu(choice)
+            Else
+                Dim flattenChoice As System.Int32 = ShowCustomYesNoBox(flattenPrompt,
+                    "Yes, flatten first (recommended for scans)", "No, OCR directly")
+                If flattenChoice = 0 Then Return
+                flattenBeforeOcr = (flattenChoice = 1)
             End If
-            flattenBeforeOcr = (flattenChoice = 1)
-        End If
-
-        If markdownEligibleFiles.Count > 0 Then
-            Dim markdownChoice As Integer = ShowCustomYesNoBox(
-                "You can have your Word documents (.docx) and PDF files converted to Markdown, preserving headings, lists and tables where possible. Readable PDFs can be converted directly; scanned PDFs use the OCR choice above." & vbCrLf & vbCrLf &
-                "If the quality is not what you need, you may want to try to have your files converted to PDF, flattened to an image and OCR'd by your model, if it supports so. You can use this conversion helper to process the PDF." & vbCrLf & vbCrLf &
-                "Do you want supported files to be saved as Markdown (.md) instead of plain text (.txt)?",
-                "Yes, use Markdown where supported",
-                "No, keep plain text")
-            If markdownChoice = 0 Then
-                Return ' User aborted
-            End If
-
-            useMarkdownOutputWhenSupported = (markdownChoice = 1)
-
-            If useMarkdownOutputWhenSupported Then
-                ocrMarkdownInstruction = Add_OcrMarkdownInstruction
-            End If
-        End If
-
-        If useMarkdownOutputWhenSupported AndAlso pdfCount > 0 Then
-            markdownPreparation = SelectPdfMarkdownPreparationOptions(ocrCleanupMode)
-            If markdownPreparation Is Nothing Then Return
         End If
 
         ' Create output subdirectory if needed
@@ -583,6 +567,7 @@ Partial Public Class ThisAddIn
 
         ' Process files
         Dim successCount As Integer = 0
+        Dim partialPdfFiles As New System.Collections.Generic.List(Of System.String)()
         Dim failedFiles As New System.Collections.Generic.List(Of String)()
         Dim emptyContentFiles As New System.Collections.Generic.List(Of String)()
         Dim flattenedPdfCount As Integer = 0
@@ -613,10 +598,6 @@ Partial Public Class ThisAddIn
                     Dim isPdf As Boolean = fileExtension = ".pdf"
                     Dim isDocx As Boolean = fileExtension = ".docx"
                     Dim useOcrForThisFile As Boolean = isPdf AndAlso doOcr
-                    Dim useMarkdownForThisFile As Boolean =
-                        useMarkdownOutputWhenSupported AndAlso (isPdf OrElse isDocx)
-                    Dim outputExtension As String = If(useMarkdownForThisFile, ".md", ".txt")
-
                     ' If flattening is requested for PDFs, flatten to temp file first
                     Dim effectiveFilePath As String = filePath
                     Dim tempFlattenedPath As String = Nothing
@@ -644,24 +625,69 @@ Partial Public Class ThisAddIn
                     End If
 
                     Try
+                        Dim fileOcrLanguage As System.String = conversionOcrLanguage
+                        Dim selectedRoute As System.Nullable(Of SharedMethods.OcrRoute) = Nothing
+                        Dim nativeProbe As SharedMethods.PdfReadResult = Nothing
+                        If useOcrForThisFile Then
+                            ' Inspect the effective input, including any flattening or fallback to the original.
+                            nativeProbe = Await SharedMethods.ReadPdfAsTextEx(effectiveFilePath, DoOCR:=False, AskUser:=False)
+                            If nativeProbe.OcrCandidatePageCount > 0 Then
+                                selectedRoute = SharedMethods.ChoosePdfOcrRoute(filePath, _context, True, nativeProbe.OcrCandidatePageCount)
+                                If selectedRoute.Value = SharedMethods.OcrRoute.Windows AndAlso chooseLanguagePerPdf Then
+                                    Dim menu = WindowsOcrLanguageMenu(SharedMethods.InstalledWindowsOcrLanguages())
+                                    Dim languageSettings As Slib.InputParameter() = {
+                                        New Slib.InputParameter("Language for Windows OCR", menu.First(Function(entry) entry.Value.Length = 0).Key, menu.Keys),
+                                        New Slib.InputParameter("Apply to remaining PDFs", False)}
+                                    If Not ShowCustomVariableInputForm(fileName, AN & " Windows OCR", languageSettings) Then Throw New System.OperationCanceledException()
+                                    fileOcrLanguage = menu(CStr(languageSettings(0).Value))
+                                    If CBool(languageSettings(1).Value) Then
+                                        conversionOcrLanguage = fileOcrLanguage
+                                        chooseLanguagePerPdf = False
+                                    End If
+                                End If
+                            Else
+                                useOcrForThisFile = False
+                            End If
+                        End If
+                        Dim canWriteMarkdown As System.Boolean = isDocx OrElse (isPdf AndAlso
+                            (Not selectedRoute.HasValue OrElse selectedRoute.Value = SharedMethods.OcrRoute.Model))
+                        If canWriteMarkdown AndAlso Not formatChosen Then
+                            Dim choice = ShowCustomYesNoBox(fileName & vbCrLf & vbCrLf &
+                                "Save Markdown-capable files in this conversion as Markdown? Windows OCR output is always saved as plain text (.txt).",
+                                "Use Markdown (.md)", "Use plain text (.txt)")
+                            If choice = 0 Then Throw New System.OperationCanceledException()
+                            useMarkdownOutputWhenSupported = (choice = 1)
+                            formatChosen = True
+                        End If
+                        Dim useMarkdownForThisFile As System.Boolean = canWriteMarkdown AndAlso useMarkdownOutputWhenSupported
+                        Dim outputExtension As System.String = If(useMarkdownForThisFile, ".md", ".txt")
+                        If isPdf AndAlso useMarkdownForThisFile AndAlso markdownPreparation Is Nothing Then
+                            markdownPreparation = SelectPdfMarkdownPreparationOptions(ocrCleanupMode)
+                            If markdownPreparation Is Nothing Then Throw New System.OperationCanceledException()
+                        End If
                         If isPdf AndAlso useMarkdownForThisFile AndAlso markdownPreparation IsNot Nothing Then
                             markdownPreparation.ShowProgressWindow = True
                             markdownPreparation.SourceName = "File " & (i + 1).ToString(System.Globalization.CultureInfo.InvariantCulture) & " / " & filesToProcess.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) & ": " & fileName
                         End If
-                        ' Read file content — askUser=False ensures Hidesplash=True in PerformOCR/ReadBinaryFileViaLLM,
-                        ' preventing the countdown splash from interrupting batch processing.
-                        ' The user has already made all choices upfront (OCR on/off, flatten on/off, Markdown on/off).
-                        Dim fileRead As FileReadResult = Await GetFileContentEx(
-                            effectiveFilePath,
-                            Silent:=True,
-                            DoOCR:=useOcrForThisFile,
-                            AskUser:=False,
-                            OcrAdditionalInstruction:=If(useMarkdownForThisFile AndAlso useOcrForThisFile, ocrMarkdownInstruction, ""),
-                            ShowOCRProgress:=True,
-                            ReturnMarkdown:=useMarkdownForThisFile,
-                            OcrCleanupMode:=If(useMarkdownForThisFile AndAlso useOcrForThisFile, ocrCleanupMode, OcrMarkdownCleanupMode.None),
-                            OcrBatchPages:=conversionOcrBatchPages,
-                            MarkdownPreparation:=If(isPdf AndAlso useMarkdownForThisFile, markdownPreparation, Nothing))
+                        ' Reuse the native inspection for plain text. An OCR run uses the selected engine.
+                        Dim fileRead As FileReadResult
+                        If nativeProbe IsNot Nothing AndAlso Not useOcrForThisFile AndAlso Not useMarkdownForThisFile Then
+                            fileRead = New FileReadResult With {.Content = nativeProbe.Content, .ExtractionWarnings = nativeProbe.ExtractionWarnings, .PdfMayBeIncomplete = nativeProbe.OcrWasSkippedDueToHeuristics}
+                        Else
+                            fileRead = Await GetFileContentEx(
+                                effectiveFilePath,
+                                Silent:=True,
+                                DoOCR:=useOcrForThisFile,
+                                AskUser:=False,
+                                AllowOcrEngineChoice:=True,
+                                selectedPdfOcrRoute:=selectedRoute, windowsOcrLanguageTag:=fileOcrLanguage,
+                                OcrAdditionalInstruction:=If(useMarkdownForThisFile AndAlso useOcrForThisFile, Add_OcrMarkdownInstruction, ""),
+                                ShowOCRProgress:=True,
+                                ReturnMarkdown:=useMarkdownForThisFile,
+                                OcrCleanupMode:=If(useMarkdownForThisFile AndAlso useOcrForThisFile, ocrCleanupMode, OcrMarkdownCleanupMode.None),
+                                OcrBatchPages:=conversionOcrBatchPages,
+                                MarkdownPreparation:=If(isPdf AndAlso useMarkdownForThisFile, markdownPreparation, Nothing))
+                        End If
                         ' Capture diagnostics before empty/error Continue For paths. No report side files.
                         If fileRead.ExtractionWarnings.Count > 0 OrElse Not System.String.IsNullOrWhiteSpace(fileRead.OcrCleanupReport) OrElse fileRead.MarkdownPreparationSkipped Then
                             conversionDiagnostics.AppendLine("=== " & fileName & " / OCR and Markdown ===")
@@ -673,6 +699,10 @@ Partial Public Class ThisAddIn
                             conversionDiagnostics.AppendLine()
                         End If
                         If fileRead.MarkdownPreparationSkipped Then markdownPreparationSkippedCount += 1
+                        If Not System.String.IsNullOrEmpty(fileRead.ReadError) Then
+                            failedFiles.Add(fileName & ": " & fileRead.ReadError)
+                            Continue For
+                        End If
                         Dim content As System.String = fileRead.Content
 
                         If String.IsNullOrWhiteSpace(content) Then
@@ -709,7 +739,7 @@ Partial Public Class ThisAddIn
                         IO.File.WriteAllText(outputPath, content, System.Text.Encoding.UTF8)
                         If Not System.String.IsNullOrEmpty(fileRead.OcrCleanupReport) Then
                             ' The report was captured above for the conversion clipboard log.
-                            If markdownPreparation IsNot Nothing AndAlso markdownPreparation.SaveRawCopy AndAlso
+                            If useMarkdownForThisFile AndAlso markdownPreparation IsNot Nothing AndAlso markdownPreparation.SaveRawCopy AndAlso
                                Not System.String.Equals(fileRead.OcrCleanupRawContent, content, System.StringComparison.Ordinal) Then
                                 Dim rawPath As System.String = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(outputPath),
                                     System.IO.Path.GetFileNameWithoutExtension(outputPath) & ".unbereinigt.md")
@@ -724,6 +754,7 @@ Partial Public Class ThisAddIn
                             End If
                         End If
                         successCount += 1
+                        If isPdf AndAlso useOcrForThisFile AndAlso fileRead.PdfMayBeIncomplete Then partialPdfFiles.Add(fileName)
 
                         If useMarkdownForThisFile Then
                             markdownOutputCount += 1
@@ -882,7 +913,13 @@ Partial Public Class ThisAddIn
             summary.AppendLine()
         End If
 
-        summary.AppendLine($"Successfully converted: {successCount} file(s)")
+        summary.AppendLine($"Successfully converted: {successCount - partialPdfFiles.Count} file(s)")
+        If partialPdfFiles.Count > 0 Then
+            summary.AppendLine($"Saved with incomplete PDF text: {partialPdfFiles.Count} file(s). Check the page diagnostics before using these files.")
+            For Each name As System.String In partialPdfFiles.Take(10)
+                summary.AppendLine("  " & name)
+            Next
+        End If
 
         If useSubdirectory Then
             summary.AppendLine($"Output directory: {outputBaseDir}")
@@ -1175,6 +1212,22 @@ Partial Public Class ThisAddIn
         Return outputPath
     End Function
 
+
+    Private Shared Function WindowsOcrLanguageMenu(tags As System.Collections.Generic.List(Of System.String)) As System.Collections.Generic.Dictionary(Of System.String, System.String)
+        Dim menu As New System.Collections.Generic.Dictionary(Of System.String, System.String)()
+        Dim defaultTag As System.String = SharedMethods.DefaultWindowsOcrLanguageTag()
+        menu.Add("Windows default (" & defaultTag & ")", System.String.Empty)
+        For Each tag As System.String In tags
+            Dim labelText As System.String = tag
+            Try
+                labelText = System.Globalization.CultureInfo.GetCultureInfo(tag).DisplayName & " (" & tag & ")"
+            Catch ex As System.Globalization.CultureNotFoundException
+                System.Diagnostics.Debug.WriteLine(ex.Message)
+            End Try
+            menu.Add(labelText, tag)
+        Next
+        Return menu
+    End Function
 
     Private Function SelectOcrMarkdownCleanupMode(includeDisabled As System.Boolean) As SharedLibrary.SharedLibrary.SharedMethods.OcrMarkdownCleanupMode
         Dim items As New System.Collections.Generic.List(Of SharedLibrary.SharedLibrary.SharedMethods.SelectionItem)()

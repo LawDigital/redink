@@ -79,6 +79,7 @@ Namespace Transcription
         Private _requestId As String = ""
         Private _languageCode As String = DefaultLanguage
         Private _stopStarted As Integer = 0
+        Private _supervised As System.Boolean
         Private _turnRestartPending As Integer = 0
 
         Private _bytesSinceSpeechStart As Integer = 0
@@ -402,6 +403,7 @@ Namespace Transcription
         End Function
 
         Public Async Function StartLiveAsync(opts As TranscriptionOptions, ct As System.Threading.CancellationToken) As System.Threading.Tasks.Task Implements ITranscriptionEngine.StartLiveAsync
+            _supervised = opts IsNot Nothing AndAlso opts.SessionOwnsAudioQueue
             EnsureTls12()
 
             If System.String.IsNullOrWhiteSpace(_subscriptionKey) Then
@@ -620,7 +622,12 @@ Namespace Transcription
                                   "Azure Speech streaming session timed out. Reopening…",
                                   "Connecting to Azure Speech streaming transcription…"))
 
-            Await ws.ConnectAsync(BuildRealtimeUri(_languageCode), _cts.Token).ConfigureAwait(False)
+            Try
+                Await ws.ConnectAsync(BuildRealtimeUri(_languageCode), _cts.Token).ConfigureAwait(False)
+            Catch
+                ws.Dispose()
+                Throw
+            End Try
 
             _ws = ws
             _readerTask = System.Threading.Tasks.Task.Run(Function() ReadLoop(ws, _cts.Token))
@@ -822,6 +829,7 @@ Namespace Transcription
                     Return
                 End If
 
+                If _supervised AndAlso Not IsStopRequested() Then Throw New System.IO.IOException("Azure Speech audio send failed.", sendException)
                 If Not IsStopRequested() Then
                     Dim retryException As System.Exception = Nothing
 
@@ -956,6 +964,10 @@ Namespace Transcription
                     End Try
 
                     RaiseStatusMessage("Azure Speech connection interrupted. Reconnecting…")
+                End If
+            Finally
+                If _supervised AndAlso Not ct.IsCancellationRequested AndAlso Not IsStopRequested() AndAlso System.Object.ReferenceEquals(ws, _ws) Then
+                    RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs("Azure Speech connection closed.", Nothing, True))
                 End If
             End Try
         End Function

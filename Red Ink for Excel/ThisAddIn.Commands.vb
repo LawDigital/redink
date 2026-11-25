@@ -350,7 +350,7 @@ Partial Public Class ThisAddIn
                 Dim ocrChoice As Integer = ShowCustomYesNoBox(
                     $"The directory contains {pdfCount} PDF files." & vbCrLf & vbCrLf &
                     "How would you like to handle OCR for these PDF files?" & vbCrLf &
-                    "(OCR uses the LLM to extract text from scanned documents and can take a moment per file.)",
+                    "(OCR extracts text from scanned pages and can take a moment per file.)",
                     "Enable OCR for all PDFs",
                     "Choose individually for each PDF",
                     extraButtonText:="Skip OCR entirely",

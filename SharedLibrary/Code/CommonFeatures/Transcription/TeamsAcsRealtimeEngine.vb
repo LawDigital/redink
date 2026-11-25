@@ -516,7 +516,7 @@ Namespace Transcription
                             result = Await _ws.ReceiveAsync(New System.ArraySegment(Of Byte)(buffer), ct).ConfigureAwait(False)
 
                             If result.MessageType = System.Net.WebSockets.WebSocketMessageType.Close Then
-                                Return
+                                Exit While
                             End If
 
                             ms.Write(buffer, 0, result.Count)
@@ -526,10 +526,13 @@ Namespace Transcription
                         HandleBridgeMessage(text)
                     End Using
                 End While
-            Catch ex As System.OperationCanceledException
+                If Not ct.IsCancellationRequested AndAlso System.Threading.Volatile.Read(_stopStarted) = 0 Then
+                    RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs("Teams ACS bridge connection closed.", Nothing, True))
+                End If
+            Catch ex As System.OperationCanceledException When ct.IsCancellationRequested
             Catch ex As System.Exception
-                If System.Threading.Interlocked.CompareExchange(_stopStarted, 0, 0) = 0 Then
-                    RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs("Teams ACS bridge read failed: " & GetDetailedExceptionMessage(ex), ex, False))
+                If Not ct.IsCancellationRequested AndAlso System.Threading.Volatile.Read(_stopStarted) = 0 Then
+                    RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs("Teams ACS bridge WS read failed: " & GetDetailedExceptionMessage(ex), ex, True))
                 End If
             End Try
         End Function
@@ -621,7 +624,7 @@ Namespace Transcription
 
             If System.String.Equals(typeValue, "error", System.StringComparison.OrdinalIgnoreCase) Then
                 Dim errorMessage As String = If(jo("message")?.ToString(), "Teams ACS bridge error.")
-                RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs(errorMessage, Nothing, False))
+                RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs(errorMessage, Nothing, True))
                 Return
             End If
 

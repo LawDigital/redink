@@ -123,7 +123,10 @@ Namespace Transcription
             If _similarityThreshold > 2.5 Then _similarityThreshold = 2.5
         End Sub
 
+        Private _supervised As System.Boolean
+
         Public Function StartLiveAsync(opts As TranscriptionOptions, ct As CancellationToken) As System.Threading.Tasks.Task Implements ITranscriptionEngine.StartLiveAsync
+            _supervised = opts IsNot Nothing AndAlso opts.SessionOwnsAudioQueue
             ' Loading a local model can take seconds. Keep this work off the WinForms UI thread
             ' so the widget remains responsive and its "Starting…" state can be painted.
             Return System.Threading.Tasks.Task.Run(
@@ -147,7 +150,7 @@ Namespace Transcription
                     ProcessJson(_rec.PartialResult(), False)
                 End If
             Catch ex As Exception
-                RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs("Vosk: " & ex.Message, ex, False))
+                RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs("Vosk: " & ex.Message, ex, _supervised))
             End Try
 
             Return Task.CompletedTask

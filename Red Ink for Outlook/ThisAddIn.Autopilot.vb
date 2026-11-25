@@ -5769,6 +5769,32 @@ Partial Public Class ThisAddIn
             End Try
         Next
 
+        ' A producer-declared companion travels only with the exact final revision
+        ' that created it. It has no slot and cannot satisfy the completion gate.
+        If originalAttachments IsNot Nothing AndAlso registryDeliveryPathSet.Count > 0 AndAlso Not System.String.IsNullOrWhiteSpace(tempDir) Then
+            Dim primaryPaths As New System.Collections.Generic.HashSet(Of System.String)(registryDeliveryPathSet, System.StringComparer.OrdinalIgnoreCase)
+            Dim root = System.IO.Path.GetFullPath(tempDir).TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar) & System.IO.Path.DirectorySeparatorChar
+            For Each attachment In originalAttachments
+                If attachment Is Nothing OrElse attachment.OutputCompanions Is Nothing Then Continue For
+                For Each companion In attachment.OutputCompanions
+                    If companion Is Nothing OrElse Not primaryPaths.Contains(companion.PrimaryPath) Then Continue For
+                    Dim path = System.IO.Path.GetFullPath(companion.CompanionPath)
+                    If Not path.StartsWith(root, System.StringComparison.OrdinalIgnoreCase) OrElse registryDeliveryPathSet.Contains(path) Then Continue For
+                    If runState IsNot Nothing AndAlso runState.ExplicitArtifactProtocolOwnedPaths IsNot Nothing AndAlso
+                       runState.ExplicitArtifactProtocolOwnedPaths.Contains(path) Then Continue For
+                    If Not If(companion.PrimaryFingerprint, System.String.Empty).StartsWith("sha256:", System.StringComparison.Ordinal) OrElse
+                       Not If(companion.CompanionFingerprint, System.String.Empty).StartsWith("sha256:", System.StringComparison.Ordinal) OrElse
+                       ComputeAutoPilotOutputFingerprint(companion.PrimaryPath) <> companion.PrimaryFingerprint OrElse
+                       ComputeAutoPilotOutputFingerprint(path) <> companion.CompanionFingerprint Then
+                        ToolingFileLogger.LogWarn("Skipped a changed or unavailable producer-declared companion for a final output.")
+                        Continue For
+                    End If
+                    registryDeliveryPathSet.Add(path)
+                    deliveryPaths.Add(path)
+                Next
+            Next
+        End If
+
         If deliveryErrors.Count > 0 Then
             Throw New System.IO.IOException(
                 "One or more registered final deliverables could not be prepared for delivery: " &
@@ -6646,24 +6672,26 @@ Partial Public Class ThisAddIn
             Dim originalThread As String = If(reply.HTMLBody, "")
             ' Compose all mandatory host notices independent of model/skill wording.
             ' A missing/inconsistent notice fails the delivery before Outlook.Send().
-            Dim contentHtml As String = ConvertResponseToHtml(responseText)
-            contentHtml &= RenderAutoPilotHostNoticesHtml(hostNotices, hostNoticeLanguage)
+            Dim replyStyle As System.String = ReadAutoPilotReplyFontCss()
+            Dim contentHtml As String = ConvertResponseToHtml(responseText, replyStyle, applyReplyFontToText:=True)
+            contentHtml &= RenderAutoPilotHostNoticesHtml(hostNotices, hostNoticeLanguage).Replace("font-family:Arial,sans-serif;", System.String.Empty)
 
             If Not String.IsNullOrWhiteSpace(sourcesHtml) Then
                 contentHtml &= sourcesHtml
             End If
 
             If _apConfig IsNot Nothing Then LoadSenderToolPolicy(_apConfig.SenderToolPolicyPath)
-            Dim disclaimerHtml As System.String = BuildAutoPilotDisclaimerHtml(ResolveDisclaimerForSender(senderAddr))
-            Dim footerHtml As String = BuildAutoPilotFooter()
+            Dim disclaimerHtml As System.String = BuildAutoPilotDisclaimerHtml(ResolveDisclaimerForSender(senderAddr)).Replace("font-family:Arial,sans-serif;", System.String.Empty)
+            Dim footerHtml As String = BuildAutoPilotFooter().Replace("font-family:Arial,sans-serif;", System.String.Empty)
             Dim deliveryPlan As AutoPilotOutgoingDeliveryPlan =
                 PrepareAutoPilotOutgoingDelivery(contentHtml & disclaimerHtml & footerHtml & originalThread, resultAttachments)
 
-            contentHtml &= BuildAutoPilotAttachmentSplitNoticeHtml(deliveryPlan)
+            contentHtml &= BuildAutoPilotAttachmentSplitNoticeHtml(deliveryPlan).Replace("font-family:Arial,sans-serif;", System.String.Empty)
             contentHtml &= disclaimerHtml
             contentHtml &= footerHtml
 
-            reply.HTMLBody = contentHtml & originalThread
+            Dim replyFragment As System.String = "<div style='" & replyStyle & "'>" & contentHtml & "</div>"
+            reply.HTMLBody = InsertAutoPilotReplyFragment(originalThread, replyFragment)
 
             ' Add result attachments when the complete message remains within the safe
             ' transport target. Oversized deliveries put all result attachments into
@@ -6906,12 +6934,95 @@ Partial Public Class ThisAddIn
         Return sb.ToString()
     End Function
 
+    ' Read the user's HTML reply font without opening an Inspector for an unattended draft.
+    Private Function ReadAutoPilotReplyFontCss() As System.String
+        Try
+            Dim version As New System.Version(Application.Version)
+            Dim officeVersion As System.String = version.ToString(2)
+            Dim keySuffix As System.String = "\Microsoft\Office\" & officeVersion & "\Common\MailSettings"
+            For Each root As System.String In {"HKEY_CURRENT_USER\Software\Policies", "HKEY_CURRENT_USER\Software"}
+                Dim bytes As System.Byte() = TryCast(Microsoft.Win32.Registry.GetValue(root & keySuffix, "ReplyFontComplex", Nothing), System.Byte())
+                If bytes Is Nothing OrElse bytes.Length = 0 Then Continue For
+                Dim encoding As System.Text.Encoding = System.Text.Encoding.Default
+                If bytes.Length >= 2 AndAlso ((bytes(0) = 255 AndAlso bytes(1) = 254) OrElse bytes(1) = 0) Then encoding = System.Text.Encoding.Unicode
+                Dim css As System.String = ExtractAutoPilotReplyFontCss(encoding.GetString(bytes))
+                If css.Length > 0 Then
+                    Dim sizeMatch = System.Text.RegularExpressions.Regex.Match(css, "(?:^|;)font-size:([^;]+);")
+                    ApDashboardLog("Reply font source=" & root & "; font-size=" &
+                                   If(sizeMatch.Success, sizeMatch.Groups(1).Value, "(inherited)"), "step")
+                    Return css
+                End If
+            Next
+        Catch ex As System.Exception
+            ApDashboardLog("Outlook reply font unavailable. Using the draft's HTML formatting. " & ex.Message, "warn")
+        End Try
+        ApDashboardLog("Reply font source=draft; font-size=(inherited)", "step")
+        Return System.String.Empty
+    End Function
+
+    Private Shared Function ExtractAutoPilotReplyFontCss(settings As System.String) As System.String
+        Dim css As New System.Text.StringBuilder()
+        For Each rule As System.Text.RegularExpressions.Match In System.Text.RegularExpressions.Regex.Matches(settings, "\{([^{}]*)\}")
+            Dim declarations As System.String = rule.Groups(1).Value
+            If Not System.Text.RegularExpressions.Regex.IsMatch(declarations, "(?i)(?:^|;)\s*mso-style-type\s*:\s*personal-reply\s*(?:;|$)") Then Continue For
+            Dim standardSize As System.String = System.String.Empty
+            Dim westernSize As System.String = System.String.Empty
+            For Each item As System.String In declarations.Split(";"c)
+                Dim colon As System.Int32 = item.IndexOf(":"c)
+                If colon <= 0 Then Continue For
+                Dim name As System.String = item.Substring(0, colon).Trim().ToLowerInvariant()
+                Dim value As System.String = item.Substring(colon + 1).Trim()
+                Select Case name
+                    Case "font-size"
+                        standardSize = value
+                    Case "mso-ansi-font-size"
+                        westernSize = value
+                    Case "mso-bidi-font-size", "font-family", "mso-ascii-theme-font", "mso-hansi-theme-font"
+                        css.Append(name).Append(":").Append(value).Append(";")
+                End Select
+            Next
+            ' Outlook can store separate Western and complex-script sizes without a standard CSS size.
+            Dim textSize As System.String = If(westernSize.Length > 0, westernSize, standardSize)
+            If textSize.Length > 0 Then css.Append("font-size:").Append(textSize).Append(";")
+            If css.Length > 0 Then Exit For
+        Next
+        Return System.Net.WebUtility.HtmlEncode(css.ToString())
+    End Function
+
+    Private Shared Function InsertAutoPilotReplyFragment(threadHtml As System.String, fragment As System.String) As System.String
+        Dim document As New HtmlAgilityPack.HtmlDocument()
+        document.LoadHtml(threadHtml)
+        Dim body As HtmlAgilityPack.HtmlNode = document.DocumentNode.SelectSingleNode("//body")
+        If body IsNot Nothing AndAlso body.InnerStartIndex >= 0 AndAlso body.InnerStartIndex <= threadHtml.Length Then
+            Return threadHtml.Insert(body.InnerStartIndex, fragment)
+        End If
+        Return fragment & threadHtml
+    End Function
+
     ''' <summary>Converts a Markdown response to HTML for Outlook.</summary>
-    Private Function ConvertResponseToHtml(responseMarkdown As String) As String
+    Private Function ConvertResponseToHtml(responseMarkdown As String, Optional encodedFontCss As System.String = "font-family:Arial,sans-serif;font-size:11pt;",
+                                           Optional applyReplyFontToText As System.Boolean = False) As String
         Dim pipeline As Markdig.MarkdownPipeline =
             Global.SharedLibrary.SharedLibrary.SharedMethods.CreateMarkdownHtmlPipeline(useSoftlineBreakAsHardlineBreak:=True)
         Dim htmlBody As String = Markdig.Markdown.ToHtml(Global.SharedLibrary.SharedLibrary.SharedMethods.NormalizeMarkdownForHtmlDisplay(responseMarkdown), pipeline)
-        Return "<div style='font-family:Arial,sans-serif;font-size:11pt;'>" & htmlBody & "</div>"
+        If applyReplyFontToText AndAlso Not System.String.IsNullOrEmpty(encodedFontCss) Then
+            ' Word can assign its own size to an imported paragraph. Apply the reply font
+            ' directly to prose runs, including text in lists, links and table cells.
+            Dim document As New HtmlAgilityPack.HtmlDocument()
+            document.LoadHtml(htmlBody)
+            Dim runs = document.DocumentNode.SelectNodes("//text()[not(ancestor::pre or ancestor::code or ancestor::h1 or ancestor::h2 or ancestor::h3 or ancestor::h4 or ancestor::h5 or ancestor::h6 or ancestor::style or ancestor::script or ancestor::sub or ancestor::sup)]")
+            If runs IsNot Nothing Then
+                For Each run As HtmlAgilityPack.HtmlNode In runs.ToList()
+                    If System.String.IsNullOrWhiteSpace(run.InnerText) Then Continue For
+                    Dim span As HtmlAgilityPack.HtmlNode = document.CreateElement("span")
+                    span.SetAttributeValue("style", encodedFontCss)
+                    run.ParentNode.ReplaceChild(span, run)
+                    span.AppendChild(run)
+                Next
+                htmlBody = document.DocumentNode.OuterHtml
+            End If
+        End If
+        Return "<div style='" & encodedFontCss & "'>" & htmlBody & "</div>"
     End Function
 
     ''' <summary>Moves the most recent AutoPilot reply into the Inky Replies folder.</summary>
@@ -9628,6 +9739,13 @@ Partial Public Class ThisAddIn
         Public Property ConversationID As String
     End Class
 
+    Friend Class AutoPilotOutputCompanion
+        Public Property PrimaryPath As System.String
+        Public Property PrimaryFingerprint As System.String
+        Public Property CompanionPath As System.String
+        Public Property CompanionFingerprint As System.String
+    End Class
+
     ''' <summary>Describes an attachment and its per-mail processing data.</summary>
     Friend Class AutoPilotAttachmentInfo
         Public Property OriginalFileName As String
@@ -9640,6 +9758,7 @@ Partial Public Class ThisAddIn
         Public Property CreatedTime As DateTime?
         Public Property LastModifiedTime As DateTime?
         Public Property OutputFiles As New List(Of String)()
+        Public Property OutputCompanions As New System.Collections.Generic.List(Of AutoPilotOutputCompanion)()
         Property CachedText As String
         Property CachedMarkdownText As String
         Property CachedDocxHint As String

@@ -48,6 +48,7 @@ Namespace SharedLibrary
         ''' Result from reading a file, including content and metadata about potential incompleteness.
         ''' </summary>
         Public Class FileReadResult
+            Public Property ReadError As System.String
             ' Populated only after an explicitly requested OCR cleanup. Never used by default.
             Public Property OcrCleanupRawContent As System.String = System.String.Empty
             Public Property OcrCleanupReport As System.String = System.String.Empty
@@ -90,8 +91,10 @@ Namespace SharedLibrary
 
             ' Additive observations. No success/completeness claim is inferred from text length.
             Public Property PageCount As System.Nullable(Of System.Int32) = Nothing
+            Public Property OcrCandidatePageCount As System.Int32
             Public Property OcrAttempted As System.Boolean = False
             Public Property OcrUsed As System.Boolean = False
+            Public Property UsedWindowsOcr As System.Boolean
             Public Property OcrDurationMilliseconds As System.Int64 = 0
             Public Property ErrorCode As System.String = System.String.Empty
             Public Property ErrorMessage As System.String = System.String.Empty
@@ -218,6 +221,20 @@ Namespace SharedLibrary
         Public Shared Function IsBinaryMediaSupported(context As ISharedContext,
                                                       extension As String,
                                                       Optional taskFlag As String = Nothing) As Boolean
+            Return (IsWindowsOcrImage(extension) AndAlso WindowsOcrLanguage().Length > 0) OrElse
+                IsModelMediaSupported(context, extension, taskFlag)
+        End Function
+
+        Private Shared Function MediaObjectAcceptsExtension(variants As System.String, extension As System.String) As System.Boolean
+            If IsWindowsOcrImage(extension) Then
+                Dim mime = FixMimeType(System.Web.MimeMapping.GetMimeMapping("file" & extension))
+                Return Not System.String.IsNullOrWhiteSpace(ResolveBinaryObjectCall(variants, mime))
+            End If
+            Return IsApiCallObjectMimeCapable(variants, MimePrefixForExtension(extension))
+        End Function
+
+        Private Shared Function IsModelMediaSupported(context As ISharedContext, extension As System.String,
+                                                      taskFlag As System.String) As System.Boolean
             If context Is Nothing Then Return False
 
             Dim mimePrefix As String = MimePrefixForExtension(extension)
@@ -226,19 +243,17 @@ Namespace SharedLibrary
             If Not String.IsNullOrWhiteSpace(taskFlag) AndAlso
                Not String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then
 
-                Dim scope = CaptureModelConfigScope(context)
-
                 Try
-                    If GetSpecialTaskModel(context, context.INI_AlternateModelPath, taskFlag) Then
-                        Return True
-                    End If
-                Catch
-                Finally
-                    RestoreModelConfigScope(context, scope)
+                    Dim probe = CreateIsolatedModelCallContext(context)
+                    If GetSpecialTaskModel(probe, probe.INI_AlternateModelPath, taskFlag) AndAlso
+                        MediaObjectAcceptsExtension(probe.INI_APICall_Object_2, extension) Then Return True
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("Alternate media configuration unavailable: " & ex.Message)
                 End Try
             End If
 
-            Return IsApiCallObjectMimeCapable(context.INI_APICall_Object, mimePrefix)
+            Return MediaObjectAcceptsExtension(context.INI_APICall_Object, extension) AndAlso
+                (Not IsWindowsOcrImage(extension) OrElse IsPrimaryOcrModelUsable(context))
         End Function
 
         ''' <summary>
@@ -259,17 +274,24 @@ Namespace SharedLibrary
                                                           Optional systemPrompt As String = "",
                                                           Optional askUser As Boolean = True,
                                                           Optional taskFlag As String = Nothing,
-                                                          Optional cancellationToken As System.Threading.CancellationToken = Nothing) As System.Threading.Tasks.Task(Of String)
+                                                          Optional cancellationToken As System.Threading.CancellationToken = Nothing,
+                                                          Optional allowOcrEngineChoice As System.Boolean = False) As System.Threading.Tasks.Task(Of String)
             cancellationToken.ThrowIfCancellationRequested()
-            Dim scope = CaptureModelConfigScope(context)
+            askUser = askUser AndAlso Not IsHeadlessExecution
+            If System.String.IsNullOrWhiteSpace(filePath) OrElse Not System.IO.File.Exists(filePath) Then Return System.String.Empty
+            Dim ext As System.String = System.IO.Path.GetExtension(filePath).ToLowerInvariant()
+            Dim localImage As System.Boolean = System.String.IsNullOrWhiteSpace(systemPrompt) AndAlso IsWindowsOcrImage(ext) AndAlso WindowsOcrLanguage().Length > 0
+            Dim hasModel As System.Boolean = Not (localImage AndAlso PreferWindowsOcr()) AndAlso IsModelMediaSupported(context, ext, taskFlag)
+#If PDF_LAYOUT_WINRT Then
+            If localImage Then
+                Dim localText = Await ReadWindowsImageOrSelectModelAsync(filePath, hasModel, askUser OrElse allowOcrEngineChoice, cancellationToken).ConfigureAwait(False)
+                If localText IsNot Nothing Then Return localText
+            End If
+#End If
+            Dim propagateFailure As System.Boolean = TypeOf context Is IsolatedModelCallContext
 
             Try
-                If String.IsNullOrWhiteSpace(filePath) OrElse Not IO.File.Exists(filePath) Then
-                    Return ""
-                End If
-
-                Dim ext As String = IO.Path.GetExtension(filePath).ToLowerInvariant()
-                If Not IsBinaryMediaSupported(context, ext, taskFlag) Then
+                If Not hasModel Then
                     If askUser Then
                         ShowCustomMessageBox($"The file type '{ext}' is not supported by your current model configuration.")
                     End If
@@ -279,12 +301,18 @@ Namespace SharedLibrary
                 Dim useSecondAPI As Boolean = False
                 Dim timeOut = context.INI_Timeout
 
-                If Not String.IsNullOrWhiteSpace(taskFlag) AndAlso
-                   Not String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) AndAlso
-                   GetSpecialTaskModel(context, context.INI_AlternateModelPath, taskFlag) Then
-
-                    useSecondAPI = True
-                    timeOut = context.INI_Timeout_2
+                If Not String.IsNullOrWhiteSpace(taskFlag) AndAlso Not String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then
+                    Dim alternate = CreateIsolatedModelCallContext(context)
+                    Try
+                        useSecondAPI = GetSpecialTaskModel(alternate, alternate.INI_AlternateModelPath, taskFlag) AndAlso
+                            MediaObjectAcceptsExtension(alternate.INI_APICall_Object_2, ext)
+                    Catch ex As System.Exception
+                        System.Diagnostics.Debug.WriteLine("Alternate media configuration unavailable: " & ex.Message)
+                    End Try
+                    If useSecondAPI Then
+                        context = alternate
+                        timeOut = alternate.INI_Timeout_2
+                    End If
                 End If
 
                 Dim sysPrompt As String =
@@ -298,11 +326,9 @@ Namespace SharedLibrary
             Catch ex As System.OperationCanceledException
                 Throw
             Catch ex As System.Exception
-                If TypeOf context Is IsolatedModelCallContext Then Throw
+                If propagateFailure Then Throw
                 Debug.WriteLine("ReadBinaryFileViaLLM failed: " & ex.Message)
                 Return ""
-            Finally
-                RestoreModelConfigScope(context, scope)
             End Try
         End Function
 
@@ -534,8 +560,19 @@ Namespace SharedLibrary
                                                      Optional ByVal OcrBatchPages As System.Int32 = -1,
                                                      Optional ByVal CancellationToken As System.Threading.CancellationToken = Nothing,
                                                      Optional ByVal OcrCleanupMode As OcrMarkdownCleanupMode = OcrMarkdownCleanupMode.None,
-                                                     Optional ByVal MarkdownPreparation As PdfMarkdownPreparationOptions = Nothing) As System.Threading.Tasks.Task(Of PdfReadResult)
+                                                     Optional ByVal MarkdownPreparation As PdfMarkdownPreparationOptions = Nothing,
+                                                     Optional ByVal AllowOcrEngineChoice As System.Boolean = False,
+                                                     Optional ByVal selectedRoute As System.Nullable(Of OcrRoute) = Nothing,
+                                                     Optional ByVal agentPolicy As AgentPdfOcrPolicy = Nothing,
+                                                     Optional windowsOcrLanguageTag As System.String = Nothing) As System.Threading.Tasks.Task(Of PdfReadResult)
 
+            If agentPolicy IsNot Nothing Then windowsOcrLanguageTag = agentPolicy.LanguageTag
+            If IsHeadlessExecution Then
+                AskUser = False
+                AllowOcrEngineChoice = False
+                ShowOcrProgressWindow = False
+            End If
+            AllowOcrEngineChoice = AllowOcrEngineChoice OrElse AskUser
             ' -1 inherits ChunkOCR; 0 sends each contiguous candidate range without chunking.
             ' Explicit batch sizes (e.g. Semantic Archives) retain their independent policy.
             If OcrBatchPages < -1 Then Throw New System.ArgumentOutOfRangeException(NameOf(OcrBatchPages))
@@ -716,6 +753,7 @@ Namespace SharedLibrary
                     End If
                 End If
 
+                result.OcrCandidatePageCount = ocrCandidatePages.Count
                 shouldSuggestOcr = (ocrCandidatePages.Count > 0)
                 If shouldSuggestOcr Then
                     reasons.Add("Selective OCR candidate pages: " & FormatPageRanges(ocrCandidatePages))
@@ -734,9 +772,13 @@ Namespace SharedLibrary
                     "all_pages_text_layer_checked", If(result.ExtractionComplete.HasValue,
                     "text_layer_gaps_or_ocr_required", "text_layer_coverage_unverified"))
 
-                ' Disable OCR if no OCR-capable call is configured or context missing
+                ' Probe capabilities only for files with actual OCR candidates.
                 Dim ocrUnavailable As Boolean = False
-                If DoOCR AndAlso (context Is Nothing OrElse Not IsOcrAvailable(context)) Then
+                If DoOCR AndAlso shouldSuggestOcr AndAlso agentPolicy IsNot Nothing Then
+                    selectedRoute = agentPolicy.Resolve(context, pageCount)
+                    If RejectAgentPdfOcrRoute(result, selectedRoute.Value, agentPolicy, ReturnMarkdown) Then Return result
+                End If
+                If DoOCR AndAlso shouldSuggestOcr AndAlso agentPolicy Is Nothing AndAlso Not IsOcrAvailable(context) Then
                     DoOCR = False
                     ocrUnavailable = True
                 End If
@@ -747,7 +789,7 @@ Namespace SharedLibrary
                     If shouldSuggestOcr Then
                         result.OcrWasSkippedDueToHeuristics = True
                         Global.SharedLibrary.Agents.TextExtractionDiagnostics.AddWarning(result.ExtractionWarnings, If(ocrUnavailable,
-                            "OCR was requested but no OCR-capable configuration was available.",
+                            "Neither model OCR nor Windows OCR is available in this host.",
                             "OCR was suggested by the reader but is disabled for this extraction."))
 
                         If AskUser AndAlso ocrUnavailable Then
@@ -755,7 +797,7 @@ Namespace SharedLibrary
                             ShowCustomMessageBox(
                                 "The PDF appears to contain pages that may need OCR:" & Environment.NewLine & Environment.NewLine &
                                 formattedReasons & Environment.NewLine & Environment.NewLine &
-                                "OCR is not available with your current model configuration." & Environment.NewLine &
+                                "Neither a configured OCR model nor Windows OCR with an installed recognition language is available." & Environment.NewLine &
                                 "The extracted text may be incomplete.")
                         End If
                     End If
@@ -771,40 +813,14 @@ Namespace SharedLibrary
                 End If
 
                 If shouldSuggestOcr Then
-                    ' Check if OCR is actually available
-                    cancellationToken.ThrowIfCancellationRequested()
-
-                    If Not IsOcrAvailable(context) Then
-                        ' OCR would be suggested but is not available - warn user if allowed
-                        Debug.WriteLine("OCR suggested by heuristics but not available - skipping OCR prompt.")
-                        Global.SharedLibrary.Agents.TextExtractionDiagnostics.AddWarning(result.ExtractionWarnings, "OCR was requested but is unavailable in the current configuration.")
-                        result.OcrWasSkippedDueToHeuristics = True
-
-                        If AskUser Then
-                            Dim formattedReasons As String = String.Join(Environment.NewLine, reasons.ConvertAll(Function(r) "- " & r))
-                            ShowCustomMessageBox(
-                                "The PDF appears to contain pages that may need OCR:" & Environment.NewLine & Environment.NewLine &
-                                formattedReasons & Environment.NewLine & Environment.NewLine &
-                                "OCR is not available with your current model configuration." & Environment.NewLine &
-                                "The extracted text may be incomplete.")
-                        End If
-
-                        If ReturnMarkdown Then
-                            Await ReadPreparedPdfMarkdownAsync(pdfPath, result, MarkdownPreparation, context, CancellationToken).ConfigureAwait(False)
-                            result.ExtractionComplete = Nothing
-                            result.ExtractionCoverageBasis = "markdown_reader_coverage_unverified"
-                        Else
-                            result.Content = extractedText
-                        End If
-                        Return result
-                    End If
+                    CancellationToken.ThrowIfCancellationRequested()
 
                     If AskUser Then
                         Dim formattedReasons As String = String.Join(Environment.NewLine, reasons.ConvertAll(Function(r) "- " & r))
                         Dim msg As String = $"The PDF appears to contain little or no extractable text:" & Environment.NewLine & Environment.NewLine &
                                             formattedReasons & Environment.NewLine & Environment.NewLine &
                                             "It's likely that the document consists mainly of scanned images." & Environment.NewLine & Environment.NewLine &
-                                            "Would you like AI to perform OCR to extract text (if supported by your configured model)?"
+                                            "Would you like to use OCR to extract text from those pages?"
                         Dim userChoice As Integer = ShowCustomYesNoBox(msg, "Yes, try OCR", "No, use what you have")
                         If userChoice <> 1 Then
                             result.OcrWasSkippedDueToHeuristics = True
@@ -825,15 +841,17 @@ Namespace SharedLibrary
                     Dim ocrTimer As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
                     Dim selectiveOcr As SelectivePdfOcrResult = Nothing
                     Try
-                        selectiveOcr = Await PerformSelectivePdfOcr(pdfPath, pageTexts, ocrCandidatePages, context, AskUser, ocrAdditionalInstruction, ShowOcrProgressWindow, OcrBatchPages, CancellationToken)
+                        selectiveOcr = Await PerformSelectivePdfOcr(pdfPath, pageTexts, ocrCandidatePages, context, AskUser, ocrAdditionalInstruction, ShowOcrProgressWindow, OcrBatchPages, CancellationToken, AllowOcrEngineChoice, selectedRoute, windowsOcrLanguageTag)
                     Finally
                         ocrTimer.Stop()
                         result.OcrDurationMilliseconds = ocrTimer.ElapsedMilliseconds
                     End Try
                     CancellationToken.ThrowIfCancellationRequested()
                     If selectiveOcr IsNot Nothing Then
+                        result.UsedWindowsOcr = selectiveOcr.UsedWindowsOcr
                         result.OcrProcessedRanges.AddRange(selectiveOcr.ProcessedRanges)
                         MergePdfOcrWarnings(result, selectiveOcr.Warnings)
+                        If SetPdfOcrLanguageError(result, selectiveOcr.LanguageError, ReturnErrorInsteadOfEmpty) Then Return result
                     End If
                     If selectiveOcr IsNot Nothing AndAlso selectiveOcr.Success Then
                         result.OcrUsed = True
@@ -862,16 +880,28 @@ Namespace SharedLibrary
                             Global.SharedLibrary.Agents.TextExtractionDiagnostics.AddWarning(result.ExtractionWarnings, "Selective OCR retained validated pages and the remaining native text; missing/unreadable pages keep the representation incomplete.")
                             Return result
                         End If
-                        Global.SharedLibrary.Agents.TextExtractionDiagnostics.AddWarning(result.ExtractionWarnings, "Selective OCR did not validate any requested page; the existing text layer was retained. Inspect the OCR page-contract/request diagnostics.")
+                        Global.SharedLibrary.Agents.TextExtractionDiagnostics.AddWarning(result.ExtractionWarnings,
+                            If(result.UsedWindowsOcr, "Windows OCR returned no readable pages. See the Windows OCR diagnostics.",
+                               "Selective OCR did not validate any requested page; the existing text layer was retained. Inspect the OCR page-contract/request diagnostics."))
                     End If
                 End If
 
                 If ReturnMarkdown Then
-                    Await ReadPreparedPdfMarkdownAsync(pdfPath, result, MarkdownPreparation, context, CancellationToken).ConfigureAwait(False)
-                    result.ExtractionComplete = Nothing
-                    result.ExtractionCoverageBasis = "markdown_reader_coverage_unverified"
+                    Dim markdownReadable = Await ReadPreparedPdfMarkdownAsync(pdfPath, result, MarkdownPreparation, context, CancellationToken).ConfigureAwait(False)
+                    If result.UsedWindowsOcr Then
+                        ' A native layout fallback cannot establish coverage for the failed OCR pages.
+                        If Not markdownReadable Then result.Content = extractedText
+                    Else
+                        result.ExtractionComplete = Nothing
+                        result.ExtractionCoverageBasis = "markdown_reader_coverage_unverified"
+                    End If
                 Else
                     result.Content = extractedText
+                End If
+                If result.UsedWindowsOcr AndAlso System.String.IsNullOrWhiteSpace(result.Content) Then
+                    result.ErrorCode = "windows_ocr_no_text"
+                    result.ErrorMessage = "Windows OCR returned no readable text. See the OCR diagnostics for details."
+                    result.Content = If(ReturnErrorInsteadOfEmpty, "Error reading PDF: " & result.ErrorMessage, System.String.Empty)
                 End If
                 Return result
 
@@ -894,7 +924,7 @@ Namespace SharedLibrary
             End Try
 
             Return Await ReadPdfParserFailureFallbackAsync(pdfPath, ReturnErrorInsteadOfEmpty, DoOCR, AskUser, context, ocrAdditionalInstruction, ShowOcrProgressWindow, OcrBatchPages, CancellationToken,
-                New System.IO.InvalidDataException(result.ErrorMessage), OcrCleanupMode, MarkdownPreparation).ConfigureAwait(False)
+                New System.IO.InvalidDataException(result.ErrorMessage), OcrCleanupMode, MarkdownPreparation, AllowOcrEngineChoice, selectedRoute, agentPolicy, ReturnMarkdown, windowsOcrLanguageTag).ConfigureAwait(False)
         End Function
 
         Private Shared Function IsDeterministicPdfParserFailure(failure As System.Exception) As System.Boolean
@@ -909,6 +939,37 @@ Namespace SharedLibrary
             Return False
         End Function
 
+        Private Shared Function SetPdfOcrLanguageError(result As PdfReadResult, message As System.String, includeError As System.Boolean) As System.Boolean
+            If System.String.IsNullOrEmpty(message) Then Return False
+            result.ErrorCode = "ocr_language_unavailable"
+            result.ErrorMessage = message
+            result.Content = If(includeError, "Error: " & message, System.String.Empty)
+            result.ExtractionComplete = False
+            Return True
+        End Function
+
+        Private Shared Function RejectAgentPdfOcrRoute(result As PdfReadResult, route As OcrRoute,
+                                                      policy As AgentPdfOcrPolicy, markdown As System.Boolean) As System.Boolean
+            Dim engine As System.String = route.ToString()
+            Global.SharedLibrary.Agents.TextExtractionDiagnostics.AddWarning(result.ExtractionWarnings,
+                $"PDF OCR policy={policy.Mode}, pages={result.PageCount}, selected={engine}.")
+            If route = OcrRoute.Unavailable Then
+                If policy.Mode = "windows" AndAlso policy.LanguageTag.Length > 0 Then
+                    Return SetPdfOcrLanguageError(result, MissingWindowsOcrLanguage(policy.LanguageTag), False)
+                End If
+                result.ErrorCode = "ocr_engine_unavailable"
+                result.ErrorMessage = $"No available PDF OCR engine satisfies ocr_engine={policy.Mode}."
+            ElseIf markdown AndAlso route = OcrRoute.Windows Then
+                result.ErrorCode = "ocr_format_unsupported"
+                result.ErrorMessage = "Windows OCR produces plain text. Use output_format=text."
+            Else
+                Return False
+            End If
+            result.ExtractionComplete = False
+            result.Content = System.String.Empty
+            Return True
+        End Function
+
         Private Shared Async Function ReadPdfParserFailureFallbackAsync(pdfPath As System.String,
                                                                          returnErrorInsteadOfEmpty As System.Boolean,
                                                                          doOcr As System.Boolean,
@@ -920,7 +981,10 @@ Namespace SharedLibrary
                                                                          cancellationToken As System.Threading.CancellationToken,
                                                                          parserFailure As System.Exception,
                                                                          OcrCleanupMode As OcrMarkdownCleanupMode,
-                                                                         MarkdownPreparation As PdfMarkdownPreparationOptions) As System.Threading.Tasks.Task(Of PdfReadResult)
+                                                                         MarkdownPreparation As PdfMarkdownPreparationOptions,
+                                                                         allowOcrEngineChoice As System.Boolean,
+                                                                         selectedRoute As System.Nullable(Of OcrRoute),
+                                                                         agentPolicy As AgentPdfOcrPolicy, returnMarkdown As System.Boolean, windowsOcrLanguageTag As System.String) As System.Threading.Tasks.Task(Of PdfReadResult)
             Dim result As New PdfReadResult With {
                 .ExtractionComplete = False,
                 .ExtractionCoverageBasis = "pdf_parser_failure",
@@ -950,7 +1014,12 @@ Namespace SharedLibrary
                 result.Content = If(returnErrorInsteadOfEmpty, "Error reading PDF: " & result.ErrorMessage, System.String.Empty)
                 Return result
             End If
-            If Not doOcr OrElse context Is Nothing OrElse Not IsOcrAvailable(context) Then
+            result.OcrCandidatePageCount = pageCount
+            If doOcr AndAlso agentPolicy IsNot Nothing Then
+                selectedRoute = agentPolicy.Resolve(context, pageCount)
+                If RejectAgentPdfOcrRoute(result, selectedRoute.Value, agentPolicy, returnMarkdown) Then Return result
+            End If
+            If Not doOcr OrElse (agentPolicy Is Nothing AndAlso Not IsOcrAvailable(context)) Then
                 result.ErrorCode = "pdf_parser_failure_requires_ocr"
                 result.ErrorMessage &= " OCR fallback is required but is disabled or unavailable."
                 result.OcrWasSkippedDueToHeuristics = True
@@ -974,14 +1043,16 @@ Namespace SharedLibrary
             Dim timer As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
             Dim fallback As SelectivePdfOcrResult = Nothing
             Try
-                fallback = Await PerformSelectivePdfOcr(pdfPath, emptyNativePages, pages, context, False, additionalInstruction, showProgressWindow, ocrBatchPages, cancellationToken).ConfigureAwait(False)
+                fallback = Await PerformSelectivePdfOcr(pdfPath, emptyNativePages, pages, context, False, additionalInstruction, showProgressWindow, ocrBatchPages, cancellationToken, allowOcrEngineChoice, selectedRoute, windowsOcrLanguageTag).ConfigureAwait(False)
             Finally
                 timer.Stop()
                 result.OcrDurationMilliseconds = timer.ElapsedMilliseconds
             End Try
             If fallback IsNot Nothing Then
+                result.UsedWindowsOcr = fallback.UsedWindowsOcr
                 result.OcrProcessedRanges.AddRange(fallback.ProcessedRanges)
                 MergePdfOcrWarnings(result, fallback.Warnings)
+                If SetPdfOcrLanguageError(result, fallback.LanguageError, returnErrorInsteadOfEmpty) Then Return result
             End If
             Dim covered As New System.Collections.Generic.HashSet(Of System.Int32)()
             Dim validRanges As System.Boolean = True
@@ -1149,6 +1220,8 @@ Namespace SharedLibrary
         End Class
 
         Private NotInheritable Class SelectivePdfOcrResult
+            Public Property LanguageError As System.String
+            Public Property UsedWindowsOcr As System.Boolean
             Public Property Success As System.Boolean
             Public Property MergedText As System.String = System.String.Empty
             Public Property PageTexts As New System.Collections.Generic.List(Of System.String)()
@@ -1185,6 +1258,25 @@ Namespace SharedLibrary
             Return System.String.Join(", ", parts)
         End Function
 
+        ' For attended workflows that already mapped native pages and granted OCR consent.
+        Public Shared Async Function ReadSelectedPdfPagesAsync(path As System.String,
+                nativePages As System.Collections.Generic.IReadOnlyList(Of System.String),
+                candidates As System.Collections.Generic.IReadOnlyList(Of System.Int32), context As ISharedContext,
+                cancellationToken As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of PdfReadResult)
+            Dim output As New PdfReadResult()
+            Dim interactive As System.Boolean = Not IsHeadlessExecution
+            Dim selected = Await PerformSelectivePdfOcr(path, nativePages, candidates, context, False,
+                showProgressWindow:=interactive, ocrBatchPages:=1, cancellationToken:=cancellationToken,
+                allowOcrEngineChoice:=interactive).ConfigureAwait(False)
+            output.PageTexts = selected.PageTexts
+            output.OcrUsed = selected.RetainedOcrPageCount > 0
+            output.UsedWindowsOcr = selected.UsedWindowsOcr
+            output.OcrProcessedRanges = selected.ProcessedRanges
+            output.ExtractionComplete = selected.Success
+            output.ExtractionWarnings = selected.Warnings
+            Return output
+        End Function
+
         Private Shared Async Function PerformSelectivePdfOcr(ByVal pdfPath As System.String,
                                                               nativePageTexts As System.Collections.Generic.IReadOnlyList(Of System.String),
                                                               candidatePages As System.Collections.Generic.IEnumerable(Of System.Int32),
@@ -1193,7 +1285,10 @@ Namespace SharedLibrary
                                                               Optional additionalInstruction As System.String = Nothing,
                                                               Optional showProgressWindow As System.Boolean = False,
                                                               Optional ocrBatchPages As System.Int32 = 1,
-                                                              Optional cancellationToken As System.Threading.CancellationToken = Nothing) As System.Threading.Tasks.Task(Of SelectivePdfOcrResult)
+                                                              Optional cancellationToken As System.Threading.CancellationToken = Nothing,
+                                                              Optional allowOcrEngineChoice As System.Boolean = False,
+                                                              Optional selectedRoute As System.Nullable(Of OcrRoute) = Nothing,
+                                                              Optional windowsOcrLanguageTag As System.String = Nothing) As System.Threading.Tasks.Task(Of SelectivePdfOcrResult)
             Dim result As New SelectivePdfOcrResult()
             If nativePageTexts Is Nothing Then Throw New System.ArgumentNullException(NameOf(nativePageTexts))
             Dim candidates As System.Collections.Generic.List(Of System.Int32) = If(candidatePages, System.Linq.Enumerable.Empty(Of System.Int32)()).Distinct().OrderBy(Function(value As System.Int32) value).ToList()
@@ -1203,11 +1298,14 @@ Namespace SharedLibrary
                 Return result
             End If
             If candidates.Any(Function(page As System.Int32) page < 1 OrElse page > nativePageTexts.Count) Then Throw New System.ArgumentOutOfRangeException(NameOf(candidatePages))
-            If context Is Nothing Then Return result
-            ' OCR is source extraction, not answer presentation. Isolate all mutable
-            ' call settings, including formatting policy, from the Office host.
-            context = CreateIsolatedModelCallContext(context)
-            If Not IsOcrAvailable(context) Then Return result
+            Dim route As OcrRoute = If(selectedRoute, ChoosePdfOcrRoute(pdfPath, context, allowOcrEngineChoice, candidates.Count))
+            If route = OcrRoute.Model AndAlso context IsNot Nothing Then context = CreateIsolatedModelCallContext(context)
+#If PDF_LAYOUT_WINRT Then
+            If route = OcrRoute.Windows Then
+                Return Await ReadWindowsPdfOcrAsync(pdfPath, nativePageTexts, candidates, askUser OrElse showProgressWindow, additionalInstruction, cancellationToken, windowsOcrLanguageTag).ConfigureAwait(False)
+            End If
+#End If
+            If route <> OcrRoute.Model Then Return result
 
             Dim scope = CaptureModelConfigScope(context)
             Dim statusDialog As OcrChunkStatusDialog = Nothing
@@ -1216,9 +1314,17 @@ Namespace SharedLibrary
             Try
                 Dim useSecondAPI As System.Boolean = False
                 Dim timeOut As System.Int64 = context.INI_Timeout
-                If TrySelectAlternatePdfOcrModel(context) Then
-                    useSecondAPI = True
-                    timeOut = context.INI_Timeout_2
+                If Not System.String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then
+                    Dim alternate = CreateIsolatedModelCallContext(context)
+                    Try
+                        useSecondAPI = TrySelectAlternatePdfOcrModel(alternate)
+                    Catch ex As System.Exception
+                        Global.SharedLibrary.Agents.TextExtractionDiagnostics.AddWarning(result.Warnings, "alternate_ocr_unavailable: " & ex.Message)
+                    End Try
+                    If useSecondAPI Then
+                        context = alternate
+                        timeOut = context.INI_Timeout_2
+                    End If
                 End If
                 ' Do not rewrite source spelling, dash characters or spacing after
                 ' receiving the page JSON. Ordinary answer formatting is unaffected.
@@ -1394,11 +1500,12 @@ Namespace SharedLibrary
                                                                    result As PdfReadResult,
                                                                    options As PdfMarkdownPreparationOptions,
                                                                    context As Global.SharedLibrary.SharedLibrary.SharedContext.ISharedContext,
-                                                                   cancellationToken As System.Threading.CancellationToken) As System.Threading.Tasks.Task
+                                                                   cancellationToken As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of System.Boolean)
             cancellationToken.ThrowIfCancellationRequested()
+            Dim readError As System.String = System.String.Empty
             If options Is Nothing OrElse Not options.Enabled Then
-                result.Content = ReadPdfMarkdownSandboxed(pdfPath)
-                Return
+                result.Content = PdfMarkdownExtractor.ReadPdfAsMarkdown(pdfPath, Nothing, readError)
+                Return System.String.IsNullOrEmpty(readError)
             End If
             ' Keep the existing geometry/font/table engine. Apply the explicit policy there,
             ' before its page map is flattened into Markdown; do not re-infer its layout.
@@ -1412,9 +1519,8 @@ Namespace SharedLibrary
                 .JoinWrappedLines = options.JoinProseLines,
                 .JoinAcrossPageBreaks = options.JoinPageParagraphs,
                 .CollectFootnotesAtEnd = options.CollectFootnotes}
-            Dim readError As System.String = System.String.Empty
             result.Content = PdfMarkdownExtractor.ReadPdfAsMarkdown(pdfPath, nativeOptions, readError)
-            If Not System.String.IsNullOrEmpty(readError) Then Return
+            If Not System.String.IsNullOrEmpty(readError) Then Return False
             cancellationToken.ThrowIfCancellationRequested()
             Dim rawCopy As System.String = Nothing
             Dim rawWarning As System.String = System.String.Empty
@@ -1438,6 +1544,7 @@ Namespace SharedLibrary
             result.OcrCleanupReport = "Native PDF layout engine retained; explicit page-artifact/line/page-join options applied using source geometry. Side furniture and watermarks are retained." &
                 System.Environment.NewLine & result.OcrCleanupReport
             If rawWarning.Length > 0 Then result.OcrCleanupReport &= System.Environment.NewLine & rawWarning
+            Return True
         End Function
 
         Private Shared Async Function ApplyPdfMarkdownPreparationAsync(result As PdfReadResult,
@@ -2293,7 +2400,9 @@ Namespace SharedLibrary
         ''' extraction caching does not need provider/model-specific knowledge.
         ''' </summary>
         Public Shared Function GetOcrConfigurationFingerprint(context As ISharedContext) As System.String
-            If context Is Nothing Then Return Agents.TextExtractionResourceRegistry.HashString("ocr:none")
+            Dim localFingerprint = GetLocalOcrFingerprint()
+            If context Is Nothing Then Return Agents.TextExtractionResourceRegistry.HashString(localFingerprint)
+            context = CreateIsolatedModelCallContext(context)
 
             Dim scope = CaptureModelConfigScope(context)
             Try
@@ -2307,7 +2416,7 @@ Namespace SharedLibrary
                 End If
 
                 Dim parts As New System.Collections.Generic.List(Of System.String) From {
-                    "ocr-page-contract-v1",
+                    "ocr-page-contract-v1", localFingerprint,
                     "postprocess=verbatim",
                     "prompt=" & If(context.SP_InsertClipboard, System.String.Empty),
                     "second=" & useSecondApi.ToString(System.Globalization.CultureInfo.InvariantCulture),
@@ -2332,23 +2441,33 @@ Namespace SharedLibrary
                 GetSpecialTaskModel(context, context.INI_AlternateModelPath, "OCR") AndAlso IsApiCallObjectOcrCapable(context.INI_APICall_Object_2)
         End Function
 
-        Public Shared Function IsOcrAvailable(context As ISharedContext) As Boolean
+        Public Shared Function IsOcrAvailable(context As ISharedContext) As System.Boolean
+            Return WindowsOcrLanguage().Length > 0 OrElse IsLlmPdfOcrAvailable(context)
+        End Function
+
+        Private Shared Function IsPrimaryOcrModelUsable(context As ISharedContext) As System.Boolean
+            Try
+                ValidateIsolatedModelConfiguration(context, False)
+                Return True
+            Catch ex As System.InvalidOperationException
+                System.Diagnostics.Debug.WriteLine("Primary OCR model unavailable: " & ex.Message)
+                Return False
+            End Try
+        End Function
+
+        Private Shared Function IsLlmPdfOcrAvailable(context As ISharedContext) As System.Boolean
             If context Is Nothing Then Return False
 
             If Not String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then
-                Dim scope = CaptureModelConfigScope(context)
-
                 Try
-                    If TrySelectAlternatePdfOcrModel(context) Then
-                        Return True
-                    End If
-                Catch
-                Finally
-                    RestoreModelConfigScope(context, scope)
+                    Dim probe = CreateIsolatedModelCallContext(context)
+                    If TrySelectAlternatePdfOcrModel(probe) Then Return True
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("Alternate PDF OCR configuration unavailable: " & ex.Message)
                 End Try
             End If
 
-            Return IsApiCallObjectOcrCapable(context.INI_APICall_Object)
+            Return IsApiCallObjectOcrCapable(context.INI_APICall_Object) AndAlso IsPrimaryOcrModelUsable(context)
         End Function
 
 
@@ -2358,63 +2477,7 @@ Namespace SharedLibrary
         ''' <param name="apiCallObject">The INI_APICall_Object or INI_APICall_Object_2 string.</param>
         ''' <returns>True if OCR/PDF is supported, False otherwise.</returns>
         Private Shared Function IsApiCallObjectOcrCapable(apiCallObject As String) As Boolean
-            ' If null or empty, OCR is not available
-            If String.IsNullOrWhiteSpace(apiCallObject) Then
-                Return False
-            End If
-
-            ' Check if the string contains segment separators (¦)
-            Dim segments As String() = apiCallObject.Split(New Char() {"¦"c}, StringSplitOptions.RemoveEmptyEntries)
-
-            ' Track if we found any segment without a filter (means all types supported)
-            ' or any segment with a filter that includes PDF
-            Dim hasUnfilteredSegment As Boolean = False
-            Dim hasPdfFilter As Boolean = False
-            Dim allSegmentsHaveFilters As Boolean = True
-
-            For Each segment As String In segments
-                Dim trimmedSegment As String = segment.Trim()
-
-                ' Check if this segment has a filter (starts with [...])
-                If trimmedSegment.StartsWith("[") Then
-                    ' Extract the filter content between [ and ]
-                    Dim closeBracketIdx As Integer = trimmedSegment.IndexOf("]"c)
-                    If closeBracketIdx > 1 Then
-                        Dim filterContent As String = trimmedSegment.Substring(1, closeBracketIdx - 1)
-
-                        ' Check if the filter contains application/pdf or pdf
-                        If filterContent.IndexOf("application/pdf", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
-                           filterContent.IndexOf("pdf", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
-                           filterContent.IndexOf("*/*", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
-                           filterContent.IndexOf("application/*", StringComparison.OrdinalIgnoreCase) >= 0 Then
-                            hasPdfFilter = True
-                        End If
-                    End If
-                Else
-                    ' No filter on this segment - means it accepts all types
-                    hasUnfilteredSegment = True
-                    allSegmentsHaveFilters = False
-                End If
-            Next
-
-            ' OCR is available if:
-            ' 1. There's at least one segment without a filter (accepts all), OR
-            ' 2. There's a segment with a filter that includes PDF
-            If hasUnfilteredSegment Then
-                Return True
-            End If
-
-            If hasPdfFilter Then
-                Return True
-            End If
-
-            ' If all segments have filters and none include PDF, OCR is not available
-            If allSegmentsHaveFilters Then
-                Return False
-            End If
-
-            ' Default: if we have content but couldn't parse filters, assume capable
-            Return True
+            Return Not System.String.IsNullOrWhiteSpace(ResolveBinaryObjectCall(apiCallObject, "application/pdf"))
         End Function
 
 

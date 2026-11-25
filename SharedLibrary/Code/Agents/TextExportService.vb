@@ -29,6 +29,7 @@ Namespace Agents
 
     Public NotInheritable Class TextExportOptions
         Public Property OutputFormat As System.String = "text"
+        Public Property PdfOcrPolicy As Global.SharedLibrary.SharedLibrary.SharedMethods.AgentPdfOcrPolicy
         Public Property OcrPdf As System.Boolean
         Public Property OcrBatchPages As System.Int32 = 1
         Public Property Overwrite As System.Boolean

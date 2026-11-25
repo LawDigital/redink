@@ -105,6 +105,7 @@ Partial Public Class ThisAddIn
         ''' differ. The shared runtime still requires substantive success and, for deliverable tasks,
         ''' a host-validated deliverable before clearing the prior failure.
         ''' </summary>
+        Public Property BoundOutputTarget As Global.SharedLibrary.Agents.OptionalToolArtifactMetadata
         Public Property AllowCrossScopeAlternativeRecovery As Boolean
 
         ''' <summary>Optional artifact extension (for example .docx) that a replacement deliverable must satisfy before cross-scope recovery can clear this failure.</summary>
