@@ -95,7 +95,13 @@ Partial Public Class ThisAddIn
                 ApDashboardLog("Submission marker persistence unavailable for " & submissionId & ": " & ex.Message & ". Automatic resubmission is disabled.", "warn")
             End Try
             ApDashboardLog("Mail submission attempt: " & submissionId, "step")
-            mail.Send()
+            Try
+                mail.Send()
+            Catch ex As System.Exception
+                ApDashboardLog($"Outlook MailItem.Send failed. submission={submissionId}, HRESULT=0x{ex.HResult:X8}, exception={ex.GetType().FullName}, message={ex.Message}", "error")
+                Throw
+            End Try
+            ApDashboardLog("Outlook MailItem.Send returned. submission=" & submissionId, "step")
         Finally
             If accessor IsNot Nothing Then
                 Try : System.Runtime.InteropServices.Marshal.ReleaseComObject(accessor) : Catch ex As System.Exception : End Try

@@ -234,6 +234,7 @@ Namespace Agents
             "add_pdf_watermark",
             "word_to_pdf",
             "pdf_to_word",
+            "process_word_document",
             "create_word_document",
             "complete_word_tables",
             "create_excel_spreadsheet",

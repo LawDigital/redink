@@ -2381,10 +2381,10 @@ Partial Public Class ThisAddIn
         Dim splash As Slib.SplashScreen = Nothing
 
         Try
-            If ext = ".pdf" AndAlso SharedMethods.IsOcrAvailable(_context) Then
+            If ext = ".pdf" AndAlso SharedMethods.MayUseModelPdfOcr(_context) Then
                 Dim preserveChoice As Integer = ShowCustomYesNoBox(
                     "Do you want to preserve the formatting/structure when importing this PDF?" & vbCrLf & vbCrLf &
-                    "If yes, the PDF will be flattened, OCR will be performed, and the OCR result will be inserted as Markdown so that Word can render the formatting.",
+                    "Model OCR can return Markdown formatting from a flattened PDF. Windows OCR returns plain text.",
                     "Yes, preserve formatting",
                     "No, import as plain text",
                     AN & " Import File")
@@ -2422,7 +2422,7 @@ Partial Public Class ThisAddIn
                     tempFlattenedPath = Nothing
                 End Try
 
-                splash.UpdateMessage("AI is extracting the PDF content via OCR ...")
+                splash.UpdateMessage("Extracting the PDF content via OCR ...")
                 System.Windows.Forms.Application.DoEvents()
 
                 docText = Await GetFileContent(
@@ -2432,7 +2432,7 @@ Partial Public Class ThisAddIn
                     False,
                     False,
                     OcrAdditionalInstruction:=Add_OcrMarkdownInstruction,
-                    ShowOCRProgress:=True)
+                    ShowOCRProgress:=True, AllowOcrEngineChoice:=True)
 
                 If String.IsNullOrWhiteSpace(docText) Then
                     Exit Sub
@@ -2441,7 +2441,7 @@ Partial Public Class ThisAddIn
                 splash.UpdateMessage("Inserting OCR result into Word ...")
                 System.Windows.Forms.Application.DoEvents()
             Else
-                docText = Await GetFileContent(filePath, False, Not String.IsNullOrWhiteSpace(INI_APICall_Object))
+                docText = Await GetFileContent(filePath, False, SharedMethods.IsOcrAvailable(_context))
 
                 If String.IsNullOrWhiteSpace(docText) Then
                     Exit Sub
@@ -4286,37 +4286,33 @@ Partial Public Class ThisAddIn
                         ' Page text extraction failed
                     End Try
 
-                    ' If text is sparse and OCR is enabled, use OCR for this page
-                    If doOcr AndAlso (String.IsNullOrWhiteSpace(pageText) OrElse pageText.Trim().Length < 50) Then
-                        Try
-                            ProgressBarModule.GlobalProgressLabel = $"OCR processing page {pageIdx} of {pdfDoc.NumberOfPages}..."
-
-                            ' Extract single page to temp PDF for OCR
-                            Dim tempPagePdf As String = IO.Path.Combine(IO.Path.GetTempPath(), $"{AN2}_splitocr_{Guid.NewGuid():N}.pdf")
-                            Try
-                                Await System.Threading.Tasks.Task.Run(Sub() ExtractSinglePagePdf(selectedPath, pageIdx, tempPagePdf))
-
-                                Dim ocrResult As String = Await ReadPdfAsText(tempPagePdf, False, True, False, _context)
-                                If Not String.IsNullOrWhiteSpace(ocrResult) AndAlso ocrResult.Trim().Length > pageText.Trim().Length Then
-                                    pageText = ocrResult
-                                    ocrWasUsed = True
-                                End If
-                            Finally
-                                Try
-                                    If IO.File.Exists(tempPagePdf) Then IO.File.Delete(tempPagePdf)
-                                Catch
-                                End Try
-                            End Try
-                        Catch
-                            ' OCR failed for this page; use whatever text we have
-                        End Try
-                    End If
-
                     pageTexts(pageIdx) = If(pageText, String.Empty)
                 Next
             End Using
 
-        Catch ex As Exception
+            If ProgressBarModule.CancelOperation Then Return
+            If doOcr Then
+                Dim candidates = pageTexts.Keys.Where(Function(number) pageTexts(number).Trim().Length < 50).OrderBy(Function(number) number).ToList()
+                If candidates.Count > 0 Then
+                    ProgressBarModule.CancelOperation = True
+                    Dim native = System.Linq.Enumerable.Range(1, pageCount).Select(Function(number) pageTexts(number)).ToList()
+                    Dim recovered = Await SharedMethods.ReadSelectedPdfPagesAsync(selectedPath, native, candidates, _context, System.Threading.CancellationToken.None)
+                    For Each observation In recovered.ExtractionWarnings
+                        System.Diagnostics.Debug.WriteLine("Split PDF: " & observation)
+                    Next
+                    For Each covered In recovered.OcrProcessedRanges
+                        Dim number = covered.StartPage
+                        If recovered.PageTexts.Count = pageCount AndAlso recovered.PageTexts(number - 1).Trim().Length > pageTexts(number).Trim().Length Then
+                            pageTexts(number) = recovered.PageTexts(number - 1)
+                            ocrWasUsed = True
+                        End If
+                    Next
+                End If
+            End If
+        Catch ex As System.OperationCanceledException
+            ProgressBarModule.CancelOperation = True
+            Return
+        Catch ex As System.Exception
             ProgressBarModule.CancelOperation = True
             ShowCustomMessageBox($"Failed to extract text from PDF: {ex.Message}", AN)
             Return
@@ -4595,22 +4591,6 @@ Partial Public Class ThisAddIn
                 ShowCustomMessageBox($"Could not open directory: {ex.Message}", AN)
             End Try
         End If
-    End Sub
-
-    ''' <summary>
-    ''' Extracts a single page from a PDF file and saves it as a separate PDF.
-    ''' Used for per-page OCR processing during exhibit splitting.
-    ''' </summary>
-    ''' <param name="inputPath">Source PDF file path.</param>
-    ''' <param name="pageNumber">1-based page number to extract.</param>
-    ''' <param name="outputPath">Destination PDF file path for the single page.</param>
-    Private Shared Sub ExtractSinglePagePdf(inputPath As String, pageNumber As Integer, outputPath As String)
-        Using srcDoc As PdfSharp.Pdf.PdfDocument = PdfSharp.Pdf.IO.PdfReader.Open(inputPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.Import)
-            Using outDoc As New PdfSharp.Pdf.PdfDocument()
-                outDoc.AddPage(srcDoc.Pages(pageNumber - 1))
-                outDoc.Save(outputPath)
-            End Using
-        End Using
     End Sub
 
     Private NotInheritable Class MarkupAuthorScope

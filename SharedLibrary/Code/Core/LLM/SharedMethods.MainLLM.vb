@@ -1235,51 +1235,7 @@ Namespace SharedLibrary
                                 End If
                             End If
 
-                            ' --- Handle multiple ObjectCall variants with MIME-type filters ---
-                            ' Format: [mime1,mime2]variant1¦[mime3]variant2¦variant3 (unfiltered fallback)
-                            Dim variantSep As String = "¦"
-                            Dim objectCallVariants() As String = ObjectCall.Split(New String() {variantSep}, StringSplitOptions.None)
-
-                            Dim selectedObjectCall As String = Nothing
-                            Dim unfilteredObjectCall As String = Nothing
-
-                            For Each objCallEntry As String In objectCallVariants
-                                Dim trimmedEntry As String = objCallEntry.Trim()
-                                If String.IsNullOrEmpty(trimmedEntry) Then Continue For
-
-                                ' Check if entry starts with a MIME filter [...]
-                                If trimmedEntry.StartsWith("[") Then
-                                    Dim closeBracketIdx As Integer = trimmedEntry.IndexOf("]"c)
-                                    If closeBracketIdx > 0 Then
-                                        ' Extract MIME types from filter
-                                        Dim filterPart As String = trimmedEntry.Substring(1, closeBracketIdx - 1)
-                                        Dim allowedMimes() As String = filterPart.Split(","c)
-
-                                        ' Check if current mimeType matches any allowed MIME type
-                                        For Each allowedMime As String In allowedMimes
-                                            Dim normalizedAllowed As String = FixMimeType(allowedMime.Trim()).ToLowerInvariant()
-                                            If mimeType.ToLowerInvariant() = normalizedAllowed Then
-                                                ' Match found - use the entry content after the filter
-                                                selectedObjectCall = trimmedEntry.Substring(closeBracketIdx + 1).TrimStart()
-                                                Exit For
-                                            End If
-                                        Next
-
-                                        If selectedObjectCall IsNot Nothing Then Exit For
-                                    Else
-                                        ' Malformed filter (no closing bracket) - treat as unfiltered
-                                        If unfilteredObjectCall Is Nothing Then unfilteredObjectCall = trimmedEntry
-                                    End If
-                                Else
-                                    ' No filter - this is an unfiltered fallback entry
-                                    If unfilteredObjectCall Is Nothing Then unfilteredObjectCall = trimmedEntry
-                                End If
-                            Next
-
-                            ' Use selected entry, or fall back to unfiltered entry
-                            If selectedObjectCall Is Nothing Then
-                                selectedObjectCall = unfilteredObjectCall
-                            End If
+                            Dim selectedObjectCall As System.String = ResolveBinaryObjectCall(ObjectCall, mimeType)
 
                             ' If no matching entry found, show error
                             If selectedObjectCall Is Nothing Then
@@ -3358,6 +3314,27 @@ PostProcess:
                 System.Diagnostics.Debug.WriteLine("Error processing groundingSupports: " & ex.Message)
             End Try
         End Sub
+
+        ' Keep routing and the transport on the same MIME contract. An exact filter takes
+        ' precedence over the first unfiltered variant, including its legacy malformed-filter fallback.
+        Private Shared Function ResolveBinaryObjectCall(variants As System.String, mime As System.String) As System.String
+            Dim fallback As System.String = Nothing
+            For Each raw In If(variants, System.String.Empty).Split("¦"c)
+                Dim entry = raw.Trim()
+                If entry.Length = 0 Then Continue For
+                Dim closeBracket = If(entry.StartsWith("[", System.StringComparison.Ordinal), entry.IndexOf("]"c), -1)
+                If closeBracket <= 0 Then
+                    If fallback Is Nothing Then fallback = entry
+                Else
+                    For Each allowed In entry.Substring(1, closeBracket - 1).Split(","c)
+                        If System.String.Equals(FixMimeType(allowed.Trim()), mime, System.StringComparison.OrdinalIgnoreCase) Then
+                            Return entry.Substring(closeBracket + 1).TrimStart()
+                        End If
+                    Next
+                End If
+            Next
+            Return fallback
+        End Function
 
         ''' <summary>
         ''' Returns a standards-compliant MIME type for a given (possibly legacy or vendor-prefixed) MIME type.

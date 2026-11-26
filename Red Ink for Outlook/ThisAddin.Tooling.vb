@@ -218,6 +218,7 @@ Partial Public Class ThisAddIn
         ''' differ. The shared runtime still requires substantive success and, for deliverable tasks,
         ''' a host-validated deliverable before clearing the prior failure.
         ''' </summary>
+        Public Property BoundOutputTarget As Global.SharedLibrary.Agents.OptionalToolArtifactMetadata
         Public Property AllowCrossScopeAlternativeRecovery As Boolean
 
         ''' <summary>Optional artifact extension (for example .docx) that a replacement deliverable must satisfy before cross-scope recovery can clear this failure.</summary>
@@ -573,6 +574,7 @@ Partial Public Class ThisAddIn
                         "; reason=" & decision.SourceFormatAuthorityReason, "diag")
         End If
 
+        Dim memoryDecisionSource As System.String = "classifier_unavailable"
         If memoryGroundingModeIsExplicit Then
             context.SequencingState.MemoryGroundingMode = explicitMemoryGroundingMode
             context.SequencingState.MemoryGroundingAuthority =
@@ -592,14 +594,17 @@ Partial Public Class ThisAddIn
             End If
 
             decision.MemoryApplied = True
+            memoryDecisionSource = "explicit_override"
             context.Log("Bootstrap memory classification skipped because an explicit memory mode was supplied; explicit mode applied.", "diag")
         ElseIf Not HasMemoryGroundingClassifierInputsAvailable(context) Then
             context.SequencingState.MemoryGroundingMode = SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None
             context.SequencingState.MemoryGroundingAuthority = SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingAuthority.None
             context.SequencingState.ShouldExposeRecentMemoryStubs = False
             decision.MemoryApplied = True
+            memoryDecisionSource = "no_memory_inputs"
             context.Log("Bootstrap memory classification not required: no memory tools and no workflow memory available.", "diag")
         ElseIf decision.MemoryValid Then
+            memoryDecisionSource = "classifier"
             ApplyBootstrapMemoryGroundingDecision(context, decision.MemoryDecision)
             decision.MemoryApplied = True
         End If
@@ -663,6 +668,8 @@ Partial Public Class ThisAddIn
 
         context.Log("Bootstrap preflight completed: languageApplied=" & decision.LanguageApplied.ToString().ToLowerInvariant() &
                     "; memoryApplied=" & decision.MemoryApplied.ToString().ToLowerInvariant() &
+                    "; memoryDecisionSource=" & memoryDecisionSource &
+                    "; effectiveMemoryMode=" & If(context.SequencingState Is Nothing, "unavailable", context.SequencingState.MemoryGroundingMode.ToString()) &
                     "; sourceFormatAuthorityApplied=" & decision.SourceFormatAuthorityApplied.ToString().ToLowerInvariant() &
                     "; sourceFormatAuthority=" & If(context.SequencingState Is Nothing, "false", context.SequencingState.UserSuppliedSourceFormatAuthority.ToString().ToLowerInvariant()) &
                     "; routeApplied=" & decision.RouteApplied.ToString().ToLowerInvariant() &
@@ -3293,7 +3300,8 @@ Partial Public Class ThisAddIn
                                                     recoveryScopeKey:=recoveryScopeKey,
                                                     retryCorrelationArguments:=tc.Arguments,
                                                     rejectedBeforeExecution:=toolResponse.RejectedBeforeExecution,
-                                                    serviceErrorDetails:=toolResponse.ServiceErrorDetails)
+                                                    serviceErrorDetails:=toolResponse.ServiceErrorDetails,
+                                                    boundOutputTarget:=toolResponse.BoundOutputTarget)
 
                                     Dim repairHint As System.String = context.SequencingState.BuildRepairReferenceHint(tc.ToolName, recoveryScopeKey)
                                     If repairHint.Length > 0 Then

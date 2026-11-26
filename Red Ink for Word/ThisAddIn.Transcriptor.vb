@@ -62,6 +62,7 @@ Partial Public Class ThisAddIn
         Private cboLang As ComboBox
         Private cboDevice As ComboBox
         Private cboProcess As ComboBox
+        Private keepLiveAudio As System.Windows.Forms.CheckBox
         Private btnStart As Button
         Private btnStop As Button
         Private btnLoad As Button
@@ -73,6 +74,9 @@ Partial Public Class ThisAddIn
         Private tt As New ToolTip()
 
         Private _engine As ITranscriptionEngine
+        Private _live As LiveTranscriptionSession
+        Private _liveStarting As System.Boolean
+        Private _cancelLiveStart As System.Boolean
         Private _capture As AudioCaptureService
         Private _opts As New TranscriptionOptions()
         Private _capturing As Boolean
@@ -225,12 +229,18 @@ Partial Public Class ThisAddIn
             Dim mid As New TableLayoutPanel() With {
                 .Dock = DockStyle.Fill,
                 .ColumnCount = 1,
-                .RowCount = 2
+                .RowCount = 3
             }
             mid.RowStyles.Add(New RowStyle(SizeType.AutoSize))
+            mid.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
             mid.RowStyles.Add(New RowStyle(SizeType.Percent, 100))
+            keepLiveAudio = New System.Windows.Forms.CheckBox With {
+                .AutoSize = True, .Text = "Keep full live audio for WAV export when stopped"
+            }
+            tt.SetToolTip(keepLiveAudio, "Uses temporary memory during capture. A WAV is written only if you choose a file at Stop.")
+            mid.Controls.Add(keepLiveAudio, 0, 1)
             mid.Controls.Add(lblLiveState, 0, 0)
-            mid.Controls.Add(rtb, 0, 1)
+            mid.Controls.Add(rtb, 0, 2)
 
             Dim bottom As New TableLayoutPanel() With {
                 .Dock = DockStyle.Bottom,
@@ -768,6 +778,7 @@ Partial Public Class ThisAddIn
                     Return
                 End If
 
+                keepLiveAudio.Visible = EngineNeedsLocalAudioCapture(d.Kind) AndAlso Not IsFileOnlyEngine(d.Kind)
                 _currentEngineDisplayName = d.DisplayName
 
                 Select Case d.Kind
@@ -1761,7 +1772,7 @@ Partial Public Class ThisAddIn
         End Sub
 
         Private Async Sub OnStart(sender As Object, e As EventArgs)
-            If _capturing OrElse _fileTranscribing OrElse _isStopping Then
+            If _liveStarting OrElse _capturing OrElse _fileTranscribing OrElse _isStopping Then
                 Return
             End If
 
@@ -1795,77 +1806,54 @@ Partial Public Class ThisAddIn
             _currentEngineDisplayName = d.DisplayName
             SetLiveState(_currentEngineDisplayName & ": Starting…")
 
-            Dim startException As Exception = Nothing
-            Dim engineToDisposeAfterStartFailure As ITranscriptionEngine = Nothing
-            Dim ctsToDisposeAfterStartFailure As CancellationTokenSource = Nothing
-
-            Try
-                _engine = Await CreateEngineAsync(d)
-                AttachEngineEvents(_engine)
-                _cts = New CancellationTokenSource()
-
-                System.Diagnostics.Debug.WriteLine(
-                    "[Transcriptor.Live] About to call StartLiveAsync " &
-                    "Engine=" & d.DisplayName &
-                    "; LanguageCode=" & If(_opts Is Nothing OrElse String.IsNullOrWhiteSpace(_opts.LanguageCode), "(empty)", _opts.LanguageCode) &
-                    "; Model=" & If(_opts Is Nothing OrElse String.IsNullOrWhiteSpace(_opts.Model), "(empty)", _opts.Model) &
-                    "; MultiChannelDiarization=" & If(_opts IsNot Nothing AndAlso _opts.MultiChannelDiarization, "True", "False"))
-
-                Await _engine.StartLiveAsync(_opts, _cts.Token)
-            Catch ex As Exception
-                startException = ex
-                engineToDisposeAfterStartFailure = _engine
-                ctsToDisposeAfterStartFailure = _cts
-
-                _engine = Nothing
-                _cts = Nothing
-            End Try
-
-            If ctsToDisposeAfterStartFailure IsNot Nothing Then
-                Try
-                    ctsToDisposeAfterStartFailure.Dispose()
-                Catch
-                End Try
-            End If
-
-            If engineToDisposeAfterStartFailure IsNot Nothing Then
-                Try
-                    Await engineToDisposeAfterStartFailure.DisposeAsync()
-                Catch
-                End Try
-            End If
-
-            If startException IsNot Nothing Then
-                SetLiveState(_currentEngineDisplayName & ": Error.")
-                ShowTranscriptorMessageBox("Failed to start engine: " & startException.Message)
-                Return
-            End If
-
-            If EngineNeedsLocalAudioCapture(d.Kind) Then
-                _capture = New AudioCaptureService With {
-                    .MicDeviceIndex = micDeviceIndex,
-                    .MicDeviceId = micDeviceId,
-                    .SourceMode = sourceMode,
-                    .SystemAudioRenderDeviceId = GetConfiguredOutputDeviceId(),
-                    .MultiChannelStereo = _opts.MultiChannelDiarization AndAlso _engine.SupportsMultiChannelDiarization,
-                    .AudioDebugDump = _opts.AudioDebugDump OrElse INI_APIDebug
-                }
-
-                AddHandler _capture.Frame, AddressOf OnCaptureFrame
-                AddHandler _capture.CaptureError,
-                    Sub(s, ev)
-                        SetLiveState(_currentEngineDisplayName & ": Capture error: " & ev.Message)
-                    End Sub
-
-                _capture.Start()
-            End If
-
-            AcquireSleepLock()
-
-            _capturing = True
+            _liveStarting = True
+            _cancelLiveStart = False
+            _lastPartialText = ""
             ToggleCaptureUi(True)
-            PersistSettings()
-            SetLiveState(GetListeningLiveState())
+            Dim startFailure As System.Exception = Nothing
+            Try
+                Dim first = Await CreateEngineAsync(d)
+                Dim stereo = _opts.MultiChannelDiarization AndAlso first.SupportsMultiChannelDiarization
+                Dim ui = System.Threading.Tasks.TaskScheduler.FromCurrentSynchronizationContext()
+                Dim makeEngine As System.Func(Of System.Threading.Tasks.Task(Of ITranscriptionEngine)) =
+                    Function() System.Threading.Tasks.Task.Factory.StartNew(Function() CreateEngineAsync(d),
+                        System.Threading.CancellationToken.None, System.Threading.Tasks.TaskCreationOptions.None, ui).Unwrap()
+                _live = New LiveTranscriptionSession(makeEngine, _opts, If(stereo AndAlso sourceMode = AudioSourceMode.MicrophoneAndSystem, 2, 1), keepLiveAudio.Visible AndAlso keepLiveAudio.Checked)
+                AddHandler _live.PartialResult, AddressOf OnTranscriptPartial
+                AddHandler _live.FinalResult, AddressOf OnTranscriptFinal
+                AddHandler _live.Status, AddressOf OnTranscriptStatus
+                AddHandler _live.EngineError, AddressOf OnTranscriptError
+                AddHandler _live.AudioBufferFailed, AddressOf OnLiveBufferFailed
+                If _cancelLiveStart Then _live.CancelStartup()
+                Await _live.StartAsync(first)
+                If _cancelLiveStart Then Throw New System.OperationCanceledException()
+                If EngineNeedsLocalAudioCapture(d.Kind) Then
+                    _capture = New AudioCaptureService With {
+                        .MicDeviceIndex = micDeviceIndex,
+                        .MicDeviceId = micDeviceId,
+                        .SourceMode = sourceMode,
+                        .SystemAudioRenderDeviceId = GetConfiguredOutputDeviceId(),
+                        .MultiChannelStereo = stereo,
+                        .AudioDebugDump = _opts.AudioDebugDump OrElse INI_APIDebug
+                    }
+                    AddHandler _capture.Frame, AddressOf OnCaptureFrame
+                    AddHandler _capture.CaptureError, Sub(snd, ev) SetLiveState(_currentEngineDisplayName & ": Capture error: " & ev.Message)
+                    _capture.Start()
+                End If
+                AcquireSleepLock()
+                _capturing = True
+                PersistSettings()
+                SetLiveState(GetListeningLiveState())
+            Catch ex As System.Exception
+                startFailure = ex
+            Finally
+                _liveStarting = False
+            End Try
+            If startFailure IsNot Nothing Then
+                Await StopCurrentSessionAsync()
+                If Not _cancelLiveStart Then ShowTranscriptorMessageBox("Failed to start live transcription: " & startFailure.Message)
+            End If
+            ToggleCaptureUi(_capturing)
         End Sub
 
         Private Function ParseDeviceIndexFromText(deviceText As String) As Integer
@@ -1883,39 +1871,50 @@ Partial Public Class ThisAddIn
             Return idx
         End Function
 
-        Private Async Sub OnCaptureFrame(sender As Object, e As AudioCaptureService.FrameEventArgs)
-            Dim eng As ITranscriptionEngine = _engine
-            Dim ctsLocal As CancellationTokenSource = _cts
-
-            If eng Is Nothing OrElse Not _capturing OrElse ctsLocal Is Nothing Then
-                Return
-            End If
-
-            Try
-                Await eng.PushAudioAsync(e.Pcm, e.BytesValid, ctsLocal.Token)
-            Catch ex As OperationCanceledException
-            Catch ex As ObjectDisposedException
-            Catch ex As Exception
-                If Not _isStopping Then
-                    SetLiveState(_currentEngineDisplayName & ": Audio push failed: " & ex.Message)
-                End If
-            End Try
+        Private Sub OnCaptureFrame(sender As System.Object, e As AudioCaptureService.FrameEventArgs)
+            Dim session = _live
+            If session IsNot Nothing AndAlso System.Object.ReferenceEquals(sender, _capture) Then session.Append(e.Pcm, e.BytesValid)
         End Sub
 
-        Private Async Function StopCurrentSessionAsync() As Task
-            If _isStopping Then
+        Private Sub OnLiveBufferFailed(sender As System.Object, ev As TranscriptionErrorEventArgs)
+            LogSttError(_currentEngineDisplayName, ev.Message, ev.Exception)
+            If Me.IsDisposed OrElse Not Me.IsHandleCreated Then Return
+            Me.BeginInvoke(New System.Action(
+                Async Sub()
+                    If Not System.Object.ReferenceEquals(sender, _live) Then Return
+                    Await StopCurrentSessionAsync()
+                    ShowTranscriptorMessageBox(ev.Message)
+                End Sub))
+        End Sub
+
+        Private Sub OfferPendingAudio(session As LiveTranscriptionSession)
+            While session.PendingBytes > 0
+                Using dialog As New System.Windows.Forms.SaveFileDialog With {
+                    .Title = "Save retained live audio (Cancel to finish without saving)",
+                    .Filter = "WAV audio (*.wav)|*.wav",
+                    .FileName = "RedInk_recovery_" & System.DateTime.Now.ToString("yyyyMMdd_HHmmss_fff") & ".wav"
+                }
+                    If dialog.ShowDialog(Me) <> System.Windows.Forms.DialogResult.OK Then Return
+                    Try
+                        session.SavePendingPart(dialog.FileName)
+                    Catch ex As System.Exception
+                        ShowTranscriptorMessageBox("The recovery audio could not be saved. Select another file or Cancel to discard it. " & ex.Message)
+                    End Try
+                End Using
+            End While
+        End Sub
+
+        Private Async Function StopCurrentSessionAsync() As System.Threading.Tasks.Task
+            If _liveStarting Then
+                _cancelLiveStart = True
+                If _live IsNot Nothing Then _live.CancelStartup()
                 Return
             End If
-
+            If _isStopping Then Return
             _isStopping = True
-
-            Dim captureToStop As AudioCaptureService = _capture
-            Dim engineToStop As ITranscriptionEngine = _engine
-            Dim ctsToDispose As CancellationTokenSource = _cts
-
+            Dim captureToStop = _capture
+            Dim session = _live
             _capture = Nothing
-            _engine = Nothing
-            _cts = Nothing
             _capturing = False
 
             SetLiveState(_currentEngineDisplayName & ": Stopping…")
@@ -1939,30 +1938,24 @@ Partial Public Class ThisAddIn
                     End Try
                 End If
 
-                If engineToStop IsNot Nothing Then
-                    Await engineToStop.StopLiveAsync()
-                    Await engineToStop.DisposeAsync()
+                If session IsNot Nothing Then
+                    Await session.StopAsync()
+                    OfferPendingAudio(session)
                 End If
-            Catch ex As OperationCanceledException
-            Catch ex As Exception
-                SetLiveState(_currentEngineDisplayName & ": Stop error: " & ex.Message)
+            Catch ex As System.Exception
+                ShowTranscriptorMessageBox("Could not finish live transcription: " & ex.Message)
+                If session IsNot Nothing Then OfferPendingAudio(session)
             Finally
-                If ctsToDispose IsNot Nothing Then
-                    Try
-                        ctsToDispose.Cancel()
-                    Catch
-                    End Try
-
-                    Try
-                        ctsToDispose.Dispose()
-                    Catch
-                    End Try
-                End If
-
+                _live = Nothing
+                If session IsNot Nothing Then session.ReleaseBuffer()
                 ReleaseSleepLock()
                 _isStopping = False
                 ToggleCaptureUi(False)
-                SetLiveState(GetIdleLiveState())
+                If session IsNot Nothing AndAlso session.InterruptedSessions > 0 Then
+                    SetLiveState("Stopped. Live interruptions: " & session.InterruptedSessions.ToString() & ". Check the transcript around the interruptions.")
+                Else
+                    SetLiveState(GetIdleLiveState())
+                End If
 
                 If _closeAfterStop Then
                     _closeAfterStop = False
@@ -1989,7 +1982,7 @@ Partial Public Class ThisAddIn
 
 
         Private Async Sub OnQuit(sender As Object, e As EventArgs)
-            If _capturing Then
+            If _liveStarting OrElse _capturing Then
                 _closeAfterStop = True
                 Await StopCurrentSessionAsync()
             ElseIf _fileTranscribing Then
@@ -2001,7 +1994,7 @@ Partial Public Class ThisAddIn
         End Sub
 
         Private Async Sub OnLoadFile(sender As Object, e As EventArgs)
-            If _capturing OrElse _fileTranscribing OrElse _isStopping Then
+            If _liveStarting OrElse _capturing OrElse _fileTranscribing OrElse _isStopping Then
                 Return
             End If
 
@@ -2177,8 +2170,13 @@ Partial Public Class ThisAddIn
         End Sub
 
         Private Sub AttachEngineEvents(eng As ITranscriptionEngine)
-            AddHandler eng.PartialResult,
-        Sub(s, ev)
+            AddHandler eng.PartialResult, AddressOf OnTranscriptPartial
+            AddHandler eng.FinalResult, AddressOf OnTranscriptFinal
+            AddHandler eng.EngineError, AddressOf OnTranscriptError
+            AddHandler eng.Status, AddressOf OnTranscriptStatus
+        End Sub
+
+        Private Sub OnTranscriptPartial(sender As System.Object, ev As TranscriptionEventArgs)
             Dim msg As String = If(String.IsNullOrEmpty(ev.Speaker), ev.Text, ev.Speaker & ": " & ev.Text)
             If Not String.IsNullOrWhiteSpace(msg) Then
                 _lastPartialText = msg.Trim()
@@ -2186,8 +2184,7 @@ Partial Public Class ThisAddIn
             End If
         End Sub
 
-            AddHandler eng.FinalResult,
-        Sub(s, ev)
+        Private Sub OnTranscriptFinal(sender As System.Object, ev As TranscriptionEventArgs)
             Dim line As String = If(String.IsNullOrEmpty(ev.Speaker), ev.Text, ev.Speaker & ": " & ev.Text)
             SafeAppendTranscript(line)
             _lastPartialText = ""
@@ -2201,15 +2198,13 @@ Partial Public Class ThisAddIn
             End If
         End Sub
 
-            AddHandler eng.EngineError,
-        Sub(s, ev)
+        Private Sub OnTranscriptError(sender As System.Object, ev As TranscriptionErrorEventArgs)
             LogSttError(_currentEngineDisplayName, ev.Message, ev.Exception)
             SetLiveState(GetFriendlySttErrorText(_currentEngineDisplayName, ev.Message))
         End Sub
 
-            AddHandler eng.Status,
-        Sub(s, ev)
-            Dim friendly As String = GetFriendlyStatusText(_currentEngineDisplayName, ev.Message)
+        Private Sub OnTranscriptStatus(sender As System.Object, ev As TranscriptionStatusEventArgs)
+            Dim friendly As System.String = If(ev.IsSessionTransition, ev.Message, GetFriendlyStatusText(_currentEngineDisplayName, ev.Message))
             If String.IsNullOrWhiteSpace(friendly) Then
                 Return
             End If
@@ -2220,10 +2215,9 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
-            If String.IsNullOrWhiteSpace(_lastPartialText) Then
+            If ev.IsSessionTransition OrElse String.IsNullOrWhiteSpace(_lastPartialText) Then
                 SetLiveState(friendly)
             End If
-        End Sub
         End Sub
 
         Private Sub ToggleCaptureUi(capturing As Boolean)
@@ -2239,10 +2233,11 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
-            Dim busy As Boolean = capturing OrElse _capturing OrElse _fileTranscribing OrElse _isStopping
+            Dim busy As Boolean = _liveStarting OrElse capturing OrElse _capturing OrElse _fileTranscribing OrElse _isStopping
 
+            keepLiveAudio.Enabled = Not busy
             btnStart.Enabled = Not busy
-            btnStop.Enabled = _capturing OrElse _fileTranscribing
+            btnStop.Enabled = _liveStarting OrElse _capturing OrElse _fileTranscribing
             btnStop.Text = If(_fileTranscribing, "Cancel", "Stop")
             btnLoad.Enabled = Not busy
             btnOptions.Enabled = Not busy
@@ -2423,7 +2418,7 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
-            If _capturing Then
+            If _liveStarting OrElse _capturing Then
                 e.Cancel = True
                 _closeAfterStop = True
                 Await StopCurrentSessionAsync()

@@ -55,7 +55,10 @@ Partial Public Class ThisAddIn
                                          Optional OcrCleanupMode As OcrMarkdownCleanupMode = OcrMarkdownCleanupMode.None,
                                          Optional OcrBatchPages As System.Int32 = -1,
                                          Optional MarkdownPreparation As PdfMarkdownPreparationOptions = Nothing,
-                                         Optional LegacyWordRangeReader As Global.SharedLibrary.SharedLibrary.SharedMethods.WordRangeTextReader = Nothing) As System.Threading.Tasks.Task(Of FileReadResult)
+                                         Optional LegacyWordRangeReader As Global.SharedLibrary.SharedLibrary.SharedMethods.WordRangeTextReader = Nothing,
+                                         Optional AllowOcrEngineChoice As System.Boolean = False,
+                                         Optional selectedPdfOcrRoute As System.Nullable(Of Global.SharedLibrary.SharedLibrary.SharedMethods.OcrRoute) = Nothing,
+                                         Optional windowsOcrLanguageTag As System.String = Nothing) As System.Threading.Tasks.Task(Of FileReadResult)
 
         Dim result As New FileReadResult()
         Dim filePath As String = ""
@@ -128,13 +131,15 @@ Partial Public Class ThisAddIn
                             OcrBatchPages:=OcrBatchPages,
                             CancellationToken:=CancellationToken,
                             OcrCleanupMode:=OcrCleanupMode,
-                            MarkdownPreparation:=MarkdownPreparation)
+                            MarkdownPreparation:=MarkdownPreparation, AllowOcrEngineChoice:=AllowOcrEngineChoice, selectedRoute:=selectedPdfOcrRoute, windowsOcrLanguageTag:=windowsOcrLanguageTag)
                         result.OcrCleanupRawContent = pdfResult.OcrCleanupRawContent
                         result.OcrCleanupReport = pdfResult.OcrCleanupReport
                         result.MarkdownPreparationSkipped = pdfResult.MarkdownPreparationSkipped
                         result.ExtractionWarnings = Global.SharedLibrary.Agents.TextExtractionDiagnostics.CopyWarnings(pdfResult.ExtractionWarnings)
+                        If pdfResult.ErrorCode = "ocr_language_unavailable" Then result.ReadError = pdfResult.ErrorMessage
                         FromFile = pdfResult.Content
-                        result.PdfMayBeIncomplete = pdfResult.OcrWasSkippedDueToHeuristics
+                        result.PdfMayBeIncomplete = pdfResult.OcrWasSkippedDueToHeuristics OrElse
+                            (pdfResult.OcrAttempted AndAlso Not pdfResult.ExtractionComplete.GetValueOrDefault())
                     Case ".eml"
                         FromFile = ReadEmlSandboxed(filePath)
                     Case ".msg"
@@ -145,12 +150,15 @@ Partial Public Class ThisAddIn
                             Dim taskFlag = TaskFlagForExtension(ext)
                             If IsBinaryMediaSupported(_context, ext, taskFlag) Then
                                 Try
-                                    FromFile = Await ReadBinaryFileViaLLM(filePath, _context, "", AskUser, taskFlag)
+                                    FromFile = Await ReadBinaryFileViaLLM(filePath, _context, "", AskUser, taskFlag, CancellationToken, allowOcrEngineChoice:=AllowOcrEngineChoice)
                                     If String.IsNullOrWhiteSpace(FromFile) Then
                                         FromFile = ""
                                     End If
+                                Catch ex As System.OperationCanceledException
+                                    Throw
                                 Catch ex As System.Exception
                                     FromFile = ""
+                                    Global.SharedLibrary.Agents.TextExtractionDiagnostics.AddWarning(result.ExtractionWarnings, "media_extraction_failed: " & ex.Message)
                                     Debug.WriteLine("Binary media extraction failed for '" & filePath & "': " & ex.Message)
                                 End Try
                             Else
@@ -196,9 +204,10 @@ Partial Public Class ThisAddIn
                                          Optional OcrAdditionalInstruction As String = Nothing,
                                          Optional ShowOCRProgress As Boolean = False,
                                          Optional ReturnMarkdown As Boolean = False,
-                                         Optional CancellationToken As System.Threading.CancellationToken = Nothing) As Task(Of String)
+                                         Optional CancellationToken As System.Threading.CancellationToken = Nothing,
+                                         Optional AllowOcrEngineChoice As System.Boolean = False) As System.Threading.Tasks.Task(Of System.String)
 
-        Dim result = Await GetFileContentEx(optionalFilePath, Silent, DoOCR, AskUser, AskWorksheetSelection, OcrAdditionalInstruction, ShowOCRProgress, ReturnMarkdown, CancellationToken)
+        Dim result = Await GetFileContentEx(optionalFilePath, Silent, DoOCR, AskUser, AskWorksheetSelection, OcrAdditionalInstruction, ShowOCRProgress, ReturnMarkdown, CancellationToken, AllowOcrEngineChoice:=AllowOcrEngineChoice)
         Return result.Content
     End Function
 

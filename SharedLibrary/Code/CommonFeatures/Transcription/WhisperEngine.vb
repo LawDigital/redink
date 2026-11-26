@@ -365,7 +365,7 @@ Namespace Transcription
                     Try
                         hasNext = Await enumerator.MoveNextAsync()
                     Catch ex As Exception
-                        RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs("Whisper iter: " & ex.Message, ex, False))
+                        RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs("Whisper iter: " & ex.Message, ex, liveBoundaryDeduplication))
                         Exit While
                     End Try
 
@@ -408,7 +408,7 @@ Namespace Transcription
                     End If
                 End While
             Catch ex As Exception
-                RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs("Whisper proc: " & ex.Message, ex, False))
+                RaiseEvent EngineError(Me, New TranscriptionErrorEventArgs("Whisper proc: " & ex.Message, ex, liveBoundaryDeduplication))
             End Try
 
             If enumerator IsNot Nothing Then

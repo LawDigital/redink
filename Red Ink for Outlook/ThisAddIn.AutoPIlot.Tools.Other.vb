@@ -1014,7 +1014,7 @@ Partial Public Class ThisAddIn
                         Catch : End Try
                         If Path.GetExtension(filePath).ToLowerInvariant() = ".pdf" Then
                             Try
-                                text = Await SharedMethods.ReadPdfAsText(filePath, ReturnErrorInsteadOfEmpty:=True, DoOCR:=doOcr, AskUser:=False)
+                                text = Await SharedMethods.ReadPdfAsText(filePath, ReturnErrorInsteadOfEmpty:=True, DoOCR:=doOcr, AskUser:=False, context:=_context)
                                 ' The reader's explicit failure channel must never become source text,
                                 ' even when its message is longer than the service's legacy 200-char guard.
                                 If text IsNot Nothing AndAlso text.TrimStart().StartsWith("Error reading PDF:", System.StringComparison.OrdinalIgnoreCase) Then
